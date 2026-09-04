@@ -761,6 +761,59 @@ class CalibrationWorker(QtCore.QThread):
                 sys.stderr = old_err
 
 
+class ManualDspacingCalibWorker(QtCore.QThread):
+    """Fit Lsd + beam center from user-picked ring points and known d-spacings
+    (Bragg's law), entirely bypassing ``calib.run_pipeline``/``midas_calibrate_v2``
+    — used for non-crystalline calibrants (e.g. AgBH) that have no space group.
+    Tilt is fixed at 0. Same signal names as ``CalibrationWorker`` so the tab's
+    existing ``_on_done``/``_on_fail``/``_abort`` wiring works unchanged."""
+    log_line = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal(object)
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, picks, wavelength_A, pxY, pxZ, seed, NY, NZ,
+                 material_name, d_list, parent=None):
+        super().__init__(parent)
+        self._picks = list(picks)
+        self._wavelength_A = wavelength_A
+        self._pxY = pxY
+        self._pxZ = pxZ
+        self._seed = seed
+        self._NY = NY
+        self._NZ = NZ
+        self._material_name = material_name
+        self._d_list = list(d_list)
+
+    def run(self):
+        from types import SimpleNamespace
+        from midas_gui.helpers import fit_geometry_from_ring_picks
+        try:
+            self.log_line.emit(
+                f"[manual fit] fitting Lsd + BC from {len(self._picks)} picked "
+                f"points across {len(set(p[2] for p in self._picks))} ring(s), "
+                f"calibrant='{self._material_name}' (tilt fixed at 0)…")
+            fit = fit_geometry_from_ring_picks(
+                self._picks, self._wavelength_A, self._pxY, self._pxZ,
+                seed=self._seed)
+            self.log_line.emit(
+                f"[manual fit] seed={fit['seed_quality']}  success={fit['success']}  "
+                f"residual RMS={fit['residual_deg_rms']:.4f}°  ({fit['message']})")
+            if not fit["success"]:
+                self.failed.emit(f"Manual fit did not converge: {fit['message']}")
+                return
+            result = SimpleNamespace(
+                Lsd=fit["Lsd"], BC_y=fit["BC_y"], BC_z=fit["BC_z"],
+                tx=0.0, ty=0.0, tz=0.0, distortion={},
+                pxY=self._pxY, pxZ=self._pxZ or self._pxY,
+                NrPixelsY=self._NY, NrPixelsZ=self._NZ,
+                wavelength_A=self._wavelength_A, post_residual_strain_uE=None,
+                _calibrant_name=self._material_name, _d_list=list(self._d_list),
+            )
+            self.finished.emit(result)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  Single-frame integration worker (Tab 2 post-calibration preview)
 # ═════════════════════════════════════════════════════════════════════════════

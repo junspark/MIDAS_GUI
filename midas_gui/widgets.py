@@ -24,6 +24,7 @@ import pyqtgraph as pg
 
 from midas_gui.constants import COLORMAPS, DISTORTION_NAMES, DEFAULT_COLORMAP, DEVICES
 from midas_gui.dialogs import show_error, BrowseFilesDialog
+from midas_gui.helpers import fit_circle_algebraic
 from midas_gui.sim_detector import DEFAULT_CHANNEL_NAME as _SIM_CHANNEL_NAME
 
 # Default colormap: the configured one if it's a known option, else the first.
@@ -414,10 +415,15 @@ class PickableImageViewer(ImageViewer):
     """
     bcPicked  = QtCore.pyqtSignal(float, float)         # (BC_y, BC_z)
     ringFitBC = QtCore.pyqtSignal(float, float, float)  # (BC_y, BC_z, R_px)
+    dspacingPicksChanged = QtCore.pyqtSignal()
 
-    PICK_NONE = 0
-    PICK_BC   = 1
-    PICK_RING = 2
+    PICK_NONE      = 0
+    PICK_BC        = 1
+    PICK_RING      = 2
+    PICK_DSPACING  = 3
+
+    _DSP_COLORS = ["#e05656", "#56a8e0", "#7fd45a", "#e0c056",
+                   "#c066e0", "#e08c40", "#40c8c0", "#c0c0c0"]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -427,6 +433,8 @@ class PickableImageViewer(ImageViewer):
         self._ring_fit_item    = None
         self._ring_fit_center  = None
         self._bc_click_item    = None
+        self._dsp_pts:         list = []
+        self._dsp_pt_items:    list = []
 
         _BTN = ("QPushButton{padding:2px 8px;border-radius:3px}"
                 "QPushButton:checked{background:#2a7fd4;color:white;font-weight:bold}")
@@ -448,6 +456,22 @@ class PickableImageViewer(ImageViewer):
             "Click 3+ points on a ring; algebraic circle fit estimates beam center")
         self._pick_ring_btn.toggled.connect(self._on_pick_ring_toggled)
         pick_bar.addWidget(self._pick_ring_btn)
+
+        self._pick_dsp_btn = QtWidgets.QPushButton("Pick d-spacing pts")
+        self._pick_dsp_btn.setCheckable(True)
+        self._pick_dsp_btn.setStyleSheet(_BTN)
+        self._pick_dsp_btn.setToolTip(
+            "Click points on a ring, set Ring # per group, "
+            "for manual Bragg's-law geometry fitting")
+        self._pick_dsp_btn.toggled.connect(self._on_pick_dsp_toggled)
+        pick_bar.addWidget(self._pick_dsp_btn)
+
+        pick_bar.addWidget(QtWidgets.QLabel("Ring #"))
+        self._dsp_ring_spin = QtWidgets.QSpinBox()
+        self._dsp_ring_spin.setRange(1, 20)
+        self._dsp_ring_spin.setValue(1)
+        self._dsp_ring_spin.setToolTip("Ring group new d-spacing clicks are added to")
+        pick_bar.addWidget(self._dsp_ring_spin)
 
         self._undo_btn = QtWidgets.QPushButton("Undo")
         self._undo_btn.setEnabled(False)
@@ -473,6 +497,9 @@ class PickableImageViewer(ImageViewer):
             self._pick_ring_btn.blockSignals(True)
             self._pick_ring_btn.setChecked(False)
             self._pick_ring_btn.blockSignals(False)
+            self._pick_dsp_btn.blockSignals(True)
+            self._pick_dsp_btn.setChecked(False)
+            self._pick_dsp_btn.blockSignals(False)
             self._pick_mode = self.PICK_BC
             self._pick_status.setText("Click image to set BC")
         elif self._pick_mode == self.PICK_BC:
@@ -484,6 +511,9 @@ class PickableImageViewer(ImageViewer):
             self._pick_bc_btn.blockSignals(True)
             self._pick_bc_btn.setChecked(False)
             self._pick_bc_btn.blockSignals(False)
+            self._pick_dsp_btn.blockSignals(True)
+            self._pick_dsp_btn.setChecked(False)
+            self._pick_dsp_btn.blockSignals(False)
             self._pick_mode = self.PICK_RING
             n = len(self._ring_pts)
             self._pick_status.setText(
@@ -494,6 +524,24 @@ class PickableImageViewer(ImageViewer):
             self._pick_status.setText(
                 f"{len(self._ring_pts)} ring pts (mode off)"
                 if self._ring_pts else "")
+
+    def _on_pick_dsp_toggled(self, checked: bool):
+        if checked:
+            self._pick_bc_btn.blockSignals(True)
+            self._pick_bc_btn.setChecked(False)
+            self._pick_bc_btn.blockSignals(False)
+            self._pick_ring_btn.blockSignals(True)
+            self._pick_ring_btn.setChecked(False)
+            self._pick_ring_btn.blockSignals(False)
+            self._pick_mode = self.PICK_DSPACING
+            n = len(self._dsp_pts)
+            self._pick_status.setText(
+                f"{n} pts — click ring to add (Ring #{self._dsp_ring_spin.value()})")
+        elif self._pick_mode == self.PICK_DSPACING:
+            self._pick_mode = self.PICK_NONE
+            self._pick_status.setText(
+                f"{len(self._dsp_pts)} d-spacing pts (mode off)"
+                if self._dsp_pts else "")
 
     def _on_scene_clicked(self, event):
         if self._pick_mode == self.PICK_NONE:
@@ -509,6 +557,8 @@ class PickableImageViewer(ImageViewer):
             self._pick_bc_btn.setChecked(False)   # one-shot
         elif self._pick_mode == self.PICK_RING:
             self._add_ring_point(x, y)
+        elif self._pick_mode == self.PICK_DSPACING:
+            self._add_dspacing_point(x, y)
 
     def _set_bc_marker(self, x: float, y: float):
         if self._bc_click_item is not None:
@@ -532,6 +582,9 @@ class PickableImageViewer(ImageViewer):
         self._update_ring_fit()
 
     def _undo_ring_point(self):
+        if self._pick_mode == self.PICK_DSPACING:
+            self._undo_dspacing_point()
+            return
         if not self._ring_pts:
             return
         self._ring_pts.pop()
@@ -542,6 +595,9 @@ class PickableImageViewer(ImageViewer):
         self._update_ring_fit()
 
     def _clear_ring_points(self):
+        if self._pick_mode == self.PICK_DSPACING:
+            self._clear_dspacing_points()
+            return
         for item in self._ring_pt_items:
             self._iv.removeItem(item)
         self._ring_pt_items.clear()
@@ -559,6 +615,49 @@ class PickableImageViewer(ImageViewer):
             "Click on a ring to pick points (need ≥3)"
             if self._pick_mode == self.PICK_RING else
             "Click image to set BC" if self._pick_mode == self.PICK_BC else "")
+
+    def _add_dspacing_point(self, x: float, y: float):
+        ring_idx = self._dsp_ring_spin.value()
+        self._dsp_pts.append((x, y, ring_idx))
+        color = self._DSP_COLORS[(ring_idx - 1) % len(self._DSP_COLORS)]
+        dot = pg.ScatterPlotItem(
+            [x], [y], symbol="o", size=10,
+            pen=pg.mkPen(color, width=1.5), brush=pg.mkBrush(color))
+        self._iv.addItem(dot)
+        self._dsp_pt_items.append(dot)
+        self._undo_btn.setEnabled(True)
+        self._clear_ring_btn.setEnabled(True)
+        n = len(self._dsp_pts)
+        self._pick_status.setText(f"{n} pts — click ring to add (Ring #{ring_idx})")
+        self.dspacingPicksChanged.emit()
+
+    def _undo_dspacing_point(self):
+        if not self._dsp_pts:
+            return
+        self._dsp_pts.pop()
+        if self._dsp_pt_items:
+            self._iv.removeItem(self._dsp_pt_items.pop())
+        self._undo_btn.setEnabled(bool(self._dsp_pts))
+        self._clear_ring_btn.setEnabled(bool(self._dsp_pts))
+        n = len(self._dsp_pts)
+        self._pick_status.setText(
+            f"{n} pts — click ring to add (Ring #{self._dsp_ring_spin.value()})"
+            if n else "Click on a ring to pick points")
+        self.dspacingPicksChanged.emit()
+
+    def _clear_dspacing_points(self):
+        for item in self._dsp_pt_items:
+            self._iv.removeItem(item)
+        self._dsp_pt_items.clear()
+        self._dsp_pts.clear()
+        self._undo_btn.setEnabled(False)
+        self._clear_ring_btn.setEnabled(False)
+        self._pick_status.setText("Click on a ring to pick points")
+        self.dspacingPicksChanged.emit()
+
+    def dspacing_picks(self) -> list:
+        """Read-only snapshot of picked (x, y, ring_idx) points."""
+        return list(self._dsp_pts)
 
     def _update_ring_fit(self):
         n = len(self._ring_pts)
@@ -594,20 +693,7 @@ class PickableImageViewer(ImageViewer):
     @staticmethod
     def _fit_circle(pts: list) -> Optional[tuple]:
         """Algebraic least-squares circle fit.  Returns (cx, cy, r) or None."""
-        arr = np.array(pts, dtype=np.float64)
-        x, y = arr[:, 0], arr[:, 1]
-        A = np.column_stack([x, y, np.ones(len(x))])
-        b = -(x ** 2 + y ** 2)
-        try:
-            res, _, rank, _ = np.linalg.lstsq(A, b, rcond=None)
-        except np.linalg.LinAlgError:
-            return None
-        if rank < 3:
-            return None
-        D, E, F = res
-        cx, cy = -D / 2, -E / 2
-        r2 = cx ** 2 + cy ** 2 - F
-        return (cx, cy, math.sqrt(r2)) if r2 > 0 else None
+        return fit_circle_algebraic(pts)
 
 
 def _add_auto_manual_buttons(plot_widget: "pg.PlotWidget", on_auto, on_manual):

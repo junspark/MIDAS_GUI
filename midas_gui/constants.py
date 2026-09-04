@@ -184,6 +184,12 @@ MATERIALS = {
     "Pt (FCC)":          dict(a=3.9242, b=3.9242, c=3.9242,  alpha=90, beta=90, gamma=90,  sg=225),
     "W (BCC)":           dict(a=3.16525, b=3.16525, c=3.16525, alpha=90, beta=90, gamma=90, sg=229),
     "Ti (HCP)":          dict(a=2.9508, b=2.9508, c=4.6855,  alpha=90, beta=90, gamma=120, sg=194),
+    # Non-crystalline standard: a lamellar/smectic structure, not a 3-D
+    # lattice, so it's defined directly by its d-spacings rather than
+    # space-group + lattice parameters. d(001) = 58.380 A is the standard
+    # literature/NIST-traceable long spacing for silver behenate; harmonics
+    # 1-10 cover the practically observable SAXS/WAXS range.
+    "AgBH (silver behenate)": dict(kind="dspacing", d_list=[58.380 / n for n in range(1, 11)]),
 }
 
 
@@ -250,7 +256,17 @@ DEFAULT_TRXRD_MASK   = str(_TEST_DATA_PP / "invert_mask.tif")
 
 # ── User / group config overlay ─────────────────────────────────────────────────
 def _coerce_material(d: dict) -> dict:
-    """Validate + normalise a material dict (raises on missing/invalid keys)."""
+    """Validate + normalise a material dict (raises on missing/invalid keys).
+
+    Two kinds: "lattice" (default, a/b/c/alpha/beta/gamma/sg — ring radii
+    computed via space-group crystallography) and "dspacing" (a bare list
+    of d-spacings in Angstrom, for non-crystalline standards like silver
+    behenate that have no space group to derive rings from)."""
+    if d.get("kind") == "dspacing":
+        d_list = [float(x) for x in d["d_list"]]
+        if not d_list:
+            raise ValueError("d_list must have at least one d-spacing")
+        return {"kind": "dspacing", "d_list": d_list}
     m = {k: float(d[k]) for k in ("a", "b", "c", "alpha", "beta", "gamma")}
     m["sg"] = int(d["sg"])
     return m
