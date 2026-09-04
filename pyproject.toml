@@ -124,4 +124,7 @@ include = ["midas_gui*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra -q"
+# basetemp keeps every tmp_path-based test's scratch output under the repo's
+# own .scratch/ (gitignored) instead of scattering pytest-NNNN dirs across
+# /tmp indefinitely — `rm -rf .scratch` clears it all in one place.
+addopts = "-ra -q --basetemp=.scratch/pytest"
