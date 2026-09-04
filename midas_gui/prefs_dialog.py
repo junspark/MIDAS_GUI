@@ -391,13 +391,21 @@ class PreferencesDialog(QtWidgets.QDialog):
         paths = cfg.get("paths", {})
         for key, ed in self._paths.items():
             ed.setText(str(paths.get(key, "") or ""))
+        # "dspacing"-kind materials (e.g. AgBH) have no a/b/c/SG to show in
+        # this lattice-only table — they're only editable from the Ring
+        # Simulation "+ Add material" dialog for now, so skip them here
+        # rather than rendering broken "None" cells.
         self._mat_table.setRowCount(0)
         for name, m in (cfg.get("materials", {}) or {}).items():
+            if m.get("kind") == "dspacing":
+                continue
             self._add_row(self._mat_table, _MAT_HEADERS,
                           [name, m.get("a"), m.get("b"), m.get("c"),
                            m.get("alpha"), m.get("beta"), m.get("gamma"), m.get("sg")])
         self._cal_table.setRowCount(0)
         for name, m in (cfg.get("calibrants", {}) or {}).items():
+            if m.get("kind") == "dspacing":
+                continue
             self._add_row(self._cal_table, _MAT_HEADERS,
                           [name, m.get("a"), m.get("b"), m.get("c"),
                            m.get("alpha"), m.get("beta"), m.get("gamma"), m.get("sg")])
@@ -466,10 +474,19 @@ class PreferencesDialog(QtWidgets.QDialog):
             "bc": self._st_bc.value(), "tilt": self._st_tilt.value(),
         }
         paths = {k: ed.text().strip() for k, ed in self._paths.items() if ed.text().strip()}
+        # "materials" here REPLACES the whole live MATERIALS dict (see
+        # constants._apply). The table can't represent "dspacing"-kind
+        # entries (e.g. AgBH — see _populate's skip above), so carry those
+        # forward from the current live dict or a Save would silently drop
+        # them from the user's profile.
+        materials = self._mat_dict(self._mat_table)
+        for name, m in C.MATERIALS.items():
+            if m.get("kind") == "dspacing" and name not in materials:
+                materials[name] = dict(m)
         return {
             "geometry": geo,
             "viewer_steps": viewer_steps,
-            "materials": self._mat_dict(self._mat_table),
+            "materials": materials,
             "calibrants": self._mat_dict(self._cal_table),
             "devices": self._device_list(self._dev_table),
             "paths": paths,

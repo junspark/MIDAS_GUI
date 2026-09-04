@@ -19,16 +19,16 @@ import pyqtgraph as pg
 from midas_gui.constants import (
     CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, _SG, _LC, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
     DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_CALIBRANT_TIF,
-    DISTORTION_NAMES)
+    DISTORTION_NAMES, MATERIALS)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label, tilted_ring_xy, refresh_combo_items,
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
-    paramstest_pairs)
+    paramstest_pairs, parse_dspacing_text)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, DataLoaderPanel, CakeViewer,
     RingResidualViewer, build_lab_frame_axes_items, ring_azimuth_residual)
-from midas_gui.workers import CalibrationWorker, IntegrationWorker
+from midas_gui.workers import CalibrationWorker, IntegrationWorker, ManualDspacingCalibWorker
 from midas_gui.dialogs import _SaveParamstestDialog, DistortionRefineDialog, show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_calib_page import HydraCalibrationPage
@@ -196,6 +196,38 @@ class CalibrationTab(QtWidgets.QWidget):
         tb2.addWidget(self._flip_y); tb2.addWidget(self._flip_z); tb2.addWidget(self._transp); tb2.addStretch(1)
         det.body.addWidget(S.LabelRight("Transforms:")); det.body.addLayout(tb2)
         lv.addWidget(det)
+
+        # ── Manual ring-picking (non-crystalline calibrants) ──
+        manual = S.make_card("Manual ring-picking (non-crystalline calibrants)")
+        manual_hint = QtWidgets.QLabel(
+            "For calibrants with no space group (e.g. AgBH): pick points on the "
+            "image with 'Pick d-spacing pts' below, tag each with its Ring #, "
+            "then fit Lsd + beam center directly from Bragg's law. Bypasses the "
+            "Calibrant dropdown above; tilt is fixed at 0.")
+        manual_hint.setStyleSheet(f"color:{S.MUTED};font-size:10px"); manual_hint.setWordWrap(True)
+        manual.body.addWidget(manual_hint)
+        self._dsp_material = _NoScrollComboBox()
+        self._dsp_material.addItems(
+            [n for n, m in MATERIALS.items() if m.get("kind") == "dspacing"]
+            + ["Custom d-spacings…"])
+        manual.body.addLayout(S.Form().row(("Material:", self._dsp_material)))
+        self._dsp_custom_ed = QtWidgets.QLineEdit()
+        self._dsp_custom_ed.setPlaceholderText(
+            "Custom d-spacings (Å), comma/space-separated, e.g. 58.38 29.19 19.46")
+        self._dsp_custom_ed.setVisible(False)
+        manual.body.addWidget(self._dsp_custom_ed)
+        self._dsp_material.currentTextChanged.connect(self._on_dsp_material_changed)
+        self._dsp_custom_ed.textChanged.connect(self._on_dspacing_picks_changed)
+        self._dsp_summary = QtWidgets.QLabel("No points picked yet.")
+        self._dsp_summary.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._dsp_summary.setWordWrap(True)
+        manual.body.addWidget(self._dsp_summary)
+        self._dsp_fit_btn = QtWidgets.QPushButton("Fit Geometry (manual)")
+        self._dsp_fit_btn.setEnabled(False)
+        self._dsp_fit_btn.setToolTip(
+            "Fit Lsd + beam center from the picked d-spacing points (need ≥3 valid points).")
+        self._dsp_fit_btn.clicked.connect(self._run_manual_fit)
+        manual.body.addWidget(self._dsp_fit_btn)
+        lv.addWidget(manual)
 
         # ── Threshold (calibration image only) ──
         thr = S.make_card("Threshold  (pixels below → 0, calibration image)")
@@ -380,6 +412,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._img_view = PickableImageViewer()
         self._img_view.bcPicked.connect(self._on_bc_picked)
         self._img_view.ringFitBC.connect(self._on_ring_fit_bc)
+        self._img_view.dspacingPicksChanged.connect(self._on_dspacing_picks_changed)
         tb = self._img_view._toolbar_layout
         self._show_rings_check = QtWidgets.QCheckBox("Show rings"); self._show_rings_check.setChecked(True)
         self._show_rings_check.toggled.connect(self._on_show_rings_toggled)
@@ -783,6 +816,86 @@ class CalibrationTab(QtWidgets.QWidget):
         self._log.append(
             f"Ring fit: BC=({bc_y:.2f}, {bc_z:.2f}) px  R={r_px:.1f} px — manual seed enabled")
 
+    # ── Manual d-spacing ring-picking fit (non-crystalline calibrants) ──
+
+    def _manual_d_list(self) -> list:
+        """Current material's d-spacings (Å), sorted descending — Ring #1 is
+        the largest d-spacing, matching ``simulate_rings_from_dspacings``'s
+        ``order`` numbering."""
+        name = self._dsp_material.currentText()
+        if name == "Custom d-spacings…":
+            d_list = parse_dspacing_text(self._dsp_custom_ed.text())
+        else:
+            d_list = list(MATERIALS.get(name, {}).get("d_list", []))
+        return sorted(d_list, reverse=True)
+
+    def _on_dsp_material_changed(self, text: str):
+        self._dsp_custom_ed.setVisible(text == "Custom d-spacings…")
+        self._on_dspacing_picks_changed()
+
+    def _on_dspacing_picks_changed(self, *_args):
+        picks = self._img_view.dspacing_picks()
+        d_list = self._manual_d_list()
+        counts: dict = {}
+        invalid = 0
+        for _, _, ring_idx in picks:
+            if 1 <= ring_idx <= len(d_list):
+                counts[ring_idx] = counts.get(ring_idx, 0) + 1
+            else:
+                invalid += 1
+        parts = [f"Ring {i} (d={d_list[i-1]:.3f} Å): {n} pts"
+                 for i, n in sorted(counts.items())]
+        if invalid:
+            parts.append(f"{invalid} pt(s) on a ring # beyond this material's "
+                         f"{len(d_list)} d-spacings (invalid)")
+        self._dsp_summary.setText("   ".join(parts) if parts else "No points picked yet.")
+        self._dsp_fit_btn.setEnabled(bool(d_list) and (len(picks) - invalid) >= 3)
+
+    def _run_manual_fit(self):
+        if self._worker and self._worker.isRunning():
+            return
+        d_list = self._manual_d_list()
+        if not d_list:
+            show_error(self, "Manual fit",
+                       "No d-spacing list — pick a Material or enter custom d-spacings.")
+            return
+        picks = [(x, y, d_list[ring_idx - 1])
+                for x, y, ring_idx in self._img_view.dspacing_picks()
+                if 1 <= ring_idx <= len(d_list)]
+        if len(picks) < 3:
+            show_error(self, "Manual fit", "Need at least 3 valid picked points.")
+            return
+        self._orphans = [o for o in self._orphans if o.isRunning()]
+        pxY = self._pxY.value()
+        pxZ = self._pxZ_spin.value() if self._pxZ_check.isChecked() else pxY
+        seed = None
+        if self._manual_seed_check.isChecked():
+            seed = (self._seed_lsd.value() * 1000.0,   # mm display → µm
+                    self._seed_bcy.value(), self._seed_bcz.value())
+        img = self._img_view._data
+        NZ, NY = img.shape[:2] if img is not None else (0, 0)
+        material_name = self._dsp_material.currentText()
+
+        self._calib_cancelled = False
+        self._run_btn.setEnabled(False); self._dsp_fit_btn.setEnabled(False)
+        self._abort_btn.setEnabled(True)
+        self._prog.setVisible(True)
+        self._bot_tabs.setCurrentWidget(self._log)
+        self._log.append("─" * 40 + "\nStarting manual d-spacing fit…")
+
+        self._last_dist_coeffs = set()
+        self._worker = ManualDspacingCalibWorker(
+            picks, self._wl.value(), pxY, pxZ, seed, NY, NZ, material_name, d_list,
+            parent=self)
+        self._worker.log_line.connect(self._log.append)
+        self._worker.finished.connect(self._on_manual_fit_done)
+        self._worker.failed.connect(self._on_fail)
+        self._worker.start()
+
+    def _on_manual_fit_done(self, result):
+        self._dsp_fit_btn.setEnabled(True)
+        self._on_done(result)
+
     # ── Run ────────────────────────────────────────────────────────
 
     def _refine_flags(self) -> dict:
@@ -905,6 +1018,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._orphans.append(w)
         self._worker = None           # free the slot so _run can start again now
         self._run_btn.setEnabled(True)
+        self._on_dspacing_picks_changed()   # restore correct manual-fit button state
         self._abort_btn.setEnabled(False); self._abort_btn.setText("Abort")
         self._prog.setVisible(False)
         self._log.append("Calibration aborted — you can start a new run now "

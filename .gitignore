@@ -55,6 +55,10 @@ htmlcov/
 .loglogin
 .smoke_test_log.txt
 
+# Scratch space for ad-hoc verification scripts/output (Claude's and pytest's
+# --basetemp both land here) — never anything worth keeping, safe to wipe.
+.scratch/
+
 # Local Claude working context (plans, ported context, notes)
 claude/
 CLAUDE.md

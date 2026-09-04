@@ -211,10 +211,11 @@ _DETECTOR_FILENAME_TAGS = (
     (".ge1", "ge"), (".ge2", "ge"), (".ge3", "ge"), (".ge4", "ge"), (".ge5", "ge"),
     (".vrx", "vrx"),
     (".pxrd", "pxrd"),
+    (".pmg", "pimega"),
 )
 # Pixel size (µm) for each recognized detector tag. No entry for "pxrd" —
 # Pixirad is identified but its pixel size isn't auto-populated (not given).
-_DETECTOR_PIXEL_UM = {"ge": 200.0, "vrx": 150.0}
+_DETECTOR_PIXEL_UM = {"ge": 200.0, "vrx": 150.0, "pimega": 55.0}
 # HDF5 dataset holding the beam energy (keV) used to derive wavelength, on the
 # beamlines above — confirmed as the authoritative source over the other
 # energy-like datasets present in these files (HRM/IDEnergy readbacks, which
@@ -488,6 +489,14 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
 
 def _predict_ring_radii(result) -> list:
     """Predicted ring radii (px) for the result's calibrant geometry."""
+    d_list = getattr(result, "_d_list", None)
+    if d_list:
+        try:
+            rings = simulate_rings_from_dspacings(
+                d_list, result.wavelength_A, result.Lsd, result.pxY)
+            return sorted({round(r["radius_px"], 3) for r in rings})
+        except Exception:
+            return []
     try:
         from midas_hkls import SpaceGroup, Lattice, generate_hkls
         cal = getattr(result, "_calibrant_name", "CeO2")
@@ -534,6 +543,161 @@ def simulate_rings(lattice: dict, sg: int, wavelength_A: float, lsd_um: float,
         })
     out.sort(key=lambda d: d["radius_px"])
     return out
+
+
+def simulate_rings_from_dspacings(d_list, wavelength_A: float, lsd_um: float,
+                                  px_um: float, max_2theta_deg: float = 30.0) -> list:
+    """Simulate Debye-Scherrer ring radii (px) for an explicit list of
+    d-spacings (Angstrom) — for non-crystalline standards (e.g. silver
+    behenate) that have no space group to derive rings from.
+
+    Returns the same per-ring dict shape as :func:`simulate_rings`
+    (radius_px, two_theta_deg, hkl, d_spacing) plus ``order`` (the 1-based
+    index into the sorted, largest-d-first list); ``hkl`` is always None.
+    """
+    out = []
+    for i, d in enumerate(sorted(d_list, reverse=True), start=1):
+        if d <= 0:
+            continue
+        s = wavelength_A / (2.0 * d)
+        if s > 1.0:
+            continue  # this order isn't reachable at this wavelength
+        two_theta_deg = 2.0 * math.degrees(math.asin(s))
+        if two_theta_deg > max_2theta_deg:
+            continue
+        radius_px = lsd_um * math.tan(math.radians(two_theta_deg)) / px_um
+        out.append({
+            "radius_px": radius_px,
+            "two_theta_deg": two_theta_deg,
+            "hkl": None,
+            "order": i,
+            "d_spacing": float(d),
+        })
+    out.sort(key=lambda r: r["radius_px"])
+    return out
+
+
+def parse_dspacing_text(text: str) -> list:
+    """Parse a comma/whitespace-separated d-spacing list (Angstrom) from a
+    text field, dropping blank/unparsable/non-positive tokens. Shared by the
+    Ring Simulation material dialog and the Calibrate tab's manual
+    d-spacing ring-picking fit."""
+    out = []
+    for tok in re.split(r"[,\s]+", text.strip()):
+        if not tok:
+            continue
+        try:
+            d = float(tok)
+        except ValueError:
+            continue
+        if d > 0:
+            out.append(d)
+    return out
+
+
+def fit_circle_algebraic(pts: list) -> Optional[tuple]:
+    """Algebraic least-squares circle fit through ``pts`` (x, y). Returns
+    ``(cx, cy, r)`` or ``None`` if the points are too few/collinear."""
+    arr = np.array(pts, dtype=np.float64)
+    x, y = arr[:, 0], arr[:, 1]
+    A = np.column_stack([x, y, np.ones(len(x))])
+    b = -(x ** 2 + y ** 2)
+    try:
+        res, _, rank, _ = np.linalg.lstsq(A, b, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    if rank < 3:
+        return None
+    D, E, F = res
+    cx, cy = -D / 2, -E / 2
+    r2 = cx ** 2 + cy ** 2 - F
+    return (cx, cy, math.sqrt(r2)) if r2 > 0 else None
+
+
+def _auto_seed_from_picks(picks, wavelength_A: float, pxY_um: float, pxZ_um: float):
+    """Rough (Lsd, BC_y, BC_z) seed from picked (Y_px, Z_px, d_spacing) points,
+    used when the caller doesn't supply one for :func:`fit_geometry_from_ring_picks`.
+    Groups points by exact d-spacing (one group per picked ring), algebraically
+    circle-fits each group, and combines the per-ring centers/radii into a
+    single seed. Falls back to the image center / a generic 1 m Lsd if no
+    group has enough points (>=3) to circle-fit."""
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for y, z, d in picks:
+        groups[d].append((y, z))
+    centers, lsds = [], []
+    for d, pts in groups.items():
+        if len(pts) < 3:
+            continue
+        fit = fit_circle_algebraic(pts)
+        if fit is None:
+            continue
+        cy, cz, r = fit
+        centers.append((cy, cz))
+        s = wavelength_A / (2.0 * d)
+        if 0 < s <= 1.0:
+            two_theta_deg = 2.0 * math.degrees(math.asin(s))
+            if two_theta_deg > 0:
+                lsds.append(r * pxY_um / math.tan(math.radians(two_theta_deg)))
+    if not centers:
+        ys = [p[0] for p in picks]; zs = [p[1] for p in picks]
+        bc_y = sum(ys) / len(ys) if ys else 0.0
+        bc_z = sum(zs) / len(zs) if zs else 0.0
+        return (1.0e6, bc_y, bc_z, "fallback")
+    bc_y = float(np.median([c[0] for c in centers]))
+    bc_z = float(np.median([c[1] for c in centers]))
+    lsd = float(np.median(lsds)) if lsds else 1.0e6
+    return (lsd, bc_y, bc_z, "ok")
+
+
+def fit_geometry_from_ring_picks(picks, wavelength_A: float, pxY_um: float,
+                                 pxZ_um: float, seed=None) -> dict:
+    """Fit detector Lsd + beam center (BC_y, BC_z) from user-picked ring points
+    and their known d-spacings, bypassing any crystallographic calibrant
+    backend entirely (tilt is fixed at 0 — a plain untilted Debye-Scherrer
+    geometry). ``picks`` is an iterable of (Y_px, Z_px, d_spacing_A) triples;
+    points on the same ring share the same d-spacing value.
+
+    For each picked point, the *observed* 2theta implied by a trial geometry
+    is ``atan2(r_px, Lsd)`` where ``r_px`` is the radial pixel distance from
+    the trial beam center (this is the untilted case of the same forward
+    model used by :func:`tilted_ring_xy`/``_draw_corrected_rings``). The
+    residual against the *expected* 2theta from Bragg's law
+    (``2*asin(wavelength/(2*d))``) is minimized over (Lsd, BC_y, BC_z).
+
+    Returns a dict with ``Lsd``, ``BC_y``, ``BC_z`` (µm/px), ``residual_deg_rms``,
+    ``success``, ``message``, and ``seed_quality`` ("ok"/"fallback"/"given").
+    """
+    from scipy.optimize import least_squares
+    picks = list(picks)
+    pts = np.array([(p[0], p[1]) for p in picks], dtype=np.float64)
+    d = np.array([p[2] for p in picks], dtype=np.float64)
+    s = np.clip(wavelength_A / (2.0 * d), -1.0, 1.0)
+    two_theta_calc = 2.0 * np.degrees(np.arcsin(s))
+
+    if seed is None:
+        lsd0, bcy0, bcz0, seed_quality = _auto_seed_from_picks(
+            picks, wavelength_A, pxY_um, pxZ_um)
+    else:
+        lsd0, bcy0, bcz0 = seed
+        seed_quality = "given"
+
+    def resid(p):
+        Lsd, bc_y, bc_z = p
+        Yc = (bc_y - pts[:, 0]) * pxY_um
+        Zc = (pts[:, 1] - bc_z) * pxZ_um
+        r = np.hypot(Yc, Zc)
+        two_theta_obs = np.degrees(np.arctan2(r, Lsd))
+        return two_theta_obs - two_theta_calc
+
+    sol = least_squares(resid, [lsd0, bcy0, bcz0], method="lm")
+    Lsd, bc_y, bc_z = (float(v) for v in sol.x)
+    return {
+        "Lsd": Lsd, "BC_y": bc_y, "BC_z": bc_z,
+        "residual_deg_rms": float(np.sqrt(np.mean(sol.fun ** 2))),
+        "success": bool(sol.success), "message": str(sol.message),
+        "seed_quality": seed_quality,
+    }
 
 
 def _tilt_matrix_np(tx_deg: float, ty_deg: float, tz_deg: float) -> np.ndarray:

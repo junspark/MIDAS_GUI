@@ -14,6 +14,7 @@ the tab's lifetime) or several (rebound each time the active panel changes).
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -28,11 +29,13 @@ from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM
                            DEFAULT_STEP_TILT)
 from midas_gui.dialogs import show_error
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _browse,
-                         simulate_rings, read_geometry, geometry_fields_from_file,
+                         simulate_rings, simulate_rings_from_dspacings,
+                         read_geometry, geometry_fields_from_file,
                          _spec_from_result_ns, _NoScrollComboBox,
                          make_kedge_label, make_pixel_label, tilted_ring_xy,
                          write_poni, write_standalone_paramstest,
-                         im_trans_codes_from_checkboxes, _apply_im_trans)
+                         im_trans_codes_from_checkboxes, _apply_im_trans,
+                         parse_dspacing_text)
 from midas_gui.workers import build_integration_context, integrate_frame
 from midas_gui import style as S
 
@@ -42,8 +45,18 @@ _MATERIAL_COLORS = ("#f0c060", "#4fc3f7", "#ab47bc", "#66bb6a", "#ef5350",
                      "#ffca28", "#26a69a", "#ec407a", "#7e57c2", "#8d6e63")
 
 
+_CUSTOM_DSPACING = "Custom (d-spacings)"
+
+# Lattice defaults used to seed the (hidden) lattice widgets when a material
+# has no a/b/c/.../sg of its own yet — a "dspacing"-kind material (e.g.
+# AgBH) or a brand-new dialog opened straight into d-spacing mode.
+_FALLBACK_LATTICE = dict(a=5.4116, b=5.4116, c=5.4116, alpha=90.0, beta=90.0, gamma=90.0, sg=225)
+
+
 class MaterialDialog(QtWidgets.QDialog):
-    """Edit one ring-simulation material: name, preset, lattice, space group."""
+    """Edit one ring-simulation material: name, preset, and either a
+    lattice + space group (crystalline) or an explicit list of d-spacings
+    (non-crystalline standards, e.g. silver behenate)."""
 
     def __init__(self, material: dict, parent=None):
         super().__init__(parent)
@@ -57,32 +70,51 @@ class MaterialDialog(QtWidgets.QDialog):
         for name in MATERIALS:
             self._preset.addItem(name)
         self._preset.addItem("Custom")
-        idx = self._preset.findText(material.get("preset", "Custom"))
-        self._preset.setCurrentIndex(idx if idx >= 0 else self._preset.findText("Custom"))
+        self._preset.addItem(_CUSTOM_DSPACING)
+        default_preset = _CUSTOM_DSPACING if material.get("kind") == "dspacing" else "Custom"
+        idx = self._preset.findText(material.get("preset", default_preset))
+        self._preset.setCurrentIndex(idx if idx >= 0 else self._preset.findText(default_preset))
         self._preset.currentTextChanged.connect(self._on_preset)
         v.addLayout(S.Form().row(("Preset:", self._preset)))
 
+        latt0 = _FALLBACK_LATTICE if material.get("kind") == "dspacing" else material
         _LW, _AW = 78, 66     # compact lattice / angle-SG cell widths
-        self._a = _fspin(0.1, 100.0, 3, material["a"]); self._a.setFixedWidth(_LW)
-        self._b = _fspin(0.1, 100.0, 3, material["b"]); self._b.setFixedWidth(_LW)
-        self._c = _fspin(0.1, 100.0, 3, material["c"]); self._c.setFixedWidth(_LW)
-        self._al = _fspin(1.0, 179.0, 2, material["alpha"]); self._al.setFixedWidth(_AW)
-        self._be = _fspin(1.0, 179.0, 2, material["beta"]); self._be.setFixedWidth(_AW)
-        self._ga = _fspin(1.0, 179.0, 2, material["gamma"]); self._ga.setFixedWidth(_AW)
-        self._sg = _NoScrollSpinBox(); self._sg.setRange(1, 230); self._sg.setValue(material["sg"])
+        self._a = _fspin(0.1, 100.0, 3, latt0["a"]); self._a.setFixedWidth(_LW)
+        self._b = _fspin(0.1, 100.0, 3, latt0["b"]); self._b.setFixedWidth(_LW)
+        self._c = _fspin(0.1, 100.0, 3, latt0["c"]); self._c.setFixedWidth(_LW)
+        self._al = _fspin(1.0, 179.0, 2, latt0["alpha"]); self._al.setFixedWidth(_AW)
+        self._be = _fspin(1.0, 179.0, 2, latt0["beta"]); self._be.setFixedWidth(_AW)
+        self._ga = _fspin(1.0, 179.0, 2, latt0["gamma"]); self._ga.setFixedWidth(_AW)
+        self._sg = _NoScrollSpinBox(); self._sg.setRange(1, 230); self._sg.setValue(latt0["sg"])
         self._sg.setFixedWidth(_AW)
         self._cubic = QtWidgets.QCheckBox("Cubic (a=b=c, α=β=γ=90°)")
         self._cubic.setToolTip("Enter only a — b and c mirror it and all angles are fixed at 90°.")
         self._cubic.setChecked(bool(material.get("cubic", False)))
-        self._cubic.toggled.connect(self._apply_lattice_enabled)
+        self._cubic.toggled.connect(self._apply_mode)
         self._a.valueChanged.connect(self._on_a_changed)
+        self._latt_widget = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(self._latt_widget)
+        lv.setContentsMargins(0, 0, 0, 0)
         latt = S.Form()
         latt.row(("a:", self._a), ("b:", self._b), ("c:", self._c))
         latt.row(("α:", self._al), ("β:", self._be), ("γ:", self._ga))
         latt.row(("SG #:", self._sg))
-        v.addLayout(latt)
-        v.addWidget(self._cubic)
-        self._apply_lattice_enabled()
+        lv.addLayout(latt)
+        lv.addWidget(self._cubic)
+        v.addWidget(self._latt_widget)
+
+        self._dsp_widget = QtWidgets.QWidget()
+        dv = QtWidgets.QVBoxLayout(self._dsp_widget)
+        dv.setContentsMargins(0, 0, 0, 0)
+        self._dsp_ed = QtWidgets.QLineEdit(self._format_d_list(material.get("d_list", [])))
+        self._dsp_ed.setToolTip(
+            "Space- or comma-separated d-spacings in Angstrom, largest first "
+            "(e.g. a lamellar standard's harmonic series). No space group or "
+            "hkl — rings are labelled by order (n1, n2, ...) instead.")
+        dv.addLayout(S.Form().row(("d-spacings (Å):", self._dsp_ed)))
+        v.addWidget(self._dsp_widget)
+
+        self._apply_mode()
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
@@ -90,19 +122,39 @@ class MaterialDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         v.addWidget(buttons)
 
-    def _on_preset(self, name: str):
-        if name != "Custom" and name in MATERIALS:
-            m = MATERIALS[name]
-            for w, k in ((self._a, "a"), (self._b, "b"), (self._c, "c"),
-                         (self._al, "alpha"), (self._be, "beta"), (self._ga, "gamma")):
-                w.blockSignals(True); w.setValue(m[k]); w.blockSignals(False)
-            self._sg.setValue(m["sg"])
-            self._name.setText(name)
-        self._apply_lattice_enabled()
+    @staticmethod
+    def _format_d_list(d_list) -> str:
+        return " ".join(f"{d:.4f}" for d in d_list)
 
-    def _apply_lattice_enabled(self, *_):
-        """Enable lattice fields only for a custom material; under 'Cubic' only a is
-        editable (b, c mirror a and the angles are fixed at 90°)."""
+    def _current_mode(self) -> str:
+        name = self._preset.currentText()
+        if name == _CUSTOM_DSPACING:
+            return "dspacing"
+        if name in MATERIALS and MATERIALS[name].get("kind") == "dspacing":
+            return "dspacing"
+        return "lattice"
+
+    def _on_preset(self, name: str):
+        if name not in ("Custom", _CUSTOM_DSPACING) and name in MATERIALS:
+            m = MATERIALS[name]
+            self._name.setText(name)
+            if m.get("kind") == "dspacing":
+                self._dsp_ed.setText(self._format_d_list(m["d_list"]))
+            else:
+                for w, k in ((self._a, "a"), (self._b, "b"), (self._c, "c"),
+                             (self._al, "alpha"), (self._be, "beta"), (self._ga, "gamma")):
+                    w.blockSignals(True); w.setValue(m[k]); w.blockSignals(False)
+                self._sg.setValue(m["sg"])
+        self._apply_mode()
+
+    def _apply_mode(self, *_):
+        """Show/enable the lattice grid or the d-spacing field depending on
+        the selected preset; within lattice mode, enable editing only for a
+        custom material ('Cubic' further locks b, c and the angles)."""
+        dspacing = self._current_mode() == "dspacing"
+        self._latt_widget.setVisible(not dspacing)
+        self._dsp_widget.setVisible(dspacing)
+
         custom = self._preset.currentText() == "Custom"
         self._cubic.setEnabled(custom)
         cubic = custom and self._cubic.isChecked()
@@ -111,6 +163,8 @@ class MaterialDialog(QtWidgets.QDialog):
             w.setEnabled(custom and not cubic)
         if cubic:
             self._sync_cubic()
+
+        self._dsp_ed.setEnabled(self._preset.currentText() == _CUSTOM_DSPACING)
 
     def _sync_cubic(self):
         v = self._a.value()
@@ -123,15 +177,23 @@ class MaterialDialog(QtWidgets.QDialog):
         if self._cubic.isEnabled() and self._cubic.isChecked():
             self._sync_cubic()
 
+    @staticmethod
+    def _parse_d_list(text: str) -> list:
+        return parse_dspacing_text(text)
+
     def apply_to(self, material: dict):
         """Write the dialog's current values back into ``material``."""
         material["name"] = self._name.text().strip() or material["name"]
         material["preset"] = self._preset.currentText()
-        material["a"] = self._a.value(); material["b"] = self._b.value(); material["c"] = self._c.value()
-        material["alpha"] = self._al.value(); material["beta"] = self._be.value()
-        material["gamma"] = self._ga.value()
-        material["sg"] = self._sg.value()
-        material["cubic"] = self._cubic.isChecked()
+        material["kind"] = self._current_mode()
+        if material["kind"] == "dspacing":
+            material["d_list"] = self._parse_d_list(self._dsp_ed.text())
+        else:
+            material["a"] = self._a.value(); material["b"] = self._b.value(); material["c"] = self._c.value()
+            material["alpha"] = self._al.value(); material["beta"] = self._be.value()
+            material["gamma"] = self._ga.value()
+            material["sg"] = self._sg.value()
+            material["cubic"] = self._cubic.isChecked()
 
 
 class DetectorGeometryCard(QtWidgets.QWidget):
@@ -606,7 +668,10 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         if name is None:
             name = f"Material {len(self._materials) + 1}"
         base = MATERIALS.get(name)
-        if base is not None:
+        if base is not None and base.get("kind") == "dspacing":
+            m = dict(kind="dspacing", d_list=list(base["d_list"]))
+            preset = name
+        elif base is not None:
             m = dict(a=base["a"], b=base["b"], c=base["c"],
                       alpha=base["alpha"], beta=base["beta"], gamma=base["gamma"],
                       sg=base["sg"])
@@ -759,10 +824,15 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             if not m["enabled"]:
                 continue
             try:
-                lattice = dict(a=m["a"], b=m["b"], c=m["c"],
-                               alpha=m["alpha"], beta=m["beta"], gamma=m["gamma"])
-                rings = simulate_rings(lattice, m["sg"], self._wl.value(),
-                                       self._lsd_um(), self._px.value(), self._max2t.value())
+                if m.get("kind") == "dspacing":
+                    rings = simulate_rings_from_dspacings(
+                        m["d_list"], self._wl.value(), self._lsd_um(),
+                        self._px.value(), self._max2t.value())
+                else:
+                    lattice = dict(a=m["a"], b=m["b"], c=m["c"],
+                                   alpha=m["alpha"], beta=m["beta"], gamma=m["gamma"])
+                    rings = simulate_rings(lattice, m["sg"], self._wl.value(),
+                                           self._lsd_um(), self._px.value(), self._max2t.value())
             except Exception:
                 import traceback
                 errors.append(f"{m['name']}: {traceback.format_exc().splitlines()[-1]}")
@@ -772,8 +842,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             lines.append(f"{m['name']}: {len(rings)} rings")
             lines.append(f"{'hkl':>10}  {'2θ(°)':>7}  {'d(Å)':>7}  {'R(px)':>8}")
             for r in rings:
-                h, k, l = r["hkl"]
-                lines.append(f"{str((h,k,l)):>10}  {r['two_theta_deg']:7.3f}  "
+                label = f"n{r['order']}" if r["hkl"] is None else str(tuple(r["hkl"]))
+                lines.append(f"{label:>10}  {r['two_theta_deg']:7.3f}  "
                              f"{r['d_spacing']:7.4f}  {r['radius_px']:8.1f}")
             lines.append("")
         self._after_geometry_change()
@@ -824,8 +894,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                 item = pg.PlotDataItem(ys, zs, pen=pen)
                 item.setVisible(vis_r)
                 self._viewer._iv.addItem(item); self._ring_items.append(item)
-                h, k, l = r["hkl"]
-                txt = pg.TextItem(f"{h}{k}{l}", color=m["color"], anchor=(0.5, 1.0))
+                label = f"n{r['order']}" if r["hkl"] is None else "".join(str(x) for x in r["hkl"])
+                txt = pg.TextItem(label, color=m["color"], anchor=(0.5, 1.0))
                 txt.setPos(label_y, label_z)
                 txt.setVisible(vis_l)
                 self._viewer._iv.addItem(txt); self._label_items.append(txt)
