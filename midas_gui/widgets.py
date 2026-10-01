@@ -2720,6 +2720,10 @@ class OutputFormatSelector(QtWidgets.QWidget):
     ``CorrectionFlagsWidget``) since that only understands single-value
     widgets — callers wire ``get_state()``/``set_state()`` directly instead.
     """
+    #: emitted whenever the checked set changes, so dependent controls (the
+    #: Batch tab's zarr-grouping combo, which only means anything while
+    #: "zarr" is checked) can follow it without polling.
+    changed = QtCore.pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2767,6 +2771,7 @@ class OutputFormatSelector(QtWidgets.QWidget):
         else:
             names = ", ".join(self._short_names[k] for k in self._checks if k in keys)
             self._btn.setText(f"Output format: {names} ▾")
+        self.changed.emit()
 
     def checked_keys(self) -> list:
         return [key for key, cb in self._checks.items() if cb.isChecked()]

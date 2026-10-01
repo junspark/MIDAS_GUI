@@ -1259,6 +1259,134 @@ def _open_source_cfg(cfg):
     raise ValueError(f"Unknown source type: {cfg['type']}")
 
 
+class _ZarrGroupWriter:
+    """One open ``.zarr.zip`` plus the per-frame bookkeeping its closing
+    needs — the unit of ``BatchWorker``'s ``zarr_grouping``.
+
+    Frames are handed to the backend's ``GSASZarrWriter`` AS THEY ARE
+    PRODUCED rather than collected and written at the end: that class
+    "flushes the running OmegaSumFrame chunk every omega_sum_frames, so a
+    long scan never has to be held in memory", and buffering a rotation's
+    worth of ``(n_eta, n_r)`` cakes to hand ``write_gsas_zarr_zip`` a list
+    would throw that away (a 1442-frame group at 72×1000 float64 is ~830 MB).
+    Peak memory is therefore the same as the one-archive-per-frame path.
+
+    ``omega_sum_frames`` is deliberately left at its default 1. It chunks
+    ALREADY-INTEGRATED frames inside the archive and is not OME_SUM, which
+    "Combine sub-frames" has applied upstream before integration — setting it
+    from OME_SUM would collapse the same axis twice.
+
+    Provenance and the source ``instrument/`` tree are applied once at
+    :meth:`close`, in a single ``provenance.rewrite_zip`` pass per archive
+    (strictly fewer extract/repack cycles than the per-frame path, which paid
+    for one per frame).
+    """
+
+    def __init__(self, path: Path, *, spec, bin_area, prov_entry, log):
+        from midas_integrate_v2.io.zarr_gsas import GSASZarrWriter
+        self.path = Path(path)
+        self._spec = spec
+        self._prov_entry = prov_entry
+        self._log = log
+        self._w = GSASZarrWriter(self.path, spec=spec, bin_area=bin_area)
+        self.n_frames = 0
+        # Per-frame environment, accumulated for the one closing stamp.
+        self._ring_currents: list = []
+        self._sample_motors: list = []
+        # Per-frame (first_raw, last_raw) windows into ONE source file, which
+        # is what h5_metadata.align reduces "one entry per output frame"
+        # from. Set to None the moment a second source file appears: a group
+        # spanning several files has no single instrument/ tree to align.
+        self._h5_path: Optional[str] = None
+        self._frame_ranges: Optional[list] = []
+        self._n_aligned: Optional[int] = None
+        self._multi_source = False
+
+    def add(self, cake, *, omega, meta, h5_ctx):
+        """Stream one integrated cake in, recording what its closing stamp
+        will need. ``meta`` is ``metadata_for_index``'s dict (or None) and
+        ``h5_ctx`` is ``h5_context_for_index``'s (or None)."""
+        temp = press = cur = cur_i0 = None
+        ring = motors = None
+        if meta:
+            temp = meta.get("temperature")
+            press = meta.get("pressure")
+            # Real beam-monitor ion chambers go in the writer's own I/I0
+            # slots; storage-ring current is a different quantity and rides
+            # in the provenance entry instead (see the per-frame path this
+            # replaced, and 77a0ea1).
+            cur = meta.get("ion_chamber_i")
+            cur_i0 = meta.get("ion_chamber_i0")
+            ring = meta.get("current")
+            motors = {k[len("motor:"):]: v for k, v in meta.items()
+                      if k.startswith("motor:") and v is not None}
+        self._w.add_frame(cake, omega=omega, temperature=temp, pressure=press,
+                          current=cur, current_i0=cur_i0)
+        self.n_frames += 1
+        self._ring_currents.append(ring)
+        self._sample_motors.append(motors or None)
+        if h5_ctx:
+            if self._h5_path is None:
+                self._h5_path = h5_ctx["path"]
+                self._n_aligned = h5_ctx["n_aligned"]
+            if h5_ctx["path"] != self._h5_path:
+                self._multi_source = True
+                self._frame_ranges = None
+            elif self._frame_ranges is not None:
+                self._frame_ranges.extend(h5_ctx["frame_ranges"])
+
+    def close(self, h5_trees: dict, *, rename_to: Optional[Path] = None) -> Path:
+        """Finish the archive, stamp it, optionally rename it, return its
+        final path. ``h5_trees`` is the caller's source-path -> tree cache:
+        the tree is the same for every frame of a file and costs a few
+        hundred dataset reads, so it is read once per file, not per group."""
+        self._w.close()
+        try:
+            extra = dict(self._prov_entry.get("extra") or {})
+            extra["n_frames"] = self.n_frames
+            # One frame keeps the scalar shape the per-frame path wrote, so
+            # existing readers of a "frame"-grouped archive see no change;
+            # a real group reports one value per frame.
+            if any(v is not None for v in self._ring_currents):
+                extra["storage_ring_current_mA"] = (
+                    self._ring_currents[0] if self.n_frames == 1
+                    else list(self._ring_currents))
+            if any(self._sample_motors):
+                extra["sample_motors"] = (
+                    self._sample_motors[0] if self.n_frames == 1
+                    else list(self._sample_motors))
+            snap = {}
+            if self._h5_path:
+                extra["source_h5"] = self._h5_path
+                if self._multi_source:
+                    self._log(
+                        f"[batch] note: {self.path.name} groups frames from "
+                        "several source files — instrument/ tree not copied "
+                        "(no single file to align it to).")
+                else:
+                    tree = h5_trees.get(self._h5_path)
+                    if tree is None:
+                        tree = h5_metadata.read_tree(self._h5_path)
+                        h5_trees[self._h5_path] = tree
+                    snap = h5_metadata.align(tree, self._frame_ranges,
+                                             self._n_aligned)
+            entry = dict(self._prov_entry, extra=extra)
+
+            def _mutate(extracted, _snap=snap, _e=entry):
+                if _snap:
+                    h5_metadata.write_into_extracted(extracted, _snap)
+                provenance.stamp_extracted(extracted, _e)
+
+            provenance.rewrite_zip(self.path, _mutate)
+        except Exception:
+            self._log(f"[batch] note: provenance stamp on {self.path.name} "
+                      "failed (non-fatal):\n" + traceback.format_exc())
+        if rename_to is not None and rename_to != self.path:
+            self.path.replace(rename_to)
+            self.path = Path(rename_to)
+        return self.path
+
+
 class BatchWorker(QtCore.QThread):
     progress   = QtCore.pyqtSignal(int, int)
     frame_done = QtCore.pyqtSignal(str, object, object, object)  # id, r_axis, prof, sigma
@@ -1273,11 +1401,17 @@ class BatchWorker(QtCore.QThread):
                  drift_traj=None, parent=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
-                 calibration_snapshot=None):
+                 calibration_snapshot=None, zarr_grouping="frame"):
         super().__init__(parent)
         # Full calibration (helpers.full_calibration_snapshot), embedded
         # verbatim in cake-mode HDF5 output — see cake_hdf5.write_cake_h5.
         self._calibration_snapshot = calibration_snapshot
+        # How many combined output frames share one .zarr.zip: "frame" (one
+        # archive each, the original mpe_wf-parity behaviour), "file" (one
+        # per source file — one per ROTATION, the same unit ω is measured
+        # from, see the sources' zarr_group_key) or "run" (one for the lot).
+        self._zarr_grouping = (zarr_grouping or "frame") if zarr_grouping in (
+            "frame", "file", "run") else "frame"
         self._context = context              # prebuilt integration context or None
         self._spec = spec                    # always R-uniform (Q handled by rebinning)
         self._weighted = weighted            # pixel-weighted azimuthal mean (vs η-bin mean)
@@ -1321,6 +1455,40 @@ class BatchWorker(QtCore.QThread):
 
     def _open_source(self):
         return _open_source_cfg(self._src)
+
+    def _run_out_stem(self) -> str:
+        """The run-level output stem: the source file's own stem, or the
+        shared file root of a multi-file pick. Shared by the combined cake
+        HDF5's ``<stem>.<lo>_<hi>.cake`` name and a "run"-grouped zarr, so
+        the two name the same run the same way."""
+        src_path = self._src.get('path')
+        if src_path:
+            return Path(src_path).stem
+        src_paths = self._src.get('paths') or []
+        return (froot_and_frame_num(Path(src_paths[0]).stem, -1)[0]
+                if src_paths else "integrated")
+
+    def _zarr_group_path(self, zarr_dir: Path, fid: str, group_key) -> tuple:
+        """``(path_to_open, rename_pending)`` for a new zarr group.
+
+        A group keyed on a real source file is named after it the moment it
+        opens — ``<stem>.ave.zarr.zip``, the same name the per-frame path
+        gave a file whose chunking produced exactly one output.
+
+        A group that spans the run instead (``"run"`` grouping, or ``"file"``
+        on one-frame-per-file data, where the selection is the rotation) has
+        no such name, and takes the combined HDF5's ``<stem>.<lo>_<hi>``
+        form so a second run over a different frame range cannot overwrite
+        the first. That range is only known once the loop ends, so the
+        archive is built under ``.part`` and renamed on close — which also
+        leaves an obviously-incomplete file behind if a run dies mid-write,
+        rather than a plausible-looking one."""
+        if self._zarr_grouping == "frame" or group_key is None:
+            return zarr_dir / f"{fid}.ave.zarr.zip", False
+        key_path = Path(str(group_key))
+        if self._zarr_grouping == "file" and key_path.is_file():
+            return zarr_dir / f"{key_path.stem}.ave.zarr.zip", False
+        return zarr_dir / f"{self._run_out_stem()}.ave.zarr.zip.part", True
 
     def _iter_frames(self, source):
         """Yield ``(abs_i, fid, img)`` for the frames this worker should process.
@@ -1576,15 +1744,23 @@ class BatchWorker(QtCore.QThread):
             all_cake_profiles, all_cake_sigmas = [], []
             proc_idx = 0  # index into monitor_vals for processed frames only
 
-            # Zarr is written ONE FILE PER COMBINED OUTPUT FRAME as it's
-            # produced (below, inside the loop) rather than bundled into one
-            # zarr for the whole run — mirrors mpe_wf's own one-zarr-per-
-            # scan-point convention, extended so a file that "Combine
-            # sub-frames" splits into several chunks gets one zarr per
-            # chunk too (see `fid`'s naming in _HDF5StackGlobSource._fid).
-            # Precompute what's shared across every per-frame write once,
-            # up front, rather than repeating it per frame.
-            zarr_dir = zarr_bin_area = zarr_prov_entry = write_gsas_zarr_zip = None
+            # How many combined output frames share one .zarr.zip, written as
+            # they are produced (below, inside the loop):
+            #   "frame" — one archive each. The original behaviour, mirroring
+            #             mpe_wf's one-zarr-per-scan-point convention and
+            #             extended so a file that "Combine sub-frames" splits
+            #             into chunks gets one per chunk (see `fid`'s naming
+            #             in _HDF5StackGlobSource._fid).
+            #   "file"  — one per ROTATION, via the sources' zarr_group_key:
+            #             one HDF5 sub-frame stack, or a whole TIFF selection.
+            #   "run"   — one for every frame processed.
+            # A source with no zarr_group_key (plain TIFFGlobSource/
+            # HDF5FrameSource, outside Batch Integrate) can only do "frame".
+            # Precompute what's shared across every write once, up front.
+            zarr_dir = zarr_bin_area = zarr_prov_entry = None
+            zarr_group_key_fn = None
+            zarr_writer: Optional[_ZarrGroupWriter] = None
+            zarr_open_key = None
             h5_trees: dict = {}   # source path -> its instrument/ tree, read once
             # Shared by the zarr writer below and cake_hdf5.write_cake_h5 at
             # the end of run() — computed once, whichever wants it first.
@@ -1605,10 +1781,18 @@ class BatchWorker(QtCore.QThread):
                 cake_bin_area = count_cake(cake_geom, self._kernel,
                                            spec.NrPixelsZ, spec.NrPixelsY)
             if want_zarr:
-                from midas_integrate_v2.io.zarr_gsas import write_gsas_zarr_zip
                 zarr_dir = self._out_dir / "zarr"
                 zarr_dir.mkdir(parents=True, exist_ok=True)
                 zarr_bin_area = cake_bin_area   # see the comment where it's built
+                if self._zarr_grouping == "file":
+                    zarr_group_key_fn = getattr(source, "zarr_group_key", None)
+                    if zarr_group_key_fn is None:
+                        self.log_line.emit(
+                            "[batch] note: this source cannot say which "
+                            "rotation a frame belongs to — writing one zarr "
+                            "per frame instead of one per source file.")
+                elif self._zarr_grouping == "run":
+                    zarr_group_key_fn = lambda _i: "<run>"   # noqa: E731
                 zarr_prov_entry = provenance.build_entry(
                     'midas_gui.batch_integrate',
                     inputs=[self._src.get('path')] if self._src.get('path') else [],
@@ -1637,6 +1821,24 @@ class BatchWorker(QtCore.QThread):
                         'active_profile': settings.active_profile(),
                     },
                 )
+            zarr_rename_pending = False
+
+            def _close_zarr_group() -> Path:
+                """Finish the open archive and clear the group state, giving
+                a run-spanning group its final ``<lo>_<hi>`` name now that
+                the processed range is known. Returns the path written."""
+                nonlocal zarr_writer, zarr_open_key, zarr_rename_pending
+                final = None
+                if zarr_rename_pending:
+                    lo = int(min(all_frame_idx)) if all_frame_idx else 0
+                    hi = int(max(all_frame_idx)) if all_frame_idx else 0
+                    final = zarr_dir / (f"{self._run_out_stem()}."
+                                        f"{lo:06d}_{hi:06d}.ave.zarr.zip")
+                path = zarr_writer.close(h5_trees, rename_to=final)
+                zarr_writer = None
+                zarr_open_key = None
+                zarr_rename_pending = False
+                return path
 
             for abs_i, fid, img in self._iter_frames(source):
                 # Cooperative abort — stop cleanly, keeping frames already done.
@@ -1720,18 +1922,18 @@ class BatchWorker(QtCore.QThread):
                     # so it is not zarr-only.
                     all_frame_idx.append(float(abs_i))
                 if want_zarr and cake_2d is not None:
-                    # One zarr per combined output frame, written immediately
-                    # rather than accumulated — `fid` already carries the
-                    # right per-chunk identity (a bare file stem when
-                    # "Combine sub-frames" produces one output per file, or
-                    # "<stem>.frame_<start>_<end>" per chunk — the actual raw
-                    # sub-frame range it combines — when it splits a file
-                    # into several, see _HDF5StackGlobSource._fid), so this
-                    # naturally yields one zarr per image stack, and however
-                    # many the chunking splits it into, uneven remainder
-                    # chunk included, with the frames it covers visible in
-                    # the filename.
-                    zarr_path = zarr_dir / f"{fid}.ave.zarr.zip"
+                    # Which archive this frame belongs to. Under "frame"
+                    # grouping (and for any source that cannot name a
+                    # rotation) there is no key function and `fid` is used
+                    # instead, so every frame opens and closes its own
+                    # archive and the behaviour is exactly the per-frame one
+                    # this replaced — `fid` already carries the right
+                    # per-chunk identity (a bare file stem when "Combine
+                    # sub-frames" produces one output per file, or
+                    # "<stem>.frame_<start>_<end>" per chunk, see
+                    # _HDF5StackGlobSource._fid).
+                    group_key = (zarr_group_key_fn(abs_i)
+                                 if zarr_group_key_fn is not None else fid)
                     # Instrument metadata (temperature/pressure/ion-chamber/
                     # sample-motor positions), when the source can provide it
                     # (HDF5 stacks only — see
@@ -1758,82 +1960,35 @@ class BatchWorker(QtCore.QThread):
                             h5_ctx = get_ctx(abs_i)
                         except Exception:
                             h5_ctx = None
-                    temps = pressures = currents = currents_i0 = None
-                    ring_current = sample_motors = None
-                    if meta:
-                        if meta.get("temperature") is not None:
-                            temps = [meta["temperature"]]
-                        if meta.get("pressure") is not None:
-                            pressures = [meta["pressure"]]
-                        # Real beam-monitor ion chambers (stopgap per-hutch
-                        # mapping — see _HDF5StackGlobSource._ION_CHAMBER_H5_PATHS)
-                        # go into the writer's own I/I0 slots. Storage-ring
-                        # current is a different quantity entirely — it used
-                        # to be mistakenly written into the "I" slot; it now
-                        # rides along in the provenance entry's `extra`
-                        # instead (below), not in the zarr's own attrs.
-                        if meta.get("ion_chamber_i") is not None:
-                            currents = [meta["ion_chamber_i"]]
-                        if meta.get("ion_chamber_i0") is not None:
-                            currents_i0 = [meta["ion_chamber_i0"]]
-                        ring_current = meta.get("current")
-                        sample_motors = {k[len("motor:"):]: v
-                                        for k, v in meta.items()
-                                        if k.startswith("motor:") and v is not None}
                     try:
-                        write_gsas_zarr_zip(
-                            zarr_path, [cake_2d], spec=spec,
-                            omegas=[frame_omega], bin_area=zarr_bin_area,
-                            temperatures=temps, pressures=pressures,
-                            currents=currents, currents_i0=currents_i0)
-                        try:
-                            # Per-frame provenance: the shared zarr_prov_entry
-                            # (built once, run-level) plus whatever per-frame
-                            # environment this specific frame actually had —
-                            # a shallow copy so different frames' entries
-                            # don't share (and silently overwrite) `extra`.
-                            frame_extra = dict(zarr_prov_entry.get("extra") or {})
-                            if ring_current is not None:
-                                frame_extra["storage_ring_current_mA"] = ring_current
-                            if sample_motors:
-                                frame_extra["sample_motors"] = sample_motors
-                            # The instrument/ copy and the provenance stamp are
-                            # two edits to a closed zip, and a zip can't be
-                            # edited in place — so they share one extract /
-                            # repack pass rather than each paying for its own.
-                            snap = {}
-                            if h5_ctx:
-                                frame_extra["source_h5"] = h5_ctx["path"]
-                                # The tree is the same for every frame of a
-                                # given file; only the per-frame averaging
-                                # differs. Read once per file, align per
-                                # frame — a few hundred datasets reopened
-                                # for every output frame would cost more
-                                # than the integration.
-                                tree = h5_trees.get(h5_ctx["path"])
-                                if tree is None:
-                                    tree = h5_metadata.read_tree(h5_ctx["path"])
-                                    h5_trees[h5_ctx["path"]] = tree
-                                snap = h5_metadata.align(
-                                    tree, h5_ctx["frame_ranges"],
-                                    h5_ctx["n_aligned"])
-                            frame_prov_entry = dict(zarr_prov_entry, extra=frame_extra)
-
-                            def _mutate(extracted, _snap=snap, _e=frame_prov_entry):
-                                if _snap:
-                                    h5_metadata.write_into_extracted(extracted, _snap)
-                                provenance.stamp_extracted(extracted, _e)
-
-                            provenance.rewrite_zip(zarr_path, _mutate)
-                        except Exception:
-                            self.log_line.emit(
-                                f"[batch] note: provenance stamp on {zarr_path.name} "
-                                "failed (non-fatal):\n" + traceback.format_exc())
-                        out_paths.append(str(zarr_path))
+                        if zarr_writer is not None and group_key != zarr_open_key:
+                            out_paths.append(str(_close_zarr_group()))
+                        if zarr_writer is None:
+                            open_path, pending = self._zarr_group_path(
+                                zarr_dir, fid, group_key)
+                            zarr_writer = _ZarrGroupWriter(
+                                open_path, spec=spec, bin_area=zarr_bin_area,
+                                prov_entry=zarr_prov_entry,
+                                log=self.log_line.emit)
+                            zarr_open_key = group_key
+                            zarr_rename_pending = pending
+                        zarr_writer.add(cake_2d, omega=frame_omega,
+                                        meta=meta, h5_ctx=h5_ctx)
                     except Exception:
                         self.log_line.emit(
                             f"[batch] zarr cake output for {fid!r} failed:\n"
                             + traceback.format_exc())
+                        # Drop the half-written group rather than keep adding
+                        # to a writer that may be in an undefined state; the
+                        # next frame starts a fresh one.
+                        if zarr_writer is not None:
+                            try:
+                                zarr_writer.close(h5_trees)
+                            except Exception:
+                                pass
+                            zarr_writer = None
+                            zarr_open_key = None
+                            zarr_rename_pending = False
                 frame_ids.append(fid)
                 self.frame_done.emit(fid, r_ax, prof, sigma)
                 self.progress.emit(proc_idx + 1, total)
@@ -1867,19 +2022,25 @@ class BatchWorker(QtCore.QThread):
                             cake_2d=cake_2d, cake_sigma=cake_sigma,
                             eta_axis=eta_ax, per_eta=self._multi_azimuth))
 
+            # The last group has no following frame to close it — including
+            # when the loop broke on an abort, where the frames already
+            # integrated still belong in a readable archive.
+            if zarr_writer is not None:
+                try:
+                    out_paths.append(str(_close_zarr_group()))
+                except Exception:
+                    self.log_line.emit(
+                        "[batch] zarr cake output for the final group failed:\n"
+                        + traceback.format_exc())
+
             # Combined h5 output name: <original-source-stem>.<start>_<end>
-            # .cake — h5 remains one file for the whole run (unlike zarr,
-            # written per-frame above), so it still needs an explicit
-            # frame-index range. start/end are the actual processed 0-based
-            # frame indices (all_frame_idx), matching what per-frame lineout
-            # files already use via froot_and_frame_num(fid, abs_i) above.
-            src_path = self._src.get('path')
-            if src_path:
-                out_stem = Path(src_path).stem
-            else:
-                src_paths = self._src.get('paths') or []
-                out_stem = (froot_and_frame_num(Path(src_paths[0]).stem, -1)[0]
-                            if src_paths else "integrated")
+            # .cake — h5 remains one file for the whole run, so it still needs
+            # an explicit frame-index range. start/end are the actual
+            # processed 0-based frame indices (all_frame_idx), matching what
+            # per-frame lineout files already use via
+            # froot_and_frame_num(fid, abs_i) above. A "run"-grouped zarr
+            # shares both the stem and the range — see _zarr_group_path.
+            out_stem = self._run_out_stem()
             lo = int(min(all_frame_idx)) if all_frame_idx else 0
             hi = int(max(all_frame_idx)) if all_frame_idx else 0
             combined_stem = f"{out_stem}.{lo:06d}_{hi:06d}.cake"
@@ -2247,6 +2408,20 @@ class _ChunkCombinedFileSource:
             raise IndexError(idx)
         start = idx * self._chunk_size
         return start, start + len(group) - 1
+
+    def zarr_group_key(self, idx: int) -> str:
+        """Which zarr archive output frame ``idx`` belongs to under "one zarr
+        per source file" — see ``BatchWorker``'s ``zarr_grouping``.
+
+        A zarr group is one ROTATION, the same unit ω is measured from, so
+        this is deliberately the same answer ``raw_window_for_index`` is
+        counted against: one-frame-per-file data only becomes a rotation as a
+        series, so the whole selection is one group and the key is constant.
+        (``_HDF5StackGlobSource`` returns the source file instead, because
+        there one file already IS one rotation.)"""
+        if not self._group(idx):
+            raise IndexError(idx)
+        return "<selection>"
 
     def _read(self, group: list) -> np.ndarray:
         imgs = []
@@ -2665,6 +2840,17 @@ class _HDF5StackGlobSource:
         what the axis is."""
         return self.omega_channel_window(idx)[1:]
 
+    def zarr_group_key(self, idx: int) -> str:
+        """Which zarr archive output frame ``idx`` belongs to under "one zarr
+        per source file" — see ``BatchWorker``'s ``zarr_grouping``.
+
+        A zarr group is one ROTATION, and here one file IS one rotation, so
+        the key is the source file. Defined through ``omega_channel_window``
+        for the same reason ``raw_window_for_index`` is: that walk is already
+        the single place deciding which rotation a frame belongs to, and
+        grouping must not get to disagree with the angle."""
+        return self.omega_channel_window(idx)[0]
+
     def metadata_for_index(self, idx: int) -> dict:
         """Chunk-mean metadata (Temperature/Pressure/StorageRing current)
         for combined frame ``idx``, in the same flattened index space as
@@ -2919,6 +3105,55 @@ def resolve_worker_count(n_items: int, requested: int, min_per_worker: int) -> i
     return min(requested, max(1, int(n_items) // min_per_worker))
 
 
+def _split_into_chunks_on_groups(indices: list, n_chunks: int, key_fn) -> list:
+    """Like :func:`_split_into_chunks`, but no chunk boundary may fall inside
+    a run of indices sharing a ``key_fn(idx)``.
+
+    Batch-Parallel splits purely by count, which is fine while every output
+    frame writes its own zarr but not once several share one archive: two
+    workers handed halves of the same source file would open the same
+    ``.zarr.zip`` path and race. Whole groups per worker removes the
+    collision by construction, at the cost of capping parallelism at the
+    number of groups (a 3-file folder uses 3 workers however many were
+    asked for).
+
+    Groups are formed from CONSECUTIVE equal keys, not by gathering every
+    index with the same key: the frame order is the source's own, so a
+    repeated key after a gap would mean the source interleaves rotations,
+    and silently reordering frames to suit the writer would be worse than
+    writing two archives. Concatenating the chunks back in order reproduces
+    ``indices`` exactly, exactly as the unaligned splitter promises."""
+    groups: list = []
+    for i in indices:
+        k = key_fn(i)
+        if groups and groups[-1][0] == k:
+            groups[-1][1].append(i)
+        else:
+            groups.append((k, [i]))
+    n_chunks = max(1, min(int(n_chunks), len(groups)))
+    if not groups:
+        return []
+    # Distribute whole groups so chunk sizes stay as even as the group sizes
+    # allow: walk the groups, starting a new chunk once the current one has
+    # taken its share of the remaining frames.
+    chunks: list = []
+    remaining_frames = sum(len(g[1]) for g in groups)
+    remaining_chunks = n_chunks
+    cur: list = []
+    for gi, (_k, members) in enumerate(groups):
+        cur.extend(members)
+        groups_left = len(groups) - gi - 1
+        if remaining_chunks > 1 and groups_left >= remaining_chunks - 1 and \
+                len(cur) >= remaining_frames // remaining_chunks:
+            chunks.append(cur)
+            remaining_frames -= len(cur)
+            remaining_chunks -= 1
+            cur = []
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
 def _split_into_chunks(indices: list, n_chunks: int) -> list:
     """Split a sorted list of frame indices into ``n_chunks`` contiguous,
     near-equal pieces (earlier chunks absorb the remainder). Concatenating
@@ -3088,7 +3323,7 @@ class BatchRunCoordinator(QtCore.QObject):
                  dark=None, bright=None, background=None, bright_mode="divide",
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
                  run_mode="sequential", n_workers=1, parent=None,
-                 calibration_snapshot=None):
+                 calibration_snapshot=None, zarr_grouping="frame"):
         super().__init__(parent)
         self._args = dict(
             spec=spec, source_cfg=source_cfg, mask=mask, out_dir=out_dir, fmts=fmts,
@@ -3097,7 +3332,8 @@ class BatchRunCoordinator(QtCore.QObject):
             frame_range=frame_range, monitor_file=monitor_file,
             drift_traj=drift_traj, dark=dark, bright=bright, background=background,
             bright_mode=bright_mode, weighted=weighted, im_trans=im_trans,
-            multi_azimuth=multi_azimuth, calibration_snapshot=calibration_snapshot)
+            multi_azimuth=multi_azimuth, calibration_snapshot=calibration_snapshot,
+            zarr_grouping=zarr_grouping)
         self._context = context
         self._run_mode = run_mode if run_mode == "batch_parallel" else "sequential"
         self._n_workers_requested = max(1, int(n_workers))
@@ -3164,7 +3400,27 @@ class BatchRunCoordinator(QtCore.QObject):
         if n_workers <= 1:
             self._start_sequential()
             return
-        self._chunks = _split_into_chunks(indices, n_workers)
+        # Several frames sharing one zarr archive must not be split across
+        # workers — see _split_into_chunks_on_groups. "run" grouping yields a
+        # single group and so a single chunk, which falls through to the
+        # sequential path below rather than needing a case of its own.
+        grouping = self._args.get("zarr_grouping", "frame")
+        key_fn = (getattr(source, "zarr_group_key", None)
+                  if grouping == "file" else
+                  (lambda _i: "<run>") if grouping == "run" else None)
+        if "zarr" in (self._args.get("fmts") or ()) and key_fn is not None:
+            self._chunks = _split_into_chunks_on_groups(indices, n_workers, key_fn)
+            if len(self._chunks) < n_workers:
+                self.log_line.emit(
+                    f"[batch] zarr grouping={grouping}: a group cannot be "
+                    f"split across workers — using {len(self._chunks)} "
+                    f"worker(s) rather than {n_workers}.")
+            if len(self._chunks) <= 1:
+                self._chunks = []
+                self._start_sequential()
+                return
+        else:
+            self._chunks = _split_into_chunks(indices, n_workers)
         self.log_line.emit(
             f"[batch] Batch Parallel: {len(indices)} frames across "
             f"{len(self._chunks)} workers ({[len(c) for c in self._chunks]})")

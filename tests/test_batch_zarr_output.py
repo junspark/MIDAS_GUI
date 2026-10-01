@@ -257,7 +257,7 @@ def _make_hdf5_stack(tmp_path, n_files=2, n_raw=6, size=64, numbered=False):
 
 
 def _run_stack(app, tmp_path, fmts, *, out_dir, omega_cfg, chunk_size=2,
-               n_files=2, n_raw=6):
+               n_files=2, n_raw=6, zarr_grouping="frame"):
     pytest.importorskip("torch")
     pytest.importorskip("midas_integrate_v2")
     import midas_gui.workers as wk
@@ -269,7 +269,7 @@ def _run_stack(app, tmp_path, fmts, *, out_dir, omega_cfg, chunk_size=2,
         spec, {"type": "hdf5_stack_glob", "paths": paths,
                "dataset": "exchange/data", "chunk_size": chunk_size},
         None, out_dir, fmts, "subpixel2", (None, None), None,
-        multi_azimuth=False, omega_cfg=omega_cfg)
+        multi_azimuth=False, omega_cfg=omega_cfg, zarr_grouping=zarr_grouping)
     results, failures = {}, []
     worker.finished.connect(results.update)
     worker.failed.connect(failures.append)
@@ -424,3 +424,240 @@ def test_the_cake_hdf5_survives_physics_corrections(app, in_dir):
 
     assert np.any(on > 0), "bin_area came out empty"
     np.testing.assert_array_equal(on, off)
+
+
+# ── Zarr grouping: one archive per frame / per source file / per run ──────
+#
+# A zarr group is one ROTATION, the same unit ω is measured from — so these
+# live next to the ω tests above and deliberately re-assert the ω rule under
+# each grouping: bundling frames must not move the angles.
+
+_OME = {"start": 5.0, "step": 0.25, "channel": "", "collapse": False}
+_PER_FILE_OMEGAS = [5.125, 5.625, 6.125]   # 6 raw / chunk 2, from _run_stack
+
+
+def _archives(out):
+    return sorted(p.name for p in (out / "zarr").glob("*.zarr.zip"))
+
+
+def _cakes_in(path):
+    """(n_frames, omegas) actually stored in one archive."""
+    zarr = pytest.importorskip("zarr")
+    root = zarr.open(zarr.ZipStore(str(path), mode="r"), mode="r")
+    omegas = np.asarray(root["Omegas"]).ravel().tolist()
+    return len(omegas), omegas
+
+
+def test_grouping_frame_is_unchanged_one_archive_per_output_frame(app, in_dir):
+    """The default must stay byte-for-byte what it always was: two files of
+    three combined frames each give six single-cake archives."""
+    out = in_dir / "out"
+    _run_stack(app, in_dir, ["zarr"], out_dir=out, omega_cfg=_OME,
+               zarr_grouping="frame")
+    names = _archives(out)
+    assert len(names) == 6
+    assert all(_cakes_in(out / "zarr" / n)[0] == 1 for n in names)
+
+
+def test_grouping_file_writes_one_archive_per_source_file(app, in_dir):
+    """The ask: a folder of HDF5 stacks yields one archive each, named after
+    the source file rather than the frame range it covers."""
+    out = in_dir / "out"
+    _run_stack(app, in_dir, ["zarr"], out_dir=out, omega_cfg=_OME,
+               zarr_grouping="file")
+    assert _archives(out) == ["a.ave.zarr.zip", "b.ave.zarr.zip"]
+
+
+def test_a_per_file_archive_holds_the_whole_rotation_and_its_angles(app, in_dir):
+    """Each archive holds that file's three frames, and each file restarts
+    at OME_START — grouping must not disturb the per-file ω rule."""
+    out = in_dir / "out"
+    _run_stack(app, in_dir, ["zarr"], out_dir=out, omega_cfg=_OME,
+               zarr_grouping="file")
+    for name in ("a.ave.zarr.zip", "b.ave.zarr.zip"):
+        n, omegas = _cakes_in(out / "zarr" / name)
+        assert n == 3
+        assert omegas == pytest.approx(_PER_FILE_OMEGAS)
+
+
+def test_grouping_run_writes_exactly_one_archive_carrying_every_frame(app, in_dir):
+    """One archive for the lot, named with the processed frame range so a
+    second run over a different range cannot overwrite it — and no ``.part``
+    left behind once the rename lands."""
+    out = in_dir / "out"
+    _run_stack(app, in_dir, ["zarr"], out_dir=out, omega_cfg=_OME,
+               zarr_grouping="run")
+    names = _archives(out)
+    assert len(names) == 1
+    assert names[0].endswith(".000000_000005.ave.zarr.zip")
+    assert not list((out / "zarr").glob("*.part"))
+    n, omegas = _cakes_in(out / "zarr" / names[0])
+    assert n == 6
+    assert omegas == pytest.approx(_PER_FILE_OMEGAS * 2)
+
+
+def test_grouping_does_not_change_the_omegas_reported_to_the_caller(app, in_dir):
+    """``finished``'s omega list is per output frame regardless of how the
+    archives are bundled — grouping is a packaging choice, not a physics one."""
+    res = {}
+    for mode in ("frame", "file", "run"):
+        res[mode] = _run_stack(app, in_dir, ["zarr"], out_dir=in_dir / mode,
+                               omega_cfg=_OME, zarr_grouping=mode)["omegas"]
+    assert res["frame"] == pytest.approx(res["file"])
+    assert res["frame"] == pytest.approx(res["run"])
+
+
+def test_every_written_archive_is_reported_in_out_paths(app, in_dir):
+    """Whatever the grouping, the run reports exactly the archives on disk —
+    the 2d_csv bug (a path reported but never written) in miniature."""
+    for mode, expected in (("frame", 6), ("file", 2), ("run", 1)):
+        out = in_dir / mode
+        res = _run_stack(app, in_dir, ["zarr"], out_dir=out, omega_cfg=_OME,
+                         zarr_grouping=mode)
+        reported = sorted(p for p in res["out_paths"] if p.endswith(".zarr.zip"))
+        on_disk = sorted(str(p) for p in (out / "zarr").glob("*.zarr.zip"))
+        assert reported == on_disk
+        assert len(on_disk) == expected
+
+
+def test_a_grouped_archive_is_still_stamped_with_provenance(app, in_dir):
+    """The stamp moved from per frame to per group; it must still be there,
+    and must now report the group's real frame count."""
+    zarr = pytest.importorskip("zarr")
+    out = in_dir / "out"
+    _run_stack(app, in_dir, ["zarr"], out_dir=out, omega_cfg=_OME,
+               zarr_grouping="file")
+    root = zarr.open(zarr.ZipStore(str(out / "zarr" / "a.ave.zarr.zip"),
+                                   mode="r"), mode="r")
+    history = root.attrs["provenance_history"]
+    assert history[0]["tool"] == "midas_gui.batch_integrate"
+    assert history[0]["extra"]["n_frames"] == 3
+
+
+def test_a_tiff_selection_groups_into_a_single_archive(app, in_dir):
+    """One-frame-per-file data only becomes a rotation as a series, so "per
+    source file" bundles the whole selection rather than doing nothing."""
+    pytest.importorskip("torch")
+    pytest.importorskip("midas_integrate_v2")
+    import midas_gui.workers as wk
+    from midas_gui.helpers import _build_spec
+
+    paths = _make_tiff_frames(in_dir / "in", n=4)
+    spec = _build_spec(_tiny_calib_result(), r_bin=2.0, eta_bin=45.0)
+    out = in_dir / "out"
+    worker = wk.BatchWorker(
+        spec, {"type": "tiff_list", "paths": paths, "chunk_size": 1},
+        None, out, ["zarr"], "subpixel2", (None, None), None,
+        multi_azimuth=False, omega_cfg=_OME, zarr_grouping="file")
+    failures = []
+    worker.failed.connect(failures.append)
+    worker.run()
+    assert not failures, failures[0]
+    assert len(_archives(out)) == 1
+
+
+# ── Batch-Parallel chunking must not split a group ───────────────────────
+
+def test_group_aware_chunking_never_splits_a_group():
+    from midas_gui.workers import _split_into_chunks_on_groups
+    indices = list(range(9))
+    key = lambda i: f"f{i // 3}"          # noqa: E731  — three groups of three
+    chunks = _split_into_chunks_on_groups(indices, 3, key)
+    assert chunks == [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
+    for chunk in chunks:
+        assert len({key(i) for i in chunk}) == 1
+
+
+def test_group_aware_chunking_caps_workers_at_the_group_count():
+    from midas_gui.workers import _split_into_chunks_on_groups
+    indices = list(range(9))
+    chunks = _split_into_chunks_on_groups(indices, 8, lambda i: f"f{i // 3}")
+    assert len(chunks) == 3
+
+
+def test_group_aware_chunking_reproduces_the_input_in_order():
+    """Concatenation is lossless and no GROUP straddles two chunks. A chunk
+    may hold several whole groups (that is what asking for fewer workers
+    than groups means) — what must never happen is half a group."""
+    from midas_gui.workers import _split_into_chunks_on_groups
+    indices = list(range(10))
+    # Uneven groups: 4 + 1 + 5.
+    key = lambda i: "a" if i < 4 else ("b" if i == 4 else "c")   # noqa: E731
+    for n in (1, 2, 3, 7):
+        chunks = _split_into_chunks_on_groups(indices, n, key)
+        assert [i for c in chunks for i in c] == indices
+        owner = {}
+        for ci, chunk in enumerate(chunks):
+            for i in chunk:
+                owner.setdefault(key(i), ci)
+                assert owner[key(i)] == ci, (
+                    f"group {key(i)!r} split across chunks with n={n}")
+
+
+def test_one_group_yields_one_chunk_so_the_caller_falls_back_to_sequential():
+    from midas_gui.workers import _split_into_chunks_on_groups
+    chunks = _split_into_chunks_on_groups(list(range(6)), 4, lambda _i: "<run>")
+    assert chunks == [list(range(6))]
+
+
+def _plan_parallel_chunks(in_dir, *, fmts, zarr_grouping, n_workers,
+                          n_files=3, n_raw=4, chunk_size=2):
+    """Drive the real ``_start_batch_parallel`` far enough to see the chunk
+    plan it would hand the workers, without starting any. Passing a non-None
+    ``context`` short-circuits the geometry build, and stubbing
+    ``_on_geom_ready``/``_start_sequential`` stops it there."""
+    pytest.importorskip("torch")
+    pytest.importorskip("midas_integrate_v2")
+    import midas_gui.workers as wk
+
+    paths = _make_hdf5_stack(in_dir / "in", n_files=n_files, n_raw=n_raw)
+    coord = wk.BatchRunCoordinator(
+        spec=None, source_cfg={"type": "hdf5_stack_glob", "paths": paths,
+                               "dataset": "exchange/data",
+                               "chunk_size": chunk_size},
+        mask=None, out_dir=None, fmts=fmts, kernel=None, corrections=None,
+        variance_cfg=None, run_mode="batch_parallel", n_workers=n_workers,
+        context=object(), zarr_grouping=zarr_grouping)
+    coord.MIN_FRAMES_PER_WORKER = 1
+    went_sequential = []
+    coord._on_geom_ready = lambda *_a, **_k: None
+    coord._start_sequential = lambda *_a, **_k: went_sequential.append(True)
+    coord._start_batch_parallel()
+    return coord._chunks, bool(went_sequential)
+
+
+def test_batch_parallel_keeps_each_source_file_whole(app, in_dir):
+    """The collision this guards: two workers handed halves of one file
+    would open the same per-file archive. Three files of two output frames
+    each, four workers requested — three chunks, split on file boundaries."""
+    chunks, seq = _plan_parallel_chunks(
+        in_dir, fmts=["zarr"], zarr_grouping="file", n_workers=4)
+    assert not seq
+    assert chunks == [[0, 1], [2, 3], [4, 5]]
+
+
+def test_batch_parallel_still_splits_by_count_under_frame_grouping(app, in_dir):
+    """Per-frame archives cannot collide, so the original count-based split
+    is untouched — grouping must not cost throughput it doesn't need to."""
+    chunks, seq = _plan_parallel_chunks(
+        in_dir, fmts=["zarr"], zarr_grouping="frame", n_workers=3)
+    assert not seq
+    assert [len(c) for c in chunks] == [2, 2, 2]
+    assert [i for c in chunks for i in c] == list(range(6))
+
+
+def test_batch_parallel_falls_back_to_sequential_for_a_run_wide_archive(app, in_dir):
+    """"run" grouping is one group, so there is nothing to parallelise and
+    the existing single-worker path takes over rather than racing."""
+    chunks, seq = _plan_parallel_chunks(
+        in_dir, fmts=["zarr"], zarr_grouping="run", n_workers=4)
+    assert seq and chunks == []
+
+
+def test_grouping_does_not_constrain_a_run_that_writes_no_zarr(app, in_dir):
+    """The combo keeps its value when Zarr is unticked; a csv-only run must
+    not inherit the worker cap for an archive it will never write."""
+    chunks, seq = _plan_parallel_chunks(
+        in_dir, fmts=["csv"], zarr_grouping="file", n_workers=3)
+    assert not seq
+    assert [len(c) for c in chunks] == [2, 2, 2]

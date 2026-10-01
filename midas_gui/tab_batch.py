@@ -952,6 +952,21 @@ class BatchTab(QtWidgets.QWidget):
         this tab's own Hydra Batch Integrate page (building it on first use)."""
         self._ensure_hydra_page().set_panel_calibration(n, result)
 
+    def _sync_zarr_grouping_enabled(self):
+        """Grey the grouping combo out while "zarr" is unchecked — it is the
+        only format it affects."""
+        on = "zarr" in self._fmt.checked_keys()
+        self._zarr_grouping.setEnabled(on)
+        self._zarr_grouping.setToolTip(
+            self._zarr_grouping_tip if on else
+            "Only applies to Zarr output — tick Zarr in Output format to "
+            "choose how many frames share one archive.")
+
+    def _zarr_grouping_key(self) -> str:
+        """"frame" | "file" | "run" — what ``BatchWorker``'s
+        ``zarr_grouping`` expects, from the combo's item data."""
+        return self._zarr_grouping.currentData() or "frame"
+
     # ── GUI state (Save/Load GUI State) ─────────────────────────────
     def _state_widgets(self) -> dict:
         return {
@@ -959,6 +974,9 @@ class BatchTab(QtWidgets.QWidget):
             "use_json_btn": self._use_json_btn,
             "json_ed": self._json_ed,
             "kernel": self._kernel,
+            # Single-value widget, so widgets_to_dict persists it for free —
+            # unlike OutputFormatSelector, which is excluded from this map.
+            "zarr_grouping": self._zarr_grouping,
             "r_bin": self._r_bin,
             "e_bin": self._e_bin,
             "r_min": self._r_min,
@@ -1562,6 +1580,29 @@ class BatchTab(QtWidgets.QWidget):
         out.body.addLayout(S.Form().row(("Folder:", orow)))
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)
+        # How many output frames share one .zarr.zip. A rotation's worth of
+        # frames in one archive is the useful default for a folder of
+        # multi-sub-frame files — three 1442-sub-frame files at OME_SUM 10
+        # otherwise produce 435 single-cake archives — but per-frame stays
+        # the default because it is what every existing project recorded.
+        self._zarr_grouping = _NoScrollComboBox()
+        for _label, _key in (("One zarr per output frame", "frame"),
+                             ("One zarr per source file", "file"),
+                             ("One zarr for the whole run", "run")):
+            self._zarr_grouping.addItem(_label, _key)
+        self._zarr_grouping_tip = (
+            "How many integrated frames share one .zarr.zip.\n"
+            "Per source file groups by ROTATION — the same unit omega is "
+            "measured from, so one HDF5 sub-frame stack (or, for one-frame-"
+            "per-file data, the whole selection) becomes one archive.\n"
+            "Batch Parallel cannot split a group across workers, so grouping "
+            "caps the worker count at the number of groups.")
+        self._zarr_grouping_row = S.Form().row(("Zarr grouping:", self._zarr_grouping))
+        out.body.addLayout(self._zarr_grouping_row)
+        # Disabled rather than hidden while zarr is off: a control that
+        # silently does nothing is worse than one that says why it can't.
+        self._fmt.changed.connect(self._sync_zarr_grouping_enabled)
+        self._sync_zarr_grouping_enabled()
         lv.addWidget(out)
 
         # ── Run mode ──
@@ -1907,6 +1948,7 @@ class BatchTab(QtWidgets.QWidget):
             "mask_sources": self._loader.get_state().get("mask"),
             "r_bin": self._r_bin.value(), "e_bin": self._e_bin.value(),
             "multi_azimuth": multi_azimuth,
+            "zarr_grouping": self._zarr_grouping_key(),
         }
         self._last_axis_ctx = (lsd, px, wl)
         # Stashed for the Save button, which runs long after this method
@@ -1935,6 +1977,7 @@ class BatchTab(QtWidgets.QWidget):
             dark=dark, bright=bright, background=background, bright_mode=bright_mode,
             weighted=weighted, context=context, im_trans=self._resolved_im_trans(),
             multi_azimuth=multi_azimuth, calibration_snapshot=calib_snapshot,
+            zarr_grouping=self._zarr_grouping_key(),
             run_mode=self._run_mode.currentData(), n_workers=self._n_workers.value())
         self._worker.progress.connect(self._on_progress)
         self._worker.frame_done.connect(self._on_frame)
@@ -2068,6 +2111,10 @@ class BatchTab(QtWidgets.QWidget):
             argv += ["--ome-channel", ome["channel"]]
         if ome["collapse"]:
             argv += ["--ome-collapse"]
+        # Same reasoning as the omega block above: the job cannot see the
+        # combo, so an omitted flag would silently fall back to per-frame
+        # archives and the two run paths would disagree.
+        argv += ["--zarr-grouping", self._zarr_grouping_key()]
 
         if self._corr_widget.polar_check.isChecked():
             argv += ["--polarization",

@@ -8,6 +8,81 @@ file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this
 date for the full uncondensed entries if ever needed._
 
+## 2026-09-30 — One zarr per rotation, not one per frame
+
+Batch Integrate wrote the `zarr` format one archive per combined output
+frame. That was deliberate — mpe_wf writes one zarr per scan point, and we
+extended it so a file split by "Combine sub-frames" got one per chunk — but
+it was parity with a convention, not a requirement, and it does not scale.
+The folder that prompted this (three 1442-sub-frame VAREX files at
+`OME_SUM 10`) would have produced **435 single-cake archives**. Asked for one
+per source HDF5 instead.
+
+Nothing downstream forced per-frame. GSAS-II's `readMidas` validates only
+`InstrumentParameters` / `REtaMap` / `OmegaSumFrame` (see the 2026-09-26
+entry), all multi-frame by construction; the Zarr Viewer slices any leading
+axis; MIDAS's own native output is multi-frame. Per-frame was a default
+nobody had chosen.
+
+**Grouping reuses the rotation key rather than inventing a second one.**
+A group is one rotation — the same unit ω is measured from — so
+`_HDF5StackGlobSource.zarr_group_key` is defined as
+`omega_channel_window(idx)[0]`, exactly as `raw_window_for_index` is defined
+as `omega_channel_window(idx)[1:]`. One walk decides which rotation a frame
+belongs to, and both the angle and the archive read it. Had grouping done
+its own file walk, a future change to one would silently desynchronise an
+archive from the angles inside it. `_ChunkCombinedFileSource` returns a
+constant for the same reason its ω window counts across the selection:
+one-frame-per-file data only becomes a rotation as a series.
+
+**Streaming, not buffering.** The obvious implementation — collect a
+rotation's cakes and hand `write_gsas_zarr_zip` a list — would have cost
+~830 MB for a 1442-frame group at 72x1000 float64. The backend already
+exposes `GSASZarrWriter` (context manager, `add_frame`/`close`), which
+`write_gsas_zarr_zip` is itself a thin wrapper over and whose docstring
+promises "a long scan never has to be held in memory". Holding one open
+writer per group keeps peak memory identical to the per-frame path. This is
+why the work is a `_ZarrGroupWriter` owning a writer rather than a list.
+
+`omega_sum_frames` is deliberately left at 1. It chunks ALREADY-INTEGRATED
+frames inside the archive; `OME_SUM` collapses raw sub-frames before
+integration. They are different axes and feeding one from the other would
+collapse the same data twice. Noted because the names invite exactly that
+mistake.
+
+**Provenance moved from per frame to per group**, which is strictly cheaper
+(one extract/repack per archive, not per frame) and is what
+`h5_metadata.align` was built for — it already reduced "one entry per output
+frame" from a *sequence* of frame ranges and needed no change, only to be
+handed the whole group's ranges. `storage_ring_current_mA`/`sample_motors`
+stay scalars for a single-frame group so a "frame"-grouped archive is
+byte-comparable with what shipped before, and become per-frame lists
+otherwise. A "run" group spanning several source files has no single
+`instrument/` tree to align, so the copy is skipped and logged rather than
+guessing which file's tree to use.
+
+**Batch Parallel splits on group boundaries** (`_split_into_chunks_on_groups`).
+The count-based splitter would hand two workers halves of one source file and
+they would open the same `.zarr.zip` path. Alignment caps parallelism at the
+number of groups — a 3-file folder uses 3 workers, not 8 — which is a real
+throughput cost, accepted because the alternatives were worse: forcing
+sequential loses all cores, and refusing the combination is a dead end. Groups
+are formed from CONSECUTIVE equal keys, not by gathering every index with a
+given key: reordering frames to suit the writer would be a worse bug than
+writing two archives for an interleaved source.
+
+**Default stays "frame".** Every project file and script written so far ran
+under it, and a silent change to what a re-run produces is not worth the
+convenience. The combo is in `_state_widgets` so it persists with the rest of
+the GUI state, and `project.integrate_attempt_gui_fields` falls back to
+"frame" for attempts recorded before it existed — which is what those
+attempts actually ran.
+
+The CLI flag (`--zarr-grouping`) and the argv emission went in with the
+feature, not after it. That is the direct lesson of the 2026-09-29 omega
+entry below: a setting wired into only the in-process path is invisible, not
+an error — the background job just quietly does something else.
+
 ## 2026-09-29 — A frozen GUI has to be able to tell us where it is stuck
 
 Two "the GUI is hanging" reports in one day, and neither could be answered.

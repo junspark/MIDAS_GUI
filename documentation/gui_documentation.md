@@ -2374,13 +2374,61 @@ data source is loaded, mirroring `mpe_wf_saxs_waxs`'s own
 ### Output formats — checkbox list behind a popup button (multi-select)
 Click the **Output format ▾** button to reveal a checkbox per format —
 CSV (R,I,σ) · XYE (2θ) · FXYE (centideg) · DAT (Q) · HDF5 (full stack) ·
-2D-CSV (η×R cake) — check as many as you want and every checked one is
-written for every frame (HDF5 as one combined full-stack file, the rest one
-file per frame). One format (CSV) is checked by default. The button's own
+2D-CSV (η×R cake) · Zarr (cake, REtaMap) — check as many as you want and
+every checked one is written for every frame (HDF5 as one combined
+full-stack file, Zarr as described under **Zarr grouping** below, the rest
+one file per frame). One format (CSV) is checked by default. The button's own
 text names whichever formats are currently checked (e.g. "Output format:
 CSV, XYE ▾") so the selection is visible without opening the menu — the
 checkboxes themselves no longer take up permanent space in the Output
 card.
+
+#### Zarr grouping — how many frames share one archive
+
+A **Zarr grouping** drop-down sits under the format button and applies to the
+`zarr` format alone (it greys out, with a tooltip saying so, while Zarr is
+unchecked):
+
+| Setting | One `.zarr.zip` per | Named |
+|---|---|---|
+| **One zarr per output frame** (default) | combined output frame | `<frame-id>.ave.zarr.zip` |
+| **One zarr per source file** | rotation | `<source-stem>.ave.zarr.zip` |
+| **One zarr for the whole run** | run | `<source-stem>.<start>_<end>.ave.zarr.zip` |
+
+Per-frame is the original behaviour, matching mpe_wf's one-zarr-per-scan-point
+convention, and stays the default so every existing project keeps writing what
+it always wrote. It does not scale: three 1442-sub-frame VAREX files at
+`OME_SUM 10` produce **435 single-cake archives**.
+
+**A group is one rotation — the same unit ω is measured from** (§7's omega
+rule). One HDF5 sub-frame stack is one rotation, so "per source file" gives one
+archive per file; one-frame-per-file data (TIFF/`.ge*`) only becomes a rotation
+as a series, so there the whole selection is one group and "per source file"
+produces a single archive. Grouping and ω read the same answer from the same
+code (`zarr_group_key` is defined through `omega_channel_window`), so an
+archive can never disagree with the angles inside it.
+
+Three consequences worth knowing:
+
+- **`/Omegas` is per frame regardless.** Grouping changes packaging, not
+  physics — a per-file archive carries its rotation's three (or 145) angles,
+  each file still restarting at `OME_START`.
+- **`/SumFrames` becomes the sum over the group.** The backend writes it over
+  every frame in an archive; per-frame that is just the frame, per-file it is
+  the summed rotation — which is what the field is for.
+- **Batch Parallel cannot split a group**, since two workers would open the
+  same path. Chunk boundaries fall on group boundaries instead, so the worker
+  count is capped at the number of groups: a 3-file folder uses 3 workers
+  however many were requested, and the run log says so. "One zarr for the
+  whole run" is a single group, so it runs sequentially.
+
+A run-spanning archive is built as `…ave.zarr.zip.part` and renamed once the
+processed frame range is known, so a run that dies mid-write leaves an
+obviously incomplete file rather than a plausible-looking one.
+
+Both run paths carry the setting: **Start Integration** passes it in-process,
+**Run as background job** serialises it as `--zarr-grouping frame|file|run`,
+always present on the command line echoed into the **Logs** tab.
 
 **2D-CSV (η×R cake) — one file per frame, in either mode.** Each frame's
 whole cake is written to `2d_csv/<frame>_cake.csv`: a header row of R values

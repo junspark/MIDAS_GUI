@@ -92,6 +92,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Averaged/summed data: give every output frame the one "
                         "run-wide mean omega instead of a per-frame value")
 
+    p.add_argument("--zarr-grouping", default="frame",
+                   choices=["frame", "file", "run"],
+                   help="How many integrated frames share one .zarr.zip: one "
+                        "each (default), one per source file (i.e. per "
+                        "rotation), or one for the whole run")
+
     p.add_argument("--multi-azimuth", action="store_true")
     p.add_argument("--weighted", dest="weighted", action="store_true", default=True)
     p.add_argument("--no-weighted", dest="weighted", action="store_false")
@@ -248,6 +254,7 @@ def main(argv=None) -> int:
         dark=dark, bright=bright, background=background, bright_mode=args.bright_mode,
         weighted=args.weighted, multi_azimuth=args.multi_azimuth,
         omega_cfg=_omega_cfg(args),
+        zarr_grouping=args.zarr_grouping,
         im_trans=tuple(spec.TransOpt or ()), calibration_snapshot=calib_snapshot)
 
     exit_code = [0]

@@ -819,6 +819,15 @@ def integrate_attempt_gui_fields(meta: dict) -> dict:
         fmt_keys = [k for k in fmt_keys if k in valid_keys]
         if fmt_keys:
             fields["fmt_keys"] = fmt_keys
+    # Stored by its short key; the combo is populated by display label, so
+    # translate the same way kernel/fmt do above. Absent (every project saved
+    # before zarr grouping existed) leaves the widget at its "frame" default,
+    # which is the behaviour those attempts actually ran under.
+    zg_label = {"frame": "One zarr per output frame",
+                "file": "One zarr per source file",
+                "run": "One zarr for the whole run"}.get(inputs.get("zarr_grouping"))
+    if zg_label:
+        fields["zarr_grouping"] = zg_label
     if inputs.get("monitor_file"):
         fields["mon_ed"] = inputs["monitor_file"]
     q_cfg = inputs.get("q_cfg")
