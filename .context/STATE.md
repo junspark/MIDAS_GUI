@@ -1,24 +1,49 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-30 (PR #11 (junspark, 48 commits) merged into main in 8 staged checkpoints — see DECISIONS)_
+_Last updated: 2026-10-01 (upstream accepted PR #11; their follow-ups merged
+back, and last night's zarr grouping committed — all local, nothing pushed)_
 
 ## Now working on
 
-Nothing in progress.
+**Reacting to the canonical repo taking PR #11.** Upstream merged all 48 of
+our commits on 2026-09-30 as eight staged checkpoints ending at our `7ccf0fb`,
+then added three follow-up fixes. Those are merged back here (`3bcba7f`), and
+last night's zarr grouping is committed ahead of it (`4ec0174`) so git could
+do a real three-way merge rather than a stash replay.
+
+`main` is **14 commits ahead of `origin/main` and nothing is pushed.** That is
+the next action and it needs your word, since it is also the next PR upstream.
+
+Needing you, in the order it matters:
+- **Push, then open the next PR upstream.** Upstream's staged-checkpoint
+  method worked well on 48 commits; this one is two commits and does not need
+  it.
+- **Eyes on a real zarr-grouping run.** The `Fe9Cr_KGT6038_after_failure_ff`
+  folder with Dark set to both bracketing dark files, grouping *per source
+  file*, should give 3 archives rather than 435. Verified only against
+  synthetic two-file stacks, and the combo has never been seen rendered.
+- **Eyes on the cake HDF5.** Still never opened in a viewer here — the one
+  remaining eyes-on item now that the zarr's `/Omegas` are confirmed.
+- **`PoleFigureWorker`** is still single-frame and takes χ/φ from its cfg.
+  Making it ω-aware across a series is the piece the whole omega arc exists to
+  enable, and it now has a correct, verified angle to stand on.
+- **Metadata provenance**, which you said you'd keep testing against.
 
 Open follow-ups, none blocking:
-- **From junspark's own STATE.md (2026-09-29), carried forward**: `PoleFigureWorker`
-  is still single-frame and takes χ/φ from its cfg — making it ω-aware across a
-  series is the piece the whole omega arc (landed in this merge) exists to
-  enable, and it now has a correct, verified angle to stand on. The cake HDF5 has
-  still never been opened in a real viewer (needs an X11/VNC session). Metadata
-  provenance was flagged as something to keep testing against.
-- The Frozen-point (high-tilt) pipeline still doesn't forward the Refine card's
-  ± tolerance window to the backend (`calib.py`'s `_seed_and_v1` call in that
-  branch is missing `tols=tols`, unlike the identical bayesian/joint call
-  above it) — disclosed with a console warning for now; the real one-line fix
-  is still open. See DECISIONS 2026-09-30.
+- Frozen-point (high-tilt) does not forward the Refine card's ± tolerance
+  window: `calib.py`'s `_seed_and_v1` call in that branch is missing
+  `tols=tols`, unlike the identical bayesian/joint call above it. Upstream
+  found this reading our checkpoint 1 and disclosed it with a console warning
+  (`f279030`, now merged here) rather than fixing it. **Checked 2026-10-01 and
+  deliberately left as a warning**: the v1→spec mapping is pipeline-independent
+  (the installed 0.17.0's `compat/from_v1.py` reads `v1.tolLsd`/`tolBC`/
+  `tolTilts` with no branching), so the one-liner is almost certainly right —
+  but whether `iterate_frozen_point_until_stable` honours those bounds cannot
+  be tested here, because 0.17.0 ships **no frozen-point pipeline at all**.
+  That is the same gap `tests/test_frozen_point_vendor.py` already skips on.
+  Fix it when a backend that has the pipeline is installed, not before.
+  See DECISIONS 2026-09-30.
 - `documentation/calibration_unification_plan.md` — the three Calibrate UI
   surfaces (`tab_calibrate.py`, `hydra_calib_page.py`,
   `hydra_geometry_card.py`) have drifted; Hydra has none of the d-spacing
@@ -31,14 +56,58 @@ Open follow-ups, none blocking:
   pyqtgraph teardown SIGABRT (reproduces on clean HEAD; not ours).
 
 - Still untested (ROADMAP.md): `job_queue.py`, `peak_fit_panel.py`.
-  `batch_cli.py` now has `tests/test_batch_cli_omega.py`, which covers the
-  omega flags and the tab→argv→cfg round trip but nothing else in the file.
+  `batch_cli.py` now has `tests/test_batch_cli_omega.py` and
+  `tests/test_batch_cli_zarr_grouping.py`, which cover the omega flags, the
+  zarr-grouping flag and the tab→argv→cfg round trip for both — but nothing
+  else in the file.
+- `test_pva_live_source_roundtrip`'s symptom has changed: as of 2026-09-30 it
+  fails on an image-content mismatch rather than only the `libstdc++` CXXABI
+  import error recorded below (the import error still appears at HEAD). Same
+  test, same pre-existing status — it fails identically on clean HEAD — but
+  the recorded cause is no longer the whole story.
 - Branch cleanup done 2026-09-10: `pr-7-strain-cake`, `test-fork-imports` and
   the four fetched `refs/remotes/origin/pr/*` refs are gone; only `main` and
   `origin/main` remain. Re-fetch any PR head with
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-09-30 — one zarr per rotation, not one per frame.** `4ec0174`,
+committed 2026-10-01, not pushed. The
+`zarr` format wrote one archive per combined output frame; the folder that
+prompted this (three 1442-sub-frame VAREX files at `OME_SUM 10`) would have
+produced 435 single-cake archives. A **Zarr grouping** combo in the Output
+card now offers *per output frame* (unchanged default), *per source file* and
+*per run*.
+
+- **A group is one rotation — the same unit ω is measured from.**
+  `_HDF5StackGlobSource.zarr_group_key` is defined as
+  `omega_channel_window(idx)[0]`, exactly as `raw_window_for_index` is
+  `omega_channel_window(idx)[1:]`, so an archive cannot disagree with the
+  angles inside it. TIFF/`.ge*` returns a constant: that selection is the
+  rotation.
+- **Streams, does not buffer.** Uses the backend's `GSASZarrWriter`
+  (`add_frame`/`close`) through a new `_ZarrGroupWriter`, so peak memory is
+  one frame — buffering a 1442-frame group would have cost ~830 MB.
+- **Batch Parallel splits on group boundaries** (`_split_into_chunks_on_groups`),
+  since two workers would otherwise open the same `.zarr.zip`. Caps workers at
+  the group count; "run" grouping falls through to sequential.
+- **Both run paths carry it** — `--zarr-grouping` on the `batch_cli` argv, with
+  a round-trip test, which is the direct lesson of the 2026-09-29 ω bug below.
+- Provenance moved from per frame to per group (fewer repack passes);
+  `h5_metadata.align` already took a sequence of frame ranges and needed no
+  change. A "run" group over several files skips the `instrument/` copy and
+  logs it rather than guessing.
+- Touched: `workers.py`, `tab_batch.py`, `widgets.py` (new
+  `OutputFormatSelector.changed`), `batch_cli.py`, `project.py`,
+  `tests/test_batch_zarr_output.py`, new
+  `tests/test_batch_cli_zarr_grouping.py`, `documentation/gui_documentation.md`
+  §7, `.context/DECISIONS.md`.
+- Suite: **1178 collected** (was 1149 — 29 new), same two known failures
+  (`test_apply_project_calibration_single_detector`,
+  `test_pva_live_source_roundtrip`) and three known skips. Both failures
+  reproduce on clean HEAD. The new tests were confirmed to fail against HEAD
+  in a throwaway worktree before being called done.
 
 **2026-09-30 — PR #11 (junspark) merged into `main`: 48 commits, 8 staged
 checkpoints, 3 real bugs found and fixed along the way.** Full rationale,
