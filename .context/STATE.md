@@ -1,24 +1,24 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-09-29 (ω confirmed correct in a live zarr; ω now restarts
-per file and is stated on screen; three independent bugs fixed — 2D CSV, the
-background-job ω, and a whole-file read per frame)_
+_Last updated: 2026-09-30 (PR #11 (junspark, 48 commits) merged into main in 8 staged checkpoints — see DECISIONS)_
 
 ## Now working on
 
-**Nothing mid-flight.** Six commits landed 2026-09-29 (below) and are pushed.
-What comes next, in the order it matters:
-
-- **`PoleFigureWorker`** is still single-frame and takes χ/φ from its cfg.
-  Making it ω-aware across a series is the piece the whole omega arc exists to
-  enable, and it now has a correct, verified angle to stand on.
-- **Eyes on the cake HDF5** (needs your X11/VNC session). It has still never
-  been opened in a viewer here — the one remaining eyes-on item now that the
-  zarr's `/Omegas` are confirmed.
-- **Metadata provenance**, which you said you'd keep testing against.
+Nothing in progress.
 
 Open follow-ups, none blocking:
+- **From junspark's own STATE.md (2026-09-29), carried forward**: `PoleFigureWorker`
+  is still single-frame and takes χ/φ from its cfg — making it ω-aware across a
+  series is the piece the whole omega arc (landed in this merge) exists to
+  enable, and it now has a correct, verified angle to stand on. The cake HDF5 has
+  still never been opened in a real viewer (needs an X11/VNC session). Metadata
+  provenance was flagged as something to keep testing against.
+- The Frozen-point (high-tilt) pipeline still doesn't forward the Refine card's
+  ± tolerance window to the backend (`calib.py`'s `_seed_and_v1` call in that
+  branch is missing `tols=tols`, unlike the identical bayesian/joint call
+  above it) — disclosed with a console warning for now; the real one-line fix
+  is still open. See DECISIONS 2026-09-30.
 - `documentation/calibration_unification_plan.md` — the three Calibrate UI
   surfaces (`tab_calibrate.py`, `hydra_calib_page.py`,
   `hydra_geometry_card.py`) have drifted; Hydra has none of the d-spacing
@@ -39,6 +39,18 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-09-30 — PR #11 (junspark) merged into `main`: 48 commits, 8 staged
+checkpoints, 3 real bugs found and fixed along the way.** Full rationale,
+per-checkpoint GUI-risk table and verification detail in DECISIONS. Headline
+additions: new Zarr Viewer tab (visible by default), a cake-parameters editor
+dialog, omega (rotation-angle) tracking end-to-end through Batch Integrate,
+✕-to-close on every optional tab, the horizontal polarization-plane fix, and
+assorted Calibrate/Corrections polish. `main` was never touched mid-flight —
+everything happened on a disposable `merge/pr11-staged` branch, checkpoint by
+checkpoint, with a test sweep + offscreen screenshot diff after each before
+advancing. Full 75-file per-file sweep is green except the one known
+pre-existing `test_apply_project_calibration_single_detector` SIGABRT.
 
 **2026-09-29 — ω verified live, then made to say what it means; three bugs
 out.** Six commits, `4c7b776`…`dc24f12`, pushed. You confirmed a real run's

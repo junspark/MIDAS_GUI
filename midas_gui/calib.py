@@ -810,6 +810,19 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
         # the GUI's Distortion checkboxes for p0..p14 — iterate_frozen_point_
         # until_stable defers to it exactly like four_stage/bayesian/joint do,
         # so no separate refine_distortion override is passed here.
+        #
+        # tols is deliberately NOT forwarded here yet (unlike the identical
+        # bayesian/joint call above) — tracked as a follow-up, not a backend
+        # limitation: spec_from_v1_params() reads v1.tol* the same way for
+        # every pipeline, so wiring it through is a one-line fix. Until then,
+        # warn instead of silently running on CalibrationParams' hardcoded
+        # defaults, mirroring first_time's disclosure above.
+        if not tols_are_default(tols):
+            print("[calib] WARNING: the parameter-window (±) settings are "
+                  "not yet forwarded to the 'Frozen-point (high-tilt)' "
+                  "pipeline — it runs with default bounds instead. Use "
+                  "One-shot, Four-stage, Bayesian or Joint-cake for a "
+                  "bounded refinement with your chosen window.")
         v1 = _seed_and_v1(img, wavelength, pxY, pxZ, calibrant, pNY, pNZ,
                           refine, n_iter, device, manual)
         if device != "cpu":

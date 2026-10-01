@@ -1761,29 +1761,29 @@ class BatchWorker(QtCore.QThread):
             zarr_group_key_fn = None
             zarr_writer: Optional[_ZarrGroupWriter] = None
             zarr_open_key = None
-            h5_trees: dict = {}   # source path -> its instrument/ tree, read once
             # Shared by the zarr writer below and cake_hdf5.write_cake_h5 at
             # the end of run() — computed once, whichever wants it first.
             #
-            # /REtaMap row 3 is documented as the per-bin summed area weight,
-            # "a property of the geometry alone" — so it has to be the
-            # plain-kernel pixel-area count even on the corrections path,
-            # where ctx["geom"] is deliberately None.  corr_counts is not a
-            # substitute: it is normalised through the soft-bin kernel and
-            # folds in the polarization / solid-angle factors, neither of
-            # which belongs in an area.  Build a geometry here purely for the
-            # count, so a Zarr (or cake HDF5) written with corrections on
-            # carries the same BinArea as one written with them off.
+            # /REtaMap row 3 (and cake_hdf5's own BinArea) is documented as the
+            # per-bin summed area weight, "a property of the geometry alone" —
+            # so it has to be the plain-kernel pixel-area count even on the
+            # corrections path, where ctx["geom"] is deliberately None.
+            # corr_counts is not a substitute: it is normalised through the
+            # soft-bin kernel and folds in the polarization / solid-angle
+            # factors, neither of which belongs in an area. Build a geometry
+            # here purely for the count, so either output written with
+            # corrections on carries the same BinArea as one written with them
+            # off — shared by BOTH consumers below, not just zarr, since
+            # count_cake(None, ...) crashes identically for want_h5_cake.
             cake_bin_area = None
             if want_zarr or want_h5_cake:
-                cake_geom = (geom if geom is not None
-                             else build_geom(spec, self._kernel, mask))
-                cake_bin_area = count_cake(cake_geom, self._kernel,
-                                           spec.NrPixelsZ, spec.NrPixelsY)
+                cake_geom = geom if geom is not None else build_geom(spec, self._kernel, mask)
+                cake_bin_area = count_cake(cake_geom, self._kernel, spec.NrPixelsZ, spec.NrPixelsY)
+            h5_trees: dict = {}   # source path -> its instrument/ tree, read once
             if want_zarr:
                 zarr_dir = self._out_dir / "zarr"
                 zarr_dir.mkdir(parents=True, exist_ok=True)
-                zarr_bin_area = cake_bin_area   # see the comment where it's built
+                zarr_bin_area = cake_bin_area
                 if self._zarr_grouping == "file":
                     zarr_group_key_fn = getattr(source, "zarr_group_key", None)
                     if zarr_group_key_fn is None:

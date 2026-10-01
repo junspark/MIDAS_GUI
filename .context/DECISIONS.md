@@ -83,6 +83,93 @@ feature, not after it. That is the direct lesson of the 2026-09-29 omega
 entry below: a setting wired into only the in-process path is invisible, not
 an error — the background job just quietly does something else.
 
+## 2026-09-30 — PR #11 (junspark) merged into `main`: 8 staged checkpoints, not one big merge
+
+**Why staged rather than a single merge.** PR #11 was titled "Major
+documentation update" but was actually 48 commits / 67 files / +12405/-709
+lines — a new Zarr Viewer tab, a cake-parameters editor, omega tracking
+through Batch Integrate, several Calibrate/Corrections fixes, and a
+tab-close-button feature. The explicit concern was GUI layout: with one
+merge, a button/field/arrangement regression anywhere in that diff would
+have been nearly impossible to isolate. Instead `main` was advanced through
+the PR's own commit sequence in 8 checkpoints (grouped by the PR's already-
+atomic commit boundaries), each on a disposable `merge/pr11-staged` branch,
+with a targeted test run + `pyflakes` diff + stale-import grep + an offscreen
+screenshot pass after every checkpoint, before advancing to the next.
+`main` was never touched until all 8 were validated.
+
+**Mechanics.** `main` was a full ancestor of `origin/pr/11`'s tip (junspark
+periodically merges `main` back into his branch), so the *final* PR head was
+a clean fast-forward — but every *intermediate* checkpoint commit was not
+(his early commits predate our later `main` commits), so each checkpoint was
+a real 3-way merge, not `--ff-only`. Conflicts were almost always in
+`.context/STATE.md`/`DECISIONS.md` (both sides narrating their own recent
+work) and resolved as a straight concatenation — newest dated entries first,
+since both files are append-only/newest-first and the two branches' new
+entries never actually overlapped in time. Two exceptions needed real
+reading rather than mechanical concatenation, both in `workers.py`: see the
+two bug entries below.
+
+**Checkpoint table** (commit ranges into `origin/pr/11`, oldest to newest):
+
+| CP | Ends at | Content |
+|----|---------|---------|
+| 1 | `8f578a6` | Calibrate: seed spinbox steps, real ± parameter windows for crystalline calibrants, full-width Run/Save, named working dir + `.midas_scratch/`, `.instr.*` suffix, Distortion-selection persistence |
+| 2 | `1f25933` | Terminology: "average"/"avg"/"ave" → "mean" across 11 files (labels/tooltips/one method rename, no behavior change) |
+| 3 | `8e1a7f1` | Batch "Show bin grid" no longer resets pan/zoom; Corrections polarization plane default 0°→90° (physically correct, horizontal ring plane) |
+| 4 | `6f9c7c7` | Frozen-point backend guards (net-zero vs. our `main`, already had it via an earlier upstream merge); provenance `script`/`script_sha256`/`tag` fields |
+| 5 | `3e0e6c2` | **New Zarr Viewer tab**, visible-by-default; Batch's stream-mode preview read moved off the GUI thread (`StreamPreviewWorker`) to fix a real HDF5-over-NFS freeze; `HDF5_USE_FILE_LOCKING=FALSE` |
+| 6 | `35a7b8b` | Zarr Viewer moved after Batch Queue in the tab bar; ✕-to-close on every optional tab (with a legible custom icon); GSAS-II zarr contract + source HDF5 instrument-tree carry-through |
+| 7 | `6ef8e75` | Cake-parameters editor dialog (all 9 `cake_parameters` CSV columns in one place) |
+| 8 | `7ccf0fb` (PR head) | Omega (rotation-angle) tracking end-to-end: cake-summary/loader-hint readouts, background-job omega fix, 2D-CSV fix, chunk-read perf fix, freeze diagnostics (`kill -USR1`) |
+
+**Three real bugs found during the merge, not present in either branch alone:**
+
+1. **Checkpoint 1** — Frozen-point (high-tilt) silently ignores the Refine
+   card's ± tolerance window: `calib.py`'s `_seed_and_v1` call in that branch
+   is missing `tols=tols`, unlike the identical bayesian/joint call one block
+   above. Not a backend limitation (`spec_from_v1_params` reads `v1.tol*` the
+   same way regardless of pipeline) — a one-line omission. Disclosed with a
+   console warning (matching `first_time`'s existing, genuine disclosure)
+   rather than fixed inline, per instruction; the real fix is still open
+   (see STATE.md).
+2. **Checkpoint 3 merge conflict** — the PR's own zarr-crash fix
+   (`count_cake(None, ...)` when a physics correction leaves `geom` deliberately
+   `None`) only patched the zarr output path. Our own more-recent multi-azimuth
+   HDF5 "cake" output (`want_h5_cake`) shared the exact same crash, unpatched —
+   Multi-azimuth output + HDF5 + any physics correction together would have
+   crashed Batch Integrate. Fixed by sharing one geometry-fallback computation
+   between both consumers. Reproduced the crash on the unpatched code and
+   confirmed the fix via a standalone smoke run (no existing test covered this
+   combination). Checkpoint 8 independently re-derived the identical fix while
+   merging upstream on their side — confirms it was the correct fix, not just
+   a workaround.
+3. **Checkpoint 8** — `tests/test_viewer_origin_and_readout.py` (pre-existing,
+   untouched by the PR) went from 100% reliable to a ~50% reproducible
+   SIGSEGV/SIGBUS. Root cause: checkpoint 5's async `StreamPreviewWorker`
+   moved `BatchTab`'s default-preview read to a background `QThread`; that
+   thread's lazy `midas_integrate_v2` import (which pulls in `torch`) can be
+   the *first* torch import in the process when a test constructs a bare
+   `BatchTab()` as the first heavy widget — racing the main thread's own
+   import machinery inside torch's C-extension init. An `isRunning()`/`wait()`
+   mitigation was tried first and didn't help (confirming the race is inside
+   torch's init, not about thread lifetime). A real app never hits this,
+   since some earlier-constructed tab (Calibrate, via `midas_calibrate_v2`)
+   has always imported torch on the main thread first. Fixed by pre-warming
+   the import in the test itself. Verified 10/10 clean runs after, vs. 5/10
+   before.
+
+**Verified overall:** full 75-file per-file `pytest` sweep on a clean `HOME`
+green except the one known pre-existing `test_apply_project_calibration_
+single_detector` SIGABRT (present on clean `main` too — see 2026-08-30 entry).
+`pyflakes midas_gui/*.py` unchanged at 39 throughout (new warnings, when any
+appeared, were always the same pre-existing "intentional side-effect import"
+pattern applied to a new file). No stale imports or accidental deletions at
+any checkpoint (checked via `git ls-tree` diffs, not just `git status`). Every
+tab's content below the tab bar pixel-diffed byte-identical against a
+pre-merge baseline screenshot except where a checkpoint's own commits said it
+should differ.
+
 ## 2026-09-29 — A frozen GUI has to be able to tell us where it is stuck
 
 Two "the GUI is hanging" reports in one day, and neither could be answered.
@@ -802,6 +889,129 @@ reproduces on clean HEAD too); `pyflakes midas_gui/*.py` unchanged at 37;
 offscreen screenshot of the Batch Integrate loader card confirmed the stride
 row is gone and Combine sub-frames shows for a plain TIFF folder.
 
+## 2026-09-25 — Data Viewer: folder format filter, under-viewer frame scrubber, profile-file lineout; app-wide frame-nav slider/button visibility
+
+Three Data Viewer requests plus a visibility fix applied everywhere a
+frame-navigation slider exists.
+
+**Folder format filter is a `DataLoaderPanel` opt-in (`folder_format_filter`),
+not a Data-Viewer-only special case.** `helpers._collect_frame_paths`'s
+folder-glob loop was factored into `_folder_format_groups(folder) ->
+{label: [paths]}` (TIFF/HDF5/GE/CBF/EDF), reused by both the unfiltered
+default path and a new `ext_group` filter param. The panel builds a
+"Format:" combo (shown only when more than one group is actually present)
+gated behind the new constructor flag so Calibrate/Mask Builder/Batch/Refine
+— every other `DataLoaderPanel` consumer — are unaffected; only
+`tab_view.py` passes `folder_format_filter=True`.
+
+**Frame scrubber relocation reused an existing pattern instead of
+inventing one.** `tab_calibrate.py` already solved "scrubber under the
+viewer, loader's own nav hidden" for its `mode="single"` loader
+(`_build_frame_scrub_bar` + `hide_frame_field=True`), itself modeled on
+`widgets.CakeStackViewer`'s scrub bar. Copied verbatim for `tab_view.py`'s
+`mode="stack"` loader — required one small `widgets.py` fix:
+`hide_frame_field` only ever gated `mode=="single"`'s frame row, never
+`mode=="stack"`'s `_nav_row`, so a stack-mode consumer had no way to hide
+its loader's own nav row before this. Extended to cover both modes; no
+other stack-mode consumer exists yet, so no behavior change elsewhere.
+
+**Profile-file loading is a separate control in the Radial Profile tab,
+not an overload of the Data/Image field** — confirmed with the user before
+building. Mirrors `tab_pdf.py`'s existing "I(Q) source" combo. Keeps the
+shared `DataLoaderPanel` untouched for this feature (lower risk than
+teaching it to recognize non-image extensions) at the cost of one
+tab-local `_profile_file_mode` flag that `_on_loader_data`/`_on_fields_changed`
+must check before touching the image viewer.
+
+**Axis-unit handling for a loaded 2θ/Q-native file (`.xye`/`.fxye`/`.dat`)
+without a calibration attached.** `ProfileViewer` always stored/plotted
+`r_px` and converted to 2θ/Q via `_r_to_x` using live lsd/px/wl — feeding it
+a native 2θ/Q axis directly (relabeling only) would have silently
+mislabeled the plot as "R (px)" whenever `_lsd` is `None`. Rather than
+gate the whole file-lineout feature on requiring a calibration up front (the
+ask was to plot immediately), `set_profile` gained an optional `native_unit`
+param: when set, `_replot` skips the r_px conversion, plots the stored axis
+as-is, and locks the R/2θ/Q combo onto the matching entry (still reused for
+ring-marker placement, since the combo's `currentIndex()` is what that code
+already reads). Once a calibration supplies real lsd/px/wl,
+`helpers.native_axis_to_r_px` (algebraic inverse of `_r_to_x`) converts the
+loaded axis back to genuine r_px and the profile is re-plotted through the
+normal (non-native) path — full unit toggle and ring overlay "for free".
+Extension → native unit follows `workers.write_profile`'s own dispatch
+(`.csv`→r_px, `.xye`/`.fxye`→2θ, `.dat`→Q) so a file this app wrote round-trips
+correctly.
+
+**Real gap found while wiring ring simulation to the no-image case:**
+`DetectorGeometryCard._simulate()` — the only place a material's ring radii
+(`m["_rings"]`) ever get computed — hard-required an image
+(`if img is None: QMessageBox.warning(...); return`), even though the ring
+math (`simulate_rings`/`simulate_rings_from_dspacings`) only needs
+wavelength/Lsd/pixel-size/d-spacing, never pixel data; the image check
+exists only to gate the *separate* on-image overlay (`_redraw_rings`, which
+already has its own independent `img is None` guard). Split the computation
+loop into `_compute_material_rings()` (reused, verbatim behavior, by
+`_simulate`) and added `simulate_rings_without_image()`, which computes rings
+and calls `_refresh_profile_markers()` directly — `tab_view.py` calls it
+whenever a profile file is loaded or `geometryChanged` fires while in
+file-lineout mode, since the normal image-gated call chain
+(`_on_sim_param_changed` → `_simulate`) never reaches it with no image
+loaded. `_refresh_profile_markers()` itself already needed no image (drew
+straight from cached `_rings` + lsd/px/wl) — confirmed by reading before
+building on it, not assumed.
+
+**App-wide frame-nav slider/button visibility.** Separately requested:
+every "iterate over frames" slider (Data Viewer, Calibrate, Mask Builder,
+Hydra's `mode="nav"` loader, `CakeStackViewer`, and `DataLoaderPanel`'s own
+`mode="stack"` nav row) plus its ◀/▶ buttons. Several of the ◀/▶ buttons are
+plain `QToolButton`s, which have no default background/border at all
+(native/flat) — nearly invisible against the dark theme — and the global
+`QSlider::groove` is a dark `#2a2a2d` that barely contrasts with the panel
+background it sits on. Fixed via one pair of `objectName`s
+(`frameNavBtn`/`frameNavSlider`) applied at each of the ~9 construction
+sites, with one new ID-scoped QSS block in `style.py` (accent-gradient
+button, brighter `#707070` groove) — deliberately scoped to those names
+rather than a blanket `QToolButton {}`/`QSlider {}` rule, so unrelated
+QToolButtons (help "?", browse "⋯", ROI ribbon) and threshold sliders
+(`_thr_slider` in Mask Builder/Calibrate) are untouched.
+
+**Verified:** new `tests/test_dataviewer_format_filter.py` (7),
+`test_dataviewer_frame_scrub.py` (5), `test_dataviewer_profile_file.py` (12)
+— not fork-isolated (same SIGSEGV-on-fork reason as `test_view_tab_controls.py`).
+11 touched/related test files green per-file on a clean `HOME`
+(`test_hydra_ui/_calib_ui/_batch_ui`, `test_manual_dspacing_calib_ui`,
+`test_mask_folder_frames`, `test_ring_projection`, `test_hydra_geometry`,
+`test_helpers`, `test_viewer_*`, `test_batch_data_source` included). `pyflakes
+midas_gui/*.py` 38→37 (the one change: `Path` in `tab_view.py` went from
+unused to used). Offscreen screenshot confirmed the new button/slider colors.
+
+## 2026-09-24 — Mask Builder: multi-frame Image detection peeks metadata only; threshold projection defaults to "current frame"
+
+Commit `d224c97`.
+
+**Frame-count detection never reads pixel data.** `_detect_multiframe()`
+answers "how many frames does this path have" from `tifffile`'s
+`series[0].shape` (not `len(tf.pages)` — a small `(N,H,W)` stack can pack
+into one TIFF page, so page count under-reports), an HDF5 dataset's
+`.shape[0]` via a plain `h5py.File` open (no read), or a `.geN` file's byte
+size minus the 8192-byte header divided by candidate square-detector sizes
+(2048/4096/1024/512 px). All are O(1) metadata reads so opening a large
+Image path to just *check* frame count stays cheap.
+
+**Threshold defaults to the displayed frame, not a full-frame reduction.**
+"Current frame" is the default and the only choice for a plain single image
+(Projection combo disabled + forced). Requested this way because reducing
+across every frame by default silently changes what section-1 thresholds
+against without the user asking — the Projection combo makes the behaviour
+explicit and opt-in. `Average`/`Sum` accumulate in float64 to avoid overflow
+across many frames; `Max` uses `np.maximum(..., out=acc)` in float32 since
+there's no summation to overflow.
+
+**Frame source dict (`self._img_frames`) has four `kind`s** (`files`, `array`,
+`h5`, `ge`) rather than eagerly loading every frame into memory — each
+`_get_frame_array(idx)` call reads (or slices, for the in-memory `array`
+case from a small multi-page TIFF) exactly one frame on demand, so a folder
+of many large frames or a big HDF5 stack doesn't blow up memory just because
+the Frame navigator is open.
 ## 2026-09-25 — Batch Integrate froze completely: HDF5-over-NFS locking hang, plus backgrounding the preview read
 
 Live report: picking a 17-file HDF5 source (10-frame "Combine sub-frames",
@@ -1415,130 +1625,6 @@ Fixed on both axes, deliberately:
   `QRadioButton` / `QGroupBox` indicators. The structural fix handles this one
   card; the stylesheet gap would have produced the same illusion anywhere else a
   box is disabled rather than hidden.
-
-## 2026-09-25 — Data Viewer: folder format filter, under-viewer frame scrubber, profile-file lineout; app-wide frame-nav slider/button visibility
-
-Three Data Viewer requests plus a visibility fix applied everywhere a
-frame-navigation slider exists.
-
-**Folder format filter is a `DataLoaderPanel` opt-in (`folder_format_filter`),
-not a Data-Viewer-only special case.** `helpers._collect_frame_paths`'s
-folder-glob loop was factored into `_folder_format_groups(folder) ->
-{label: [paths]}` (TIFF/HDF5/GE/CBF/EDF), reused by both the unfiltered
-default path and a new `ext_group` filter param. The panel builds a
-"Format:" combo (shown only when more than one group is actually present)
-gated behind the new constructor flag so Calibrate/Mask Builder/Batch/Refine
-— every other `DataLoaderPanel` consumer — are unaffected; only
-`tab_view.py` passes `folder_format_filter=True`.
-
-**Frame scrubber relocation reused an existing pattern instead of
-inventing one.** `tab_calibrate.py` already solved "scrubber under the
-viewer, loader's own nav hidden" for its `mode="single"` loader
-(`_build_frame_scrub_bar` + `hide_frame_field=True`), itself modeled on
-`widgets.CakeStackViewer`'s scrub bar. Copied verbatim for `tab_view.py`'s
-`mode="stack"` loader — required one small `widgets.py` fix:
-`hide_frame_field` only ever gated `mode=="single"`'s frame row, never
-`mode=="stack"`'s `_nav_row`, so a stack-mode consumer had no way to hide
-its loader's own nav row before this. Extended to cover both modes; no
-other stack-mode consumer exists yet, so no behavior change elsewhere.
-
-**Profile-file loading is a separate control in the Radial Profile tab,
-not an overload of the Data/Image field** — confirmed with the user before
-building. Mirrors `tab_pdf.py`'s existing "I(Q) source" combo. Keeps the
-shared `DataLoaderPanel` untouched for this feature (lower risk than
-teaching it to recognize non-image extensions) at the cost of one
-tab-local `_profile_file_mode` flag that `_on_loader_data`/`_on_fields_changed`
-must check before touching the image viewer.
-
-**Axis-unit handling for a loaded 2θ/Q-native file (`.xye`/`.fxye`/`.dat`)
-without a calibration attached.** `ProfileViewer` always stored/plotted
-`r_px` and converted to 2θ/Q via `_r_to_x` using live lsd/px/wl — feeding it
-a native 2θ/Q axis directly (relabeling only) would have silently
-mislabeled the plot as "R (px)" whenever `_lsd` is `None`. Rather than
-gate the whole file-lineout feature on requiring a calibration up front (the
-ask was to plot immediately), `set_profile` gained an optional `native_unit`
-param: when set, `_replot` skips the r_px conversion, plots the stored axis
-as-is, and locks the R/2θ/Q combo onto the matching entry (still reused for
-ring-marker placement, since the combo's `currentIndex()` is what that code
-already reads). Once a calibration supplies real lsd/px/wl,
-`helpers.native_axis_to_r_px` (algebraic inverse of `_r_to_x`) converts the
-loaded axis back to genuine r_px and the profile is re-plotted through the
-normal (non-native) path — full unit toggle and ring overlay "for free".
-Extension → native unit follows `workers.write_profile`'s own dispatch
-(`.csv`→r_px, `.xye`/`.fxye`→2θ, `.dat`→Q) so a file this app wrote round-trips
-correctly.
-
-**Real gap found while wiring ring simulation to the no-image case:**
-`DetectorGeometryCard._simulate()` — the only place a material's ring radii
-(`m["_rings"]`) ever get computed — hard-required an image
-(`if img is None: QMessageBox.warning(...); return`), even though the ring
-math (`simulate_rings`/`simulate_rings_from_dspacings`) only needs
-wavelength/Lsd/pixel-size/d-spacing, never pixel data; the image check
-exists only to gate the *separate* on-image overlay (`_redraw_rings`, which
-already has its own independent `img is None` guard). Split the computation
-loop into `_compute_material_rings()` (reused, verbatim behavior, by
-`_simulate`) and added `simulate_rings_without_image()`, which computes rings
-and calls `_refresh_profile_markers()` directly — `tab_view.py` calls it
-whenever a profile file is loaded or `geometryChanged` fires while in
-file-lineout mode, since the normal image-gated call chain
-(`_on_sim_param_changed` → `_simulate`) never reaches it with no image
-loaded. `_refresh_profile_markers()` itself already needed no image (drew
-straight from cached `_rings` + lsd/px/wl) — confirmed by reading before
-building on it, not assumed.
-
-**App-wide frame-nav slider/button visibility.** Separately requested:
-every "iterate over frames" slider (Data Viewer, Calibrate, Mask Builder,
-Hydra's `mode="nav"` loader, `CakeStackViewer`, and `DataLoaderPanel`'s own
-`mode="stack"` nav row) plus its ◀/▶ buttons. Several of the ◀/▶ buttons are
-plain `QToolButton`s, which have no default background/border at all
-(native/flat) — nearly invisible against the dark theme — and the global
-`QSlider::groove` is a dark `#2a2a2d` that barely contrasts with the panel
-background it sits on. Fixed via one pair of `objectName`s
-(`frameNavBtn`/`frameNavSlider`) applied at each of the ~9 construction
-sites, with one new ID-scoped QSS block in `style.py` (accent-gradient
-button, brighter `#707070` groove) — deliberately scoped to those names
-rather than a blanket `QToolButton {}`/`QSlider {}` rule, so unrelated
-QToolButtons (help "?", browse "⋯", ROI ribbon) and threshold sliders
-(`_thr_slider` in Mask Builder/Calibrate) are untouched.
-
-**Verified:** new `tests/test_dataviewer_format_filter.py` (7),
-`test_dataviewer_frame_scrub.py` (5), `test_dataviewer_profile_file.py` (12)
-— not fork-isolated (same SIGSEGV-on-fork reason as `test_view_tab_controls.py`).
-11 touched/related test files green per-file on a clean `HOME`
-(`test_hydra_ui/_calib_ui/_batch_ui`, `test_manual_dspacing_calib_ui`,
-`test_mask_folder_frames`, `test_ring_projection`, `test_hydra_geometry`,
-`test_helpers`, `test_viewer_*`, `test_batch_data_source` included). `pyflakes
-midas_gui/*.py` 38→37 (the one change: `Path` in `tab_view.py` went from
-unused to used). Offscreen screenshot confirmed the new button/slider colors.
-
-## 2026-09-24 — Mask Builder: multi-frame Image detection peeks metadata only; threshold projection defaults to "current frame"
-
-Commit `d224c97`.
-
-**Frame-count detection never reads pixel data.** `_detect_multiframe()`
-answers "how many frames does this path have" from `tifffile`'s
-`series[0].shape` (not `len(tf.pages)` — a small `(N,H,W)` stack can pack
-into one TIFF page, so page count under-reports), an HDF5 dataset's
-`.shape[0]` via a plain `h5py.File` open (no read), or a `.geN` file's byte
-size minus the 8192-byte header divided by candidate square-detector sizes
-(2048/4096/1024/512 px). All are O(1) metadata reads so opening a large
-Image path to just *check* frame count stays cheap.
-
-**Threshold defaults to the displayed frame, not a full-frame reduction.**
-"Current frame" is the default and the only choice for a plain single image
-(Projection combo disabled + forced). Requested this way because reducing
-across every frame by default silently changes what section-1 thresholds
-against without the user asking — the Projection combo makes the behaviour
-explicit and opt-in. `Average`/`Sum` accumulate in float64 to avoid overflow
-across many frames; `Max` uses `np.maximum(..., out=acc)` in float32 since
-there's no summation to overflow.
-
-**Frame source dict (`self._img_frames`) has four `kind`s** (`files`, `array`,
-`h5`, `ge`) rather than eagerly loading every frame into memory — each
-`_get_frame_array(idx)` call reads (or slices, for the in-memory `array`
-case from a small multi-page TIFF) exactly one frame on demand, so a folder
-of many large frames or a big HDF5 stack doesn't blow up memory just because
-the Frame navigator is open.
 
 ## 2026-09-22 — Batch Integrate: clear views before re-deriving axis context, not after
 

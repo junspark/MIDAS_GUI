@@ -22,8 +22,6 @@ import pytest
 
 import h5py
 
-from midas_gui.helpers import SCRATCH_DIRNAME
-
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "gui_synthetic" / "hydra"
 
 # Run each test in this file in its own forked subprocess (pytest-forked):
@@ -41,6 +39,7 @@ QtCore = QtWidgets = None
 hydra_calib_page_mod = project = None
 geometry_fields_from_file = HydraCalibrationPage = None
 _FakeWorker = _FakeCalibrationWorker = _FakeIntegrationWorker = None
+SCRATCH_DIRNAME = None
 
 
 def _load_qt():
@@ -65,7 +64,7 @@ def _load_qt():
     from PyQt5 import QtCore, QtWidgets
     import midas_gui.hydra_calib_page as hydra_calib_page_mod
     from midas_gui import project
-    from midas_gui.helpers import geometry_fields_from_file
+    from midas_gui.helpers import geometry_fields_from_file, SCRATCH_DIRNAME
     from midas_gui.hydra_calib_page import HydraCalibrationPage
 
     class _FakeWorker(QtCore.QObject):
@@ -128,6 +127,7 @@ def _load_qt():
         hydra_calib_page_mod=hydra_calib_page_mod,
         project=project,
         geometry_fields_from_file=geometry_fields_from_file,
+        SCRATCH_DIRNAME=SCRATCH_DIRNAME,
         HydraCalibrationPage=HydraCalibrationPage,
         _FakeWorker=_FakeWorker,
         _FakeCalibrationWorker=_FakeCalibrationWorker,

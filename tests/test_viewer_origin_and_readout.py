@@ -341,6 +341,21 @@ def test_every_tab_with_a_compass_listens_for_the_origin_flip(app, tab_cls, view
     ``originChanged``; without that the overlay keeps the stale orientation
     until something else happens to redraw it."""
     import importlib
+    # BatchTab's loader auto-starts a background StreamPreviewWorker on
+    # construction (the default nickel_tifs preview read) — see
+    # widgets.DataLoaderPanel._start_preview_worker. That worker lazily
+    # imports midas_integrate_v2 (which pulls in torch) on first use, and if
+    # this is the first time anything in the process has imported torch, it
+    # is now happening on a background thread racing the main thread's own
+    # import machinery — an intermittent SIGSEGV/SIGBUS in torch's own
+    # extension-module init, not anything specific to this test. Reproduced
+    # standalone (without this import) at roughly 50% failure rate across 10
+    # runs of this file; a real app never hits it because some earlier tab
+    # (Calibrate, via midas_calibrate_v2) has always imported torch on the
+    # main thread first by the time Batch Integrate's loader runs. Import it
+    # here too, before constructing anything, so every parametrized tab class
+    # gets the same guarantee a real app gives them.
+    pytest.importorskip("midas_integrate_v2")
     mod_name, cls_name = tab_cls.split(":")
     tab = getattr(importlib.import_module(mod_name), cls_name)()
     viewer = getattr(tab, viewer_attr)
