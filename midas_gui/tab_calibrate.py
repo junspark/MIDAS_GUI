@@ -538,6 +538,12 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_dist_btn.setEnabled(False)
         for cb in self._seed_enables:
             cb.toggled.connect(self._on_seed_enable_changed)
+        # The summary line carries the seed *values*, so it has to follow the
+        # spin boxes too — they are edited in ManualSeedDialog, by Pick BC /
+        # Pick Ring, and by the result feedback, none of which touch the
+        # enable ticks that _on_seed_enable_changed hangs off.
+        for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
+            w.valueChanged.connect(self._update_seed_summary)
         self._manual_seed_check.toggled.connect(self._on_seed_master_toggled)
         # Column 2 holds only two-decimal degree fields, so it does not need the
         # default numeric width — narrowing it is most of what keeps this card
@@ -1599,12 +1605,52 @@ class CalibrationTab(QtWidgets.QWidget):
         for cb in self._seed_enables:
             cb.setChecked(want)
 
-    def _update_seed_summary(self):
-        on = [label for cb, label in zip(
-                  self._seed_enables, ("BC", "Lsd", "tx", "ty", "tz", "Distortion"))
-              if cb.isChecked()]
-        self._seed_summary_lbl.setText(
-            "Seeding: " + ", ".join(on) if on else "Fully automatic (no manual seed)")
+    #: Seed slot -> how its current value reads in the summary line. Same
+    #: units as the spin boxes in ManualSeedDialog (Lsd in mm, not the µm the
+    #: fit uses), so the two always agree on screen.
+    @staticmethod
+    def _seed_num(v: float, dec: int) -> str:
+        """``v`` at the spin box's own precision, trailing zeros trimmed — a
+        BC entered to three decimals must not read back rounded to one, but
+        a round 1382.4 mm should not pad out to 1382.400 either."""
+        return f"{v:.{dec}f}".rstrip("0").rstrip(".") or "0"
+
+    def _seed_value_text(self, name: str) -> str:
+        if name == "BC":
+            return (f"{self._seed_num(self._seed_bcy.value(), 3)}, "
+                    f"{self._seed_num(self._seed_bcz.value(), 3)} px")
+        if name == "Lsd":
+            return f"{self._seed_num(self._seed_lsd.value(), 3)} mm"
+        if name == "Distortion":
+            return f"{len(self._seed_dist)} coeff"
+        spin = {"tx": self._seed_tx, "ty": self._seed_ty, "tz": self._seed_tz}[name]
+        return f"{self._seed_num(spin.value(), 2)}°"
+
+    _SEED_SLOTS = ("BC", "Lsd", "tx", "ty", "tz", "Distortion")
+
+    def _update_seed_summary(self, *_args):
+        """Name *and* value every seeded parameter.
+
+        The seed spin boxes live inside ManualSeedDialog, which is non-modal
+        and normally closed, so these numbers were invisible from the tab —
+        yet they are the starting point of the fit and the centre every ±
+        window in the Refine card is taken around ("± a window around its
+        seed value" with no value anywhere on screen). Unseeded parameters
+        are listed as auto rather than dropped, so a glance says what the fit
+        actually starts from rather than only what was overridden.
+        """
+        on, off = [], []
+        for cb, name in zip(self._seed_enables, self._SEED_SLOTS):
+            (on if cb.isChecked() else off).append(name)
+        if not on:
+            self._seed_summary_lbl.setText(
+                "Fully automatic (no manual seed) — BC/Lsd auto-seeded from the "
+                "image, tilts start at 0°")
+            return
+        txt = "Seeding: " + " · ".join(f"{n} {self._seed_value_text(n)}" for n in on)
+        if off:
+            txt += f"   (auto: {', '.join(off)})"
+        self._seed_summary_lbl.setText(txt)
 
     def _enable_seed(self, **flags):
         """Tick specific granular seed-enable flags by slot name, e.g.
@@ -1652,6 +1698,9 @@ class CalibrationTab(QtWidgets.QWidget):
     def _update_seed_dist_label(self):
         n = len(self._seed_dist)
         self._seed_en_dist.setText(f"Distortion ({n}/15)" if n else "Distortion")
+        # _seed_dist has no widget of its own, so this is the one place its
+        # size changes — and the summary line quotes that count.
+        self._update_seed_summary()
 
     # ── Seed feedback from a result ───────────────────────────────
 
@@ -2932,9 +2981,23 @@ class CalibrationTab(QtWidgets.QWidget):
         if isinstance(limits.get("dsp"), dict):
             self._limit_state_dsp = dict(limits["dsp"])
         self._refine_mode_is_dsp = is_dspacing_calibrant(self._cal.currentText())
-        # Same pinning as above for the limits column: the live rows were just
-        # restored from "fields" and already belong to the saved calibrant.
-        self._limits_mode_is_dsp = self._refine_mode_is_dsp
+        # The limits column cannot be pinned the same way. _sync_limits_mode
+        # *shapes* the card as well as filling it — which rows exist, the
+        # header wording, whether the tilt window spans ty+tz — and pinning
+        # the mode made it early-return, so a project saved on AgBH opened
+        # wearing the crystalline card it was built with: no tx/tz/BC_z
+        # windows to edit, a Distortion row the manual fit ignores, and a
+        # footer quoting backend tolerances that fit never sees.
+        #
+        # Instead park the just-restored live rows in this calibrant kind's
+        # bucket and leave the mode unset, so the sync below runs for its
+        # layout pass and then re-applies exactly those rows. The other
+        # kind's bucket keeps the stash restored from "limit_modes" above.
+        if self._refine_mode_is_dsp:
+            self._limit_state_dsp = self._limits
+        else:
+            self._limit_state_xtal = self._limits
+        self._limits_mode_is_dsp = None
         self._on_calibrant_changed(self._cal.currentText())
         self._sync_seed_steps()
         self._loader.set_state(state.get("loader") or {})
