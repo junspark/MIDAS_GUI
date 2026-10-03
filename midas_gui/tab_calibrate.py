@@ -540,10 +540,20 @@ class CalibrationTab(QtWidgets.QWidget):
             cb.toggled.connect(self._on_seed_enable_changed)
         # The summary line carries the seed *values*, so it has to follow the
         # spin boxes too — they are edited in ManualSeedDialog, by Pick BC /
-        # Pick Ring, and by the result feedback, none of which touch the
-        # enable ticks that _on_seed_enable_changed hangs off.
+        # Pick Ring, by the Data Viewer's "Send →" and by the result feedback,
+        # none of which touch the enable ticks that _on_seed_enable_changed
+        # hangs off.
+        #
+        # _update_limits_label for the same reason: every ± window is centred
+        # on a seed value, so the bounds it prints move when the seed does.
+        # Only the limit widgets used to refresh it, so the line sat at
+        # whichever seed was current when a ± box was last touched — a
+        # "Send →" of Lsd 13900 mm left it still printing the window around
+        # 13868, which reads as Send having been dropped or halved.
         for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
             w.valueChanged.connect(self._update_seed_summary)
+            w.valueChanged.connect(self._update_limits_label)
+        self._wl.valueChanged.connect(self._update_limits_label)
         self._manual_seed_check.toggled.connect(self._on_seed_master_toggled)
         # Column 2 holds only two-decimal degree fields, so it does not need the
         # default numeric width — narrowing it is most of what keeps this card

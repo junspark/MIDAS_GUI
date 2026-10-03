@@ -1,5 +1,7 @@
-"""The Calibrate tab's seed summary must show the seed *values*, not just
-which parameters are seeded.
+"""The Calibrate tab's left column must tell the truth about the seed.
+
+The seed summary must show the seed *values*, not just which parameters are
+seeded, and the Limits note must re-centre when one of those values moves.
 
 The seed spin boxes live inside ``ManualSeedDialog``, which is non-modal and
 normally closed, so from the tab itself the starting Lsd / BC / tilts were
@@ -68,3 +70,44 @@ def test_distortion_seed_count_reaches_the_summary(tab):
     tab._seed_en_dist.setChecked(True)
     tab._update_seed_dist_label()
     assert "Distortion 2 coeff" in tab._seed_summary_lbl.text()
+
+
+# ── The ± windows are centred on the seed, so the note moves with it ──
+
+def test_limits_note_recentres_when_the_seed_moves(tab):
+    """Reported from the beamline: the Data Viewer's "Send →" pushed
+    Lsd 13900 mm into the seed, but the note went on printing the window
+    around the previous 13868 — which reads as Send having been dropped.
+
+    Only the ± widgets refreshed the note, so it sat at whichever seed was
+    current when a ± box was last touched.
+    """
+    agbh = next(tab._cal.itemText(i) for i in range(tab._cal.count())
+                if "AgBH" in tab._cal.itemText(i))
+    tab._cal.setCurrentText(agbh)
+    tab._seed_en_bc.setChecked(True)
+    tab._seed_en_lsd.setChecked(True)
+    for slot in ("Lsd", "BC_y"):
+        tab._limit_widgets[slot][0].setChecked(True)
+    tab._limit_widgets["Lsd"][1].setValue(50.0)        # ±50 %
+    tab._seed_lsd.setValue(13868.0)
+    tab._seed_bcy.setValue(3815.3)
+    assert "Lsd ∈ [6934, 20802]" in tab._limits_note.text()
+
+    # ...the "Send →", which touches no ± widget.
+    tab._seed_lsd.setValue(13900.0)
+    tab._seed_bcy.setValue(3816.0)
+    assert "Lsd ∈ [6950, 20850]" in tab._limits_note.text()
+    assert "BC_y ∈ [3766, 3866]" in tab._limits_note.text()
+
+
+def test_crystalline_limits_note_recentres_too(tab):
+    """Same wiring, the other note — "Always applied, centred on the seed"
+    is just as wrong when it is centred on a stale one."""
+    tab._cal.setCurrentText("CeO2")
+    tab._limit_widgets["Lsd"][2].setCurrentText("%")
+    tab._limit_widgets["Lsd"][1].setValue(50.0)
+    tab._seed_lsd.setValue(1000.0)
+    assert "Lsd ±500 mm" in tab._limits_note.text()
+    tab._seed_lsd.setValue(2000.0)
+    assert "Lsd ±1000 mm" in tab._limits_note.text()
