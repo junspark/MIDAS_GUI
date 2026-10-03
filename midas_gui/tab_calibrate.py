@@ -914,6 +914,21 @@ class CalibrationTab(QtWidgets.QWidget):
         self._ring_status = QtWidgets.QLabel("")
         self._ring_status.setStyleSheet(f"color:{S.ACCENT};font-size:10px")
         tb.addWidget(self._ring_status)
+        # Which pixels the fit will not see. The Mask card says how many are
+        # masked, but a count cannot show *where* they are — whether a ring
+        # arc you are about to pick points on is half excluded, or a module
+        # gap sits across the beam centre. Off by default so it never hides
+        # the rings on a tab whose whole job is picking them.
+        self._show_mask_check = QtWidgets.QCheckBox("Mask")
+        self._show_mask_check.setToolTip(
+            "Shade the pixels excluded by the Mask card, in red. These are "
+            "dropped from the fit and from every integration run from this "
+            "tab.")
+        self._show_mask_check.toggled.connect(self._on_show_mask_toggled)
+        tb.addWidget(self._show_mask_check)
+        self._mask_status = QtWidgets.QLabel("")
+        self._mask_status.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        tb.addWidget(self._mask_status)
         self._lab_axes_on = QtWidgets.QCheckBox("Lab-frame axes")
         self._lab_axes_on.setToolTip(
             "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction ⊗ "
@@ -1076,6 +1091,9 @@ class CalibrationTab(QtWidgets.QWidget):
         self._sync_frame_scrub_bar()
         self._sync_avg_controls()
         self._image = self._source_image()
+        # Before the early return, so loading a frame of a different shape
+        # re-checks the mask against it either way.
+        self._update_mask_overlay()
         if self._image is None:
             return
         lo, hi = float(np.nanmin(self._image)), float(np.nanmax(self._image))
@@ -1088,11 +1106,68 @@ class CalibrationTab(QtWidgets.QWidget):
         self._update_threshold_label()
         self._show_calib_image(autorange=True)
 
+    # ── Mask overlay ─────────────────────────────────────────────
+
+    def _on_show_mask_toggled(self, *_args):
+        self._update_mask_overlay()
+
+    def _update_mask_overlay(self):
+        """Paint the excluded pixels over the calibration image.
+
+        Shape-checked against what is actually on screen rather than assumed:
+        a mask built on a differently-shaped frame (a different detector, or
+        a file reloaded after the mask was made) would otherwise either throw
+        inside pyqtgraph or, worse, paint a plausible-looking overlay that
+        lines up with nothing. Says so in the status label instead.
+        """
+        if not hasattr(self, "_show_mask_check"):     # still building the UI
+            return
+        mask = self._loader.composite_mask()
+        if mask is None:
+            self._mask_status.setText("")
+            self._img_view.clear_overlay()
+            return
+        mask = np.asarray(mask) != 0
+        n = int(mask.sum())
+        shape = None if self._image is None else np.asarray(self._image).shape
+        if shape is not None and mask.shape != shape:
+            self._mask_status.setText(
+                f"mask {mask.shape} ≠ image {shape}")
+            self._mask_status.setStyleSheet("color:#e0a030;font-size:10px")
+            self._img_view.clear_overlay()
+            return
+        self._mask_status.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._mask_status.setText(
+            f"{n:,} px ({100.0 * n / mask.size:.1f}%) excluded")
+        if self._show_mask_check.isChecked():
+            self._img_view.set_mask_overlay(mask)
+            self._img_view.set_overlay_visible(True)
+        else:
+            self._img_view.clear_overlay()
+
+    def _mask_log_line(self) -> str:
+        """One line for the run log saying what the mask excluded.
+
+        The Mask card states the mask the *tab* holds; this states the mask
+        the *run* actually got (cfg["mask"] = composite_mask()), which is the
+        question a log is asked afterwards. Refinement already logs its
+        equivalent — see workers.py's "[refine] mask: none".
+        """
+        mask = self._loader.composite_mask()
+        if mask is None:
+            tot = "" if self._image is None else f" (all {np.asarray(self._image).size:,} px included)"
+            return f"Mask: none{tot}"
+        mask = np.asarray(mask) != 0
+        n = int(mask.sum())
+        return (f"Mask: {n:,} / {mask.size:,} px excluded "
+                f"({100.0 * n / mask.size:.1f}%)")
+
     def _on_fields_changed(self):
         """Dark/bright/background changed — refresh the calibration preview
         (no autorange, matching Data Viewer's _on_fields_changed). The raw
         ``self._image`` is untouched; only the displayed, corrected render
         changes (see ``_show_calib_image``)."""
+        self._update_mask_overlay()
         if self._image is None:
             return
         self._show_calib_image(autorange=False)
@@ -2087,6 +2162,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._bot_tabs.setCurrentWidget(self._log)
         self._log.append("─" * 40 + "\nStarting manual d-spacing fit…")
         self._log.append(self._refine_summary_text())
+        self._log.append(self._mask_log_line())
 
         refine = self._refine_flags()
         bounds, skipped_limits = self._limit_bounds()
@@ -2209,6 +2285,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._bot_tabs.setCurrentWidget(self._log)
         self._log.append("─" * 40 + f"\nStarting calibration ({mode})…")
         self._log.append(self._refine_summary_text())
+        self._log.append(self._mask_log_line())
         # The windows bound the answer, so they belong in the run's own record
         # next to what was refined — not only on the card, which shows whatever
         # is set now rather than what this run used.
