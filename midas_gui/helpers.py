@@ -1683,6 +1683,72 @@ def im_trans_map_point(col, row, shape, codes):
     return col, row
 
 
+def map_point_xy(x: float, y: float, shape, codes):
+    """Map a *continuous* (x=col, y=row) position through MIDAS transform
+    codes, returning ``(x, y, n_cols, n_rows)`` — the position plus the frame
+    extent it now lives in.
+
+    The continuous sibling of :func:`im_trans_map_point`, which works in
+    whole-pixel indices. Geometry drawn over an image (ROI corners, polygon
+    vertices) is continuous, and a flip there is ``x -> W - x``, not
+    ``W - 1 - x``: index ``c`` covers ``[c, c+1]``, and reversing the axis
+    sends that span to ``[W-c-1, W-c]``. Using the index form on an edge
+    coordinate shifts every shape half a pixel.
+    """
+    n_rows, n_cols = float(shape[0]), float(shape[1])
+    for c in codes or ():
+        if c == 1:                       # flipY — columns reverse
+            x = n_cols - x
+        elif c == 2:                     # flipZ — rows reverse
+            y = n_rows - y
+        elif c == 3:                     # transpose
+            x, y = y, x
+            n_rows, n_cols = n_cols, n_rows
+    return x, y, n_cols, n_rows
+
+
+def map_roi_state(pos, size, angle_deg: float, shape, codes):
+    """Re-place a rotatable rectangular ROI so it covers the same detector
+    pixels after ``codes`` are applied to the image under it.
+
+    Takes and returns pyqtgraph's own ``(pos, size, angle)`` description: an
+    origin corner, a local ``(w, h)`` extent, and a rotation in degrees
+    measured as ``atan2`` of the local +x axis in parent coordinates (CCW,
+    verified against ``RectROI.mapToParent``). Covers ``RectROI``,
+    ``EllipseROI`` and ``CircleROI``; a ``PolyLineROI`` maps its vertices
+    with :func:`map_point_xy` instead.
+
+    Every MIDAS transform is a reflection (flipY, flipZ and transpose each
+    have determinant −1), so an odd number of them flips the handedness of
+    the ROI's local frame. Anchoring the result at the mapped origin corner
+    would then put the rectangle on the wrong side of its own origin — the
+    shape would look right only for an even number of codes. So the anchor
+    moves to the mapped ``(0, h)`` corner in that case, which restores a
+    right-handed frame with the same ``(w, h)``.
+
+    Lengths are preserved (the maps are orthogonal), so ``size`` is returned
+    unchanged even across a transpose.
+    """
+    w, h = float(size[0]), float(size[1])
+    a = math.radians(float(angle_deg or 0.0))
+    ca, sa = math.cos(a), math.sin(a)
+    x0, y0 = float(pos[0]), float(pos[1])
+    # Local +x is (cos a, sin a); local +y is that turned +90°.
+    corners = {
+        "c00": (x0, y0),
+        "c10": (x0 + w * ca, y0 + w * sa),
+        "c01": (x0 - h * sa, y0 + h * ca),
+    }
+    mapped = {k: map_point_xy(x, y, shape, codes)[:2]
+              for k, (x, y) in corners.items()}
+    e1 = (mapped["c10"][0] - mapped["c00"][0],
+          mapped["c10"][1] - mapped["c00"][1])
+    n_reflections = sum(1 for c in (codes or ()) if c in (1, 2, 3))
+    anchor = mapped["c00"] if n_reflections % 2 == 0 else mapped["c01"]
+    return (list(anchor), [w, h],
+            math.degrees(math.atan2(e1[1], e1[0])))
+
+
 def _fmt_g(v: float, nd: int) -> str:
     """Fixed-point with trailing zeros trimmed, or an em dash when the value
     is not finite (d-spacing diverges on the beam axis)."""

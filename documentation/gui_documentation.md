@@ -1496,6 +1496,24 @@ they transform (or hand off to the backend to transform) the image it pairs
 with — so a mask built here never needs to be flipped by hand to match a
 flipped calibration.
 
+### Display orientation
+The image is drawn in the **Data Viewer's orientation** — the Flip Y / Flip Z /
+Transpose checkboxes on that tab's Transforms card are mirrored here, so the
+detector is not shown one way up while you pick pixels and another way up
+everywhere else. It follows live as you toggle them.
+
+This is display only. **The mask is always built, saved and emitted against the
+raw detector image**, because Calibrate / Batch / Integrate apply the
+calibration's own `ImTransOpt` to it themselves — a mask that arrived
+pre-flipped would be flipped twice. Flipping the view therefore cannot change
+a single pixel of the mask you have built.
+
+Shapes you have already drawn stay over the same detector pixels when the
+orientation changes: each ROI is re-placed into the new view rather than left
+at the same screen position, so a flip never silently re-aims a mask. A
+half-finished freeform polygon is the exception — it is cancelled, having no
+anchor yet.
+
 ### Section 1 · Threshold mask (always applied)
 `pixel ≤ lower | pixel > upper`. The upper bound auto-fills from the data type on load
 (e.g. 1,048,575 for uint20 Eiger, 4,294,967,295 for uint32).

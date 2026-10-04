@@ -83,6 +83,61 @@ Open follow-ups, none blocking:
 
 ## Recently completed
 
+**2026-10-03 — the Mask Builder shows the detector the same way up as
+everything else.** Reported from the beamline: the displayed image should
+apply the Data Viewer's flips. It was the one image surface still painting
+the raw array, so the detector appeared mirrored relative to every other
+tab while you picked which pixels to throw away.
+
+**Display only, and that distinction is the whole design.** The mask this
+tab computes, saves and emits stays raw-frame, because
+Calibrate/Batch/Integrate pre-flip it themselves (DECISIONS 2026-08-25);
+a mask that arrived pre-flipped would be flipped twice. Pinned directly:
+`maskReady`'s payload is asserted byte-identical across all 8 code
+combinations.
+
+- **Propagation** — `DataViewerTab.imTransChanged(list)` → `app.py`'s
+  existing `_connect` broadcast, the same mechanism as `maskReady` and
+  `calibrationDone`. Plus a one-shot push after project restore, because
+  tabs restore in dict order and the Mask tab can be rebuilt before the
+  Data Viewer knows its transforms.
+- **Drawn shapes stay on the same detector pixels.** Each ROI is re-placed
+  from the old painted frame into the new one by new
+  `helpers.map_roi_state`, rather than left at the same screen position
+  (which would silently re-aim a mask you had already built). Picked points
+  move with it; a half-drawn freeform polygon is cancelled, having no
+  anchor yet.
+- **`helpers.map_point_xy`** is the continuous-coordinate sibling of
+  `im_trans_map_point`. A flip of *geometry* is `x -> W - x`, not
+  `W - 1 - x`: index `c` covers `[c, c+1]`, so using the index form on an
+  edge coordinate shifts every shape half a pixel.
+- **`_apply_shapes`** rasterises in display space then inverse-maps with
+  `_apply_im_trans(drawn, reversed(codes))` — the idiom `workers.py`
+  already uses to bring an azimuthal-clip mask back to raw.
+- **The pixel readout now composes both legs** — undo the display
+  transform to raw, then apply `result.im_trans` — instead of assuming the
+  tab's codes and the calibration's agree.
+
+**Worth recording, because it nearly went the other way.** The first
+version of the ROI test compared rasters and failed on a 45°-rotated rect
+by *exactly* 0.5 px. That was not a placement bug: a reflection reverses
+the polygon's winding and Qt's scanline fill breaks ties differently.
+Loosening the tolerance would have made it pass and would equally have
+hidden a real half-pixel shift — the one bug worth catching here. Replaced
+with an exact geometric assertion (the mapped ROI's corners must equal the
+point-mapped corners, 1e-6, immune to rasterisation) plus a structural
+interior check. `map_roi_state`'s handedness rule — anchor at the mapped
+`(0, h)` corner for an odd number of reflections — is what that test
+actually proves.
+
+**Verified:** 1,501 collected, **2 failed, 3 skipped** (1,496 passed) — the
+known set exactly. 257 new tests in `tests/test_mask_display_transform.py`.
+An offscreen whole-app check confirms toggling Flip Y / Transpose on the
+Data Viewer moves the Mask tab's codes and display shape live.
+**Not verified with eyes on it:** nothing here has been seen rendered —
+whether the red overlay still lands on the module gaps after a flip, and
+whether a pre-drawn ROI visibly stays on its pixels, both want a look.
+
 **2026-10-03 — the pixel readout says where you are in reciprocal space.**
 Asked for at the beamline as "re-add the q/2θ readout". Checked first: it
 was never there. `ImageViewer._coord_text` has carried x/y/intensity and

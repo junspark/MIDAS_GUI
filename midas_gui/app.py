@@ -331,6 +331,12 @@ class MainWindow(QtWidgets.QMainWindow):
                   self._corr_tab, self._pdf_tab, self._tex_tab, self._pump_tab,
                   self._export_tab),
                  "set_mask_from_tab1")
+        # Display orientation: the Mask Builder paints the detector the way
+        # the Data Viewer does, so the two never disagree about which way up
+        # it is. Display only — the mask stays raw-frame (see
+        # tab_mask.set_display_transform).
+        _connect(self._view_tab, "imTransChanged", (self._mask_tab,),
+                 "set_display_transform")
         # Calibration propagation (Tab 2 result → consumers)
         _connect(self._cal_tab, "calibrationDone",
                  (self._batch_tab, self._queue_tab, self._mask_tab, self._refine_tab,
@@ -1231,6 +1237,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     _log(f"Session restore failed for tab '{name}':\n{traceback.format_exc()}")
                     errors.append(name)
+        # Tabs restore in dict order, so the Mask Builder may have been
+        # rebuilt before the Data Viewer knew its transforms. Push them once
+        # now rather than depending on that order.
+        try:
+            self._mask_tab.set_display_transform(self._view_tab._im_trans_codes())
+        except Exception:
+            _log(f"Display-transform sync after restore failed:\n"
+                 f"{traceback.format_exc()}")
         active = data.get("active_tab")
         widget = name_to_widget.get(active) if active else None
         idx = self._tabs.indexOf(widget) if widget is not None else -1

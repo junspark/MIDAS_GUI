@@ -281,9 +281,13 @@ class ImageViewer(QtWidgets.QWidget):
         ``self._cur = viewer.set_raw_frame(raw, im_trans)`` in one line.
 
         Use plain ``set_image`` instead when the array is already in its
-        final display orientation (e.g. Mask Builder, which deliberately
-        works in raw-frame space throughout — see ``tab_mask.py``) or has
-        no associated calibration geometry at all.
+        final display orientation, or has no associated calibration geometry
+        at all. The Mask Builder used to be the standing exception — it
+        worked in raw-frame space throughout — but it now comes through here
+        too, mirroring the Data Viewer's codes, so the detector is not shown
+        one way up in one tab and another way up in the next. Its *mask*
+        is still raw-frame; only the picture is transformed. See
+        ``tab_mask.set_display_transform``.
         """
         codes = tuple(im_trans or ())
         frame = _apply_im_trans(raw_frame, codes) if codes else raw_frame

@@ -20,7 +20,8 @@ from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse, i
                                new_temp_h5_path, save_stack_h5,
                                display_text_for_paths,
                                browse_start_dir, warn_if_path_missing,
-                               pixel_readout_text, im_trans_map_point)
+                               pixel_readout_text, im_trans_map_point,
+                               _apply_im_trans, map_roi_state, map_point_xy)
 from midas_gui.widgets import ImageViewer
 from midas_gui.dialogs import show_error
 from midas_gui.workers import MaskComputeWorker
@@ -48,6 +49,10 @@ class MaskTab(QtWidgets.QWidget):
         self._point_items: list = []   # scatter markers for points
         self._point_mode = False
         self._click_proxy = None
+        # ImTransOpt codes the viewer is currently *painting* under, mirrored
+        # from the Data Viewer. Display only: self._image, every computed
+        # mask and everything maskReady emits stay in raw detector space.
+        self._disp_codes: tuple = ()
         # Freeform click-polygon state
         self._freeform_mode = False
         self._freeform_pts: list = []    # [(x, y)] image-coord vertices
@@ -88,30 +93,127 @@ class MaskTab(QtWidgets.QWidget):
                 "dataset": self._h5loc_edit.currentText().strip() if is_h5(raw) else None,
                 "field": "data", "label": "Mask Builder"}
 
+    # ── Display transform (mirrored from the Data Viewer) ────────
+
+    def _disp_shape(self) -> tuple:
+        """``(n_rows, n_cols)`` of the frame *as painted*, which differs from
+        ``self._image.shape`` whenever an odd number of transposes is active.
+
+        Everything drawn over the image — ROI defaults, click bounds, shape
+        rasterisation — is in this frame. The array, and every mask built
+        from it, stay raw.
+        """
+        if self._image is None:
+            return (0, 0)
+        n_rows, n_cols = self._image.shape
+        if sum(1 for c in self._disp_codes if c == 3) % 2:
+            return (n_cols, n_rows)
+        return (n_rows, n_cols)
+
+    def set_display_transform(self, codes) -> None:
+        """Paint the detector under ``codes`` — the Data Viewer's Transforms
+        checkboxes, broadcast by ``app.py``.
+
+        Display only. The mask this tab computes, saves and emits is always
+        raw-frame, because Calibrate/Batch/Integrate apply the calibration's
+        own ImTransOpt to it themselves (DECISIONS 2026-08-25). Changing the
+        orientation here must not change a single bit of that mask.
+
+        Shapes already drawn stay over the same detector pixels: each ROI is
+        re-placed from the old painted frame into the new one, so flipping
+        the view does not silently re-aim a mask you already built.
+        """
+        codes = tuple(codes or ())
+        if codes == self._disp_codes:
+            return
+        old = self._disp_codes
+        self._cancel_freeform()          # a half-drawn polygon has no anchor yet
+        self._remap_drawn_items(old, codes)
+        self._disp_codes = codes
+        if self._image is not None:
+            self._viewer.set_raw_frame(self._image, codes)
+        self._paint_overlay()
+        self._viewer._refresh_coord_bar()
+
+    def _remap_drawn_items(self, old: tuple, new: tuple) -> None:
+        """Move ROIs and picked points from the ``old`` painted frame to the
+        ``new`` one so they keep covering the same detector pixels.
+
+        The composite map is "undo old, then apply new" — reversed old codes
+        followed by the new ones — starting from the old painted extent.
+        """
+        if self._image is None:
+            return
+        combo = tuple(reversed(old)) + tuple(new)
+        if not combo:
+            return
+        shape = self._disp_shape()       # still the OLD frame at this point
+
+        for item in self._shapes:
+            rois = ([item["roi"]] if item["kind"] == "shape"
+                    else [item["outer"], item["inner"]])
+            for roi in rois:
+                if isinstance(roi, pg.PolyLineROI):
+                    pts = [roi.mapToParent(h.pos())
+                           for _i, h in roi.getLocalHandlePositions()]
+                    moved = [map_point_xy(p.x(), p.y(), shape, combo)[:2]
+                             for p in pts]
+                    roi.setPos((0, 0))
+                    roi.setPoints(moved, closed=True)
+                    continue
+                pos, size, angle = map_roi_state(
+                    (roi.pos().x(), roi.pos().y()),
+                    (roi.size().x(), roi.size().y()),
+                    roi.angle(), shape, combo)
+                roi.setPos(pos[0], pos[1])
+                roi.setSize(size)
+                roi.setAngle(angle)
+
+        moved_pts = []
+        for (col, row), dot in zip(self._points, self._point_items):
+            c2, r2 = im_trans_map_point(col, row, shape, combo)
+            moved_pts.append((c2, r2))
+            dot.setData([c2], [r2])
+        self._points = moved_pts
+
+    def _paint_overlay(self) -> None:
+        """Repaint the bad-pixel overlay in the displayed frame.
+
+        ``self._mask`` is raw; the picture under it may not be.
+        """
+        if self._mask is None:
+            self._viewer.clear_overlay()
+            return
+        shown = (_apply_im_trans(self._mask, self._disp_codes)
+                 if self._disp_codes else self._mask)
+        self._viewer.set_mask_overlay(shown)
+        self._viewer.set_overlay_visible(self._show_overlay_check.isChecked())
+
     def _radial_readout(self, col, row) -> str:
         """2θ / Q / d / η under the cursor — see
         ``widgets.ImageViewer.set_radial_readout_fn``.
 
-        Unlike every other tab, this viewer shows the **raw** detector image
-        on purpose (the mask is built in raw space), while a calibration's
-        beam centre and tilts live in the transformed frame. So the hovered
-        pixel is carried across with ``im_trans_map_point`` before any
-        geometry touches it; skipping that step would produce confident,
-        wrong numbers wherever a transform is active.
+        Two frames sit between the cursor and the geometry: what this tab
+        *paints* (``_disp_codes``, mirrored from the Data Viewer) and what
+        the calibration was *fit in* (``result.im_trans``). They are usually
+        the same codes, but nothing guarantees it, so both legs are composed
+        explicitly — undo the display transform back to raw, then apply the
+        calibration's — rather than leaning on them matching.
 
-        Nothing is shown unless the transformed shape matches the detector
-        the calibration was fit on — a mask built against one detector and a
+        Nothing is shown unless the resulting shape matches the detector the
+        calibration was fit on — a mask built against one detector and a
         calibration from another would otherwise read plausibly. Same guard,
         and the same reasoning, as the mask-overlay shape check.
         """
         r = self._calib_result
         if r is None or self._image is None:
             return ""
-        codes = tuple(getattr(r, "im_trans", ()) or ())
-        n_rows, n_cols = self._image.shape
-        col, row = im_trans_map_point(col, row, (n_rows, n_cols), codes)
+        combo = (tuple(reversed(self._disp_codes))
+                 + tuple(getattr(r, "im_trans", ()) or ()))
+        n_rows, n_cols = self._disp_shape()
+        col, row = im_trans_map_point(col, row, (n_rows, n_cols), combo)
         # Each transpose swaps the frame's extent; an even number cancels.
-        if sum(1 for c in codes if c == 3) % 2:
+        if sum(1 for c in combo if c == 3) % 2:
             n_rows, n_cols = n_cols, n_rows
         ny, nz = getattr(r, "NrPixelsY", None), getattr(r, "NrPixelsZ", None)
         if ny and nz and (int(ny) != n_cols or int(nz) != n_rows):
@@ -136,9 +238,10 @@ class MaskTab(QtWidgets.QWidget):
             self._geom_group.setEnabled(True)
             self._geom_note.setText(
                 f"Calibration available (Lsd={result.Lsd/1000:.2f} mm) — "
-                "azimuthal & learnable masks enabled. The mask is always built "
-                "against the raw detector image — Calibrate/Batch/Integrate apply "
-                "the calibration's own ImTransOpt to it automatically.")
+                "azimuthal & learnable masks enabled. The image is shown in the "
+                "Data Viewer's orientation, but the mask is always built and "
+                "saved against the raw detector image — Calibrate/Batch/Integrate "
+                "apply the calibration's own ImTransOpt to it automatically.")
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)
@@ -772,7 +875,7 @@ class MaskTab(QtWidgets.QWidget):
         sentinel = _SENTINELS.get(np.dtype(raw.dtype).name)
         if sentinel is not None:
             self._upper.setValue(float(sentinel))
-        self._viewer.set_image(self._image)
+        self._viewer.set_raw_frame(self._image, self._disp_codes)
         n = self._img_frames["n"] if self._img_frames is not None else 1
         frame_info = f"  frame {self._img_frame_idx + 1}/{n}" if n > 1 else ""
         self._stat_lbl.setText(
@@ -928,8 +1031,7 @@ class MaskTab(QtWidgets.QWidget):
             f"Bad pixels: {n_bad:,} / {n_tot:,} ({pct:.2f}%)"
             + (f"   (incl. {drawn_n:,} hand-drawn)" if drawn_n else "")
             + f"\nGood pixels: {n_tot - n_bad:,} ({100 - pct:.2f}%)")
-        self._viewer.set_mask_overlay(final)
-        self._viewer.set_overlay_visible(self._show_overlay_check.isChecked())
+        self._paint_overlay()
         self._save_btn.setEnabled(True)
         self._log_project_btn.setEnabled(True)
         self.maskReady.emit(final)
@@ -957,7 +1059,7 @@ class MaskTab(QtWidgets.QWidget):
 
     def _default_geom(self):
         """Reasonable starting (pos, size) for a new ROI, in image (x=Y, y=Z) coords."""
-        NZ, NY = self._image.shape
+        NZ, NY = self._disp_shape()
         sx, sy = NY * 0.25, NZ * 0.25
         return (NY * 0.5 - sx / 2, NZ * 0.5 - sy / 2), (sx, sy)
 
@@ -982,14 +1084,14 @@ class MaskTab(QtWidgets.QWidget):
 
     def _add_circle(self):
         if not self._guard_draw(): return
-        NZ, NY = self._image.shape
+        NZ, NY = self._disp_shape()
         d = min(NY, NZ) * 0.25
         roi = pg.CircleROI((NY * 0.5 - d / 2, NZ * 0.5 - d / 2), (d, d), pen=self._pen())
         self._shapes.append({"kind": "shape", "roi": self._register(roi)})
 
     def _add_polygon(self):
         if not self._guard_draw(): return
-        NZ, NY = self._image.shape
+        NZ, NY = self._disp_shape()
         cx, cy, r = NY * 0.5, NZ * 0.5, min(NY, NZ) * 0.18
         pts = [[cx + r, cy], [cx, cy + r], [cx - r, cy], [cx, cy - r]]
         roi = pg.PolyLineROI(pts, closed=True, pen=self._pen())
@@ -997,7 +1099,7 @@ class MaskTab(QtWidgets.QWidget):
 
     def _add_annulus(self):
         if not self._guard_draw(): return
-        NZ, NY = self._image.shape
+        NZ, NY = self._disp_shape()
         do = min(NY, NZ) * 0.4; di = do * 0.5
         cx, cy = NY * 0.5, NZ * 0.5
         outer = pg.EllipseROI((cx - do / 2, cy - do / 2), (do, do), pen=self._pen(), rotatable=True)
@@ -1115,7 +1217,7 @@ class MaskTab(QtWidgets.QWidget):
         imgitem = self._viewer._iv.getImageItem()
         p = imgitem.mapFromScene(event.scenePos())
         x, y = float(p.x()), float(p.y())
-        NZ, NY = self._image.shape
+        NZ, NY = self._disp_shape()
 
         # ── Freeform polygon mode ──
         if self._freeform_mode:
@@ -1145,7 +1247,7 @@ class MaskTab(QtWidgets.QWidget):
 
     def _raster_roi(self, roi) -> np.ndarray:
         """Boolean (NZ, NY) mask of pixels inside a pyqtgraph ROI (any shape)."""
-        NZ, NY = self._image.shape
+        NZ, NY = self._disp_shape()
         imgitem = self._viewer._iv.getImageItem()
         path = imgitem.mapFromScene(roi.mapToScene(roi.shape()))
         qimg = QtGui.QImage(NY, NZ, QtGui.QImage.Format_Grayscale8)
@@ -1166,7 +1268,7 @@ class MaskTab(QtWidgets.QWidget):
         if not self._shapes and not self._points:
             QtWidgets.QMessageBox.information(self, "No shapes", "Draw a shape or pick points first.")
             return
-        NZ, NY = self._image.shape
+        NZ, NY = self._disp_shape()
         drawn = np.zeros((NZ, NY), dtype=bool)
         for item in self._shapes:
             if item["kind"] == "shape":
@@ -1175,6 +1277,13 @@ class MaskTab(QtWidgets.QWidget):
                 drawn |= (self._raster_roi(item["outer"]) & ~self._raster_roi(item["inner"]))
         for col, row in self._points:
             drawn[row, col] = True
+        # Rasterised against what is on screen; the mask itself is raw-frame,
+        # so undo the display transform. Reversing the code order inverts it
+        # (each op is self-inverse) — the same idiom workers.py uses to bring
+        # an azimuthal-clip mask back to raw.
+        if self._disp_codes:
+            drawn = _apply_im_trans(drawn.astype(np.uint8),
+                                    tuple(reversed(self._disp_codes))).astype(bool)
         self._drawn_mask = drawn
         self._emit_final()
 

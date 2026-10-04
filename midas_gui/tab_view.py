@@ -44,6 +44,7 @@ _IMASK_MAX = 5_000_000_000
 class DataViewerTab(QtWidgets.QWidget):
     pushGeometry = QtCore.pyqtSignal(dict)   # λ/px/Lsd/BC → Calibrate tab
     pullGeometry = QtCore.pyqtSignal()       # "← Get": pull Calibrate's geometry
+    imTransChanged = QtCore.pyqtSignal(list)  # ImTransOpt codes → Mask Builder
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -143,7 +144,13 @@ class DataViewerTab(QtWidgets.QWidget):
         return pixel_readout_text(col, row, self.get_geometry())
 
     def _on_im_trans_changed(self):
-        """Transform checkbox toggled — re-apply to the current frame + refresh."""
+        """Transform checkbox toggled — re-apply to the current frame + refresh.
+
+        Also re-broadcast the codes: the Mask Builder paints the detector in
+        this tab's orientation so the two do not disagree about which way up
+        it is while you pick pixels to throw away (app.py wires it).
+        """
+        self.imTransChanged.emit(list(self._im_trans_codes()))
         if self._is_projection and getattr(self, "_proj_raw", None) is not None:
             self._cur = self._viewer.set_raw_frame(
                 self._proj_raw, self._im_trans_codes(), autorange=False)
