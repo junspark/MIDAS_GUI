@@ -1637,6 +1637,105 @@ def _pixel_to_two_theta_deg(Y_px, Z_px, Lsd_um: float, bc_y: float, bc_z: float,
     return np.degrees(np.arccos(np.clip(Px / norm, -1.0, 1.0)))
 
 
+def pixel_eta_deg(Y_px, Z_px, bc_y: float, bc_z: float,
+                  pxY_um: float, pxZ_um: float):
+    """Azimuth η (degrees) of pixel(s) about the beam centre.
+
+    Matches the backend's ``pixel_to_REta`` exactly — ``atan2(-Yc, Zc)``
+    with ``Yc = (bc_y - Y) * pxY`` and ``Zc = (Z - bc_z) * pxZ`` — so η = 0
+    is straight **up** (+Z), not along +Y, and η increases towards +Y. The
+    same convention the η spokes are drawn in (see the note in
+    ``draw_bin_grid``); swapping the arguments puts every value 90° out.
+
+    Deliberately flat (no tilt): η names which spoke of the cake a pixel
+    falls in, and the cake's own η binning is this detector-plane angle.
+    2θ is the quantity that must be tilt-corrected, and
+    :func:`_pixel_to_two_theta_deg` is where that happens.
+    """
+    Yc = (bc_y - np.asarray(Y_px, dtype=float)) * pxY_um
+    Zc = (np.asarray(Z_px, dtype=float) - bc_z) * pxZ_um
+    return np.degrees(np.arctan2(-Yc, Zc))
+
+
+def im_trans_map_point(col, row, shape, codes):
+    """Map an image *point* through MIDAS transform codes — the point-wise
+    counterpart of :func:`_apply_im_trans`, which only transforms arrays.
+
+    ``shape`` is the ``(rows, cols)`` of the image the point is currently
+    in; a transpose changes it, so it is tracked across the sequence.
+    Returns ``(col, row)`` in the transformed frame.
+
+    Exists for the Mask Builder, which displays the **raw** detector image
+    on purpose while a calibration's beam centre lives in the transformed
+    frame — so a hovered point has to be carried into that frame before any
+    geometry is applied to it.
+    """
+    n_rows, n_cols = int(shape[0]), int(shape[1])
+    col, row = int(col), int(row)
+    for c in codes or ():
+        if c == 1:                       # flipY — image[:, ::-1]
+            col = n_cols - 1 - col
+        elif c == 2:                     # flipZ — image[::-1, :]
+            row = n_rows - 1 - row
+        elif c == 3:                     # transpose — image.T
+            col, row = row, col
+            n_rows, n_cols = n_cols, n_rows
+    return col, row
+
+
+def _fmt_g(v: float, nd: int) -> str:
+    """Fixed-point with trailing zeros trimmed, or an em dash when the value
+    is not finite (d-spacing diverges on the beam axis)."""
+    if v is None or not math.isfinite(v):
+        return "—"
+    return f"{v:.{nd}f}".rstrip("0").rstrip(".") or "0"
+
+
+def pixel_readout_text(col, row, geom: dict) -> str:
+    """One status-bar clause naming 2θ / Q / d / η at pixel ``(col, row)``.
+
+    ``geom`` is the geometry dict the tabs already build (``Lsd`` in µm,
+    ``BC_y``/``BC_z`` in px, ``pxY``/optional ``pxZ`` in µm, optional
+    ``tx``/``ty``/``tz`` in degrees, optional ``wavelength_A``). Returns
+    ``""`` when the geometry cannot place the pixel at all (no Lsd, no beam
+    centre or no pixel size), which is what keeps a viewer with no
+    calibration rendering byte-identically to before this existed.
+
+    Degrades per quantity rather than all-or-nothing: without a wavelength
+    there is no Q or d, but 2θ and η are still well defined, so those are
+    shown alone. d is reported as an em dash on the beam axis, where it
+    diverges.
+
+    Pure and cheap — no Qt, no IO. It is called on every hover (rate-limited
+    to 60 Hz by the viewer's ``SignalProxy``), so it must stay that way.
+    """
+    if not geom:
+        return ""
+    lsd = geom.get("Lsd")
+    bc_y, bc_z = geom.get("BC_y"), geom.get("BC_z")
+    pxY = geom.get("pxY") or geom.get("px")
+    if None in (lsd, bc_y, bc_z, pxY) or float(lsd) <= 0 or float(pxY) <= 0:
+        return ""
+    pxZ = geom.get("pxZ") or pxY
+    tt = float(_pixel_to_two_theta_deg(
+        col, row, float(lsd), float(bc_y), float(bc_z),
+        float(geom.get("tx") or 0.0), float(geom.get("ty") or 0.0),
+        float(geom.get("tz") or 0.0), float(pxY), float(pxZ)))
+    eta = float(pixel_eta_deg(col, row, float(bc_y), float(bc_z),
+                              float(pxY), float(pxZ)))
+    parts = [f"2θ = {_fmt_g(tt, 4)}°"]
+    wl = geom.get("wavelength_A")
+    if wl and float(wl) > 0:
+        wl = float(wl)
+        sin_th = math.sin(math.radians(tt) / 2.0)
+        q = 4.0 * math.pi * sin_th / wl
+        d = wl / (2.0 * sin_th) if sin_th > 0 else math.inf
+        parts.append(f"Q = {_fmt_g(q, 4)} Å⁻¹")
+        parts.append(f"d = {_fmt_g(d, 4)} Å")
+    parts.append(f"η = {_fmt_g(eta, 2)}°")
+    return "    ".join(parts)
+
+
 def read_geometry(path: str | Path) -> dict:
     """Parse beam-centre / distance / pixel / wavelength from a calibration file.
 

@@ -19,7 +19,8 @@ from midas_gui.helpers import (_load_image, _fspin, _NoScrollSpinBox, _browse, i
                                widgets_to_dict, apply_dict_to_widgets,
                                new_temp_h5_path, save_stack_h5,
                                display_text_for_paths,
-                               browse_start_dir, warn_if_path_missing)
+                               browse_start_dir, warn_if_path_missing,
+                               pixel_readout_text, im_trans_map_point)
 from midas_gui.widgets import ImageViewer
 from midas_gui.dialogs import show_error
 from midas_gui.workers import MaskComputeWorker
@@ -87,9 +88,50 @@ class MaskTab(QtWidgets.QWidget):
                 "dataset": self._h5loc_edit.currentText().strip() if is_h5(raw) else None,
                 "field": "data", "label": "Mask Builder"}
 
+    def _radial_readout(self, col, row) -> str:
+        """2θ / Q / d / η under the cursor — see
+        ``widgets.ImageViewer.set_radial_readout_fn``.
+
+        Unlike every other tab, this viewer shows the **raw** detector image
+        on purpose (the mask is built in raw space), while a calibration's
+        beam centre and tilts live in the transformed frame. So the hovered
+        pixel is carried across with ``im_trans_map_point`` before any
+        geometry touches it; skipping that step would produce confident,
+        wrong numbers wherever a transform is active.
+
+        Nothing is shown unless the transformed shape matches the detector
+        the calibration was fit on — a mask built against one detector and a
+        calibration from another would otherwise read plausibly. Same guard,
+        and the same reasoning, as the mask-overlay shape check.
+        """
+        r = self._calib_result
+        if r is None or self._image is None:
+            return ""
+        codes = tuple(getattr(r, "im_trans", ()) or ())
+        n_rows, n_cols = self._image.shape
+        col, row = im_trans_map_point(col, row, (n_rows, n_cols), codes)
+        # Each transpose swaps the frame's extent; an even number cancels.
+        if sum(1 for c in codes if c == 3) % 2:
+            n_rows, n_cols = n_cols, n_rows
+        ny, nz = getattr(r, "NrPixelsY", None), getattr(r, "NrPixelsZ", None)
+        if ny and nz and (int(ny) != n_cols or int(nz) != n_rows):
+            return ""
+        pxY = float(getattr(r, "pxY", 0.0) or 0.0)
+        return pixel_readout_text(col, row, {
+            "Lsd": getattr(r, "Lsd", None),
+            "BC_y": getattr(r, "BC_y", None), "BC_z": getattr(r, "BC_z", None),
+            "pxY": pxY, "pxZ": float(getattr(r, "pxZ", 0.0) or pxY),
+            "tx": float(getattr(r, "tx", 0.0) or 0.0),
+            "ty": float(getattr(r, "ty", 0.0) or 0.0),
+            "tz": float(getattr(r, "tz", 0.0) or 0.0),
+            "wavelength_A": getattr(r, "wavelength_A", None)})
+
     def set_calibration(self, result):
         """Receive calibration from Tab 2 — enables geometry-based mask methods."""
         self._calib_result = result
+        # Geometry arriving does not move the cursor.
+        if getattr(self, "_viewer", None) is not None:
+            self._viewer._refresh_coord_bar()
         if result is not None:
             self._geom_group.setEnabled(True)
             self._geom_note.setText(
@@ -430,6 +472,7 @@ class MaskTab(QtWidgets.QWidget):
         rv.addWidget(self._draw_bar)
 
         self._viewer = ImageViewer(title="")
+        self._viewer.set_radial_readout_fn(self._radial_readout)
         rv.addWidget(self._viewer, stretch=1)
         root.addWidget(right_panel, stretch=1)
 

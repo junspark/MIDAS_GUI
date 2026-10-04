@@ -21,6 +21,7 @@ import pyqtgraph as pg
 from midas_gui.constants import DEFAULT_NICKEL_H5
 from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _NoScrollComboBox,
                          widgets_to_dict, apply_dict_to_widgets, _apply_im_trans,
+                         pixel_readout_text,
                          load_profile_file, profile_file_axis_kind,
                          native_axis_to_r_px, PROFILE_FILE_FILTER)
 from midas_gui.widgets import (ProfileViewer, DataLoaderPanel, CakeViewer,
@@ -129,6 +130,17 @@ class DataViewerTab(QtWidgets.QWidget):
     def _im_trans_codes(self) -> list:
         """Ordered MIDAS ImTransOpt codes from the Transforms checkboxes."""
         return self._geom_card.im_trans_codes()
+
+    def _radial_readout(self, col, row) -> str:
+        """2θ / Q / d / η under the cursor — see
+        ``widgets.ImageViewer.set_radial_readout_fn``.
+
+        The displayed frame is already in the geometry's own orientation
+        (every path here goes through ``set_raw_frame`` with these same
+        ``im_trans`` codes), so the hovered pixel needs no remapping. The
+        card carries no ``tx``; ``pixel_readout_text`` defaults it to 0.
+        """
+        return pixel_readout_text(col, row, self.get_geometry())
 
     def _on_im_trans_changed(self):
         """Transform checkbox toggled — re-apply to the current frame + refresh."""
@@ -331,6 +343,11 @@ class DataViewerTab(QtWidgets.QWidget):
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         right.setHandleWidth(8)
         self._viewer = ROIImageViewer()
+        self._viewer.set_radial_readout_fn(self._radial_readout)
+        # The geometry card owns BC/Lsd/tilts; the cursor does not move when
+        # one of them is edited, so the readout has to be told.
+        self._geom_card.geometryChanged.connect(
+            lambda: self._viewer._refresh_coord_bar())
         self._geom_card.set_viewer(self._viewer)
         vtb = self._viewer._toolbar_layout
         # Display-origin selector — bottom-left (MIDAS convention, the default)

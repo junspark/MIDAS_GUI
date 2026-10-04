@@ -83,6 +83,62 @@ Open follow-ups, none blocking:
 
 ## Recently completed
 
+**2026-10-03 — the pixel readout says where you are in reciprocal space.**
+Asked for at the beamline as "re-add the q/2θ readout". Checked first: it
+was never there. `ImageViewer._coord_text` has carried x/y/intensity and
+nothing else since `9640a3b`; the R/2θ/d/Q display that does exist is the
+**cake** viewer's (`widgets.py`) and the profile viewer's x-unit selector.
+So this is new, built to the same end.
+
+- **2θ, Q, d and η** now follow x/y/intensity in the bar under every image
+  viewer that has geometry — Calibrate, Data Viewer, Batch's Detector view
+  and Mask Builder.
+- **2θ is tilt-aware**, via the existing `helpers._pixel_to_two_theta_deg`
+  (exact closed-form inverse of `_tilt_project_YZ`) — no new maths. Pinned
+  by a round-trip test: forward-project a ring at a known 2θ through
+  `tilted_ring_xy` at four tilt settings, read every pixel back, assert it
+  returns that 2θ. So the bar and the ring overlay cannot disagree.
+- **η matches the backend's `pixel_to_REta`** — `atan2(-Yc, Zc)`, η = 0
+  straight up (+Z). New `helpers.pixel_eta_deg`, with the four cardinal
+  directions pinned, because the sin/cos-swap failure mode puts every value
+  90° out and still looks plausible.
+- **`ImageViewer.set_radial_readout_fn(fn)`** keeps `widgets.py`
+  geometry-free, exactly as `DataLoaderPanel.set_omega_hint_fn` does for ω:
+  the tab hands in a callable. Unset, the bar is byte-identical to before —
+  asserted, since four existing readout tests depend on it. A raising `fn`
+  degrades to the plain readout rather than taking the status bar down.
+- **Calibrate works before a fit**, off the live seed boxes, tagged
+  `(seed)` so the number never quietly changes meaning when a result lands.
+  That is the case the feature exists for: knowing 2θ *while* picking
+  d-spacing points. Seed edits, Pick BC, "Send →" and the result all
+  refresh it — the cursor does not move when any of them fire, and
+  `sigMouseMoved` only emits on real motion (the same staleness that bit
+  the Limits note in `86c1b27`).
+- **Mask Builder needed a frame hop.** It displays the raw detector image
+  on purpose while the calibration's beam centre lives in the transformed
+  frame, so a hovered pixel is carried across by new
+  `helpers.im_trans_map_point` (the point-wise counterpart to
+  `_apply_im_trans`, which only ever handled arrays) before any geometry
+  touches it. Proven against `_apply_im_trans` for all 13 code
+  permutations on a *non-square* array, which is what catches a transpose
+  that fails to swap the bounds. If the loaded image does not match the
+  detector the calibration was fit on, the reciprocal-space fields are
+  dropped rather than guessed — same guard as the mask overlay in
+  `bc1c370`.
+- Batch caches its geometry and drops the cache in
+  `_refresh_detector_preview`: its "From file" source parses a calibration
+  file, which must not happen at cursor-move rate.
+
+**Verified:** 1,244 collected, **2 failed, 3 skipped** (1,239 passed) — the
+known set exactly. 49 new tests (42 in `tests/test_pixel_readout.py`, 7
+appended to `tests/test_viewer_origin_and_readout.py`). Offscreen
+whole-app check confirms all four viewers have the callable bound and
+Calibrate renders a seeded clause.
+**Not verified with eyes on it:** the bar is now ~150 characters with all
+four quantities, and this toolbar is already noted as eliding at the app's
+default window width. Wants a look at real width; dropping 2θ to 3 decimals
+is the cheap trim if it reads badly.
+
 **2026-10-03 — upstream's ring-coverage commit merged back, plus a
 housekeeping pass.** `1c5c9af` (merge) and the cleanup commit on top of it,
 both local. Upstream's `6030371` (predicted rings bounded by true detector

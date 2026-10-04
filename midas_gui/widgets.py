@@ -230,6 +230,9 @@ class ImageViewer(QtWidgets.QWidget):
         # and the bar used to fall back to its "Move cursor over image"
         # placeholder on every one of them.
         self._hover_xy: Optional[tuple] = None
+        # Optional owner-supplied fn(col, row) -> str appended to the readout.
+        # See set_radial_readout_fn.
+        self._radial_readout_fn = None
         self._manual_levels: Optional[tuple] = None
         self._manual_hist_range: Optional[tuple] = None
         self._suspend_level_track = False
@@ -500,6 +503,29 @@ class ImageViewer(QtWidgets.QWidget):
         self._hover_xy = None
         super().leaveEvent(ev)
 
+    def set_radial_readout_fn(self, fn) -> None:
+        """Supply ``fn(col, row) -> str`` — one clause appended to the pixel
+        readout (2θ / Q / d / η), or ``""`` for none.
+
+        Same arrangement as :meth:`DataLoaderPanel.set_omega_hint_fn`, and for
+        the same reason: placing a pixel in reciprocal space needs a
+        calibration, which belongs to the tab, not to this shared widget.
+        Unset — the default, and every viewer that has no geometry — the bar
+        is byte-identical to what it has always been.
+
+        ``fn`` is called on every hover (rate-limited to 60 Hz by the
+        viewer's ``SignalProxy``) and on every incoming frame, so it must be
+        cheap: no file reads. ``helpers.pixel_readout_text`` is the intended
+        implementation. Exceptions are swallowed and the plain readout shown
+        instead — a half-edited geometry must not take the status bar down.
+
+        Call :meth:`_refresh_coord_bar` after the geometry behind ``fn``
+        changes: the cursor does not move when a fit lands, and
+        ``sigMouseMoved`` only fires on actual motion.
+        """
+        self._radial_readout_fn = fn
+        self._refresh_coord_bar()
+
     def _refresh_coord_bar(self):
         """Re-render the bottom pixel-readout bar from the remembered cursor
         position against the *current* frame.
@@ -519,9 +545,16 @@ class ImageViewer(QtWidgets.QWidget):
                 # floor, not round (Bug 6)
                 ix, iy = int(self._hover_xy[0]), int(self._hover_xy[1])
                 if 0 <= iy < h and 0 <= ix < w:
+                    extra = ""
+                    if self._radial_readout_fn is not None:
+                        try:
+                            extra = self._radial_readout_fn(ix, iy) or ""
+                        except Exception:
+                            extra = ""
                     return (f"  x (col) = {ix}    y (row) = {iy}    "
                             f"intensity = {self._data[iy, ix]:.4g}    "
-                            f"(image {w}×{h} px)")
+                            + (f"{extra}    " if extra else "")
+                            + f"(image {w}×{h} px)")
             return (f"Image {w}×{h} px  |  "
                     "Move cursor over image to inspect pixel values")
         return "Move cursor over image to inspect pixel values"

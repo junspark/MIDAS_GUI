@@ -1212,6 +1212,36 @@ so the two aren't confused when both are visible on the same image. **Clear** re
 all of it at once — Pick Ring's points/fit **and** the Pick BC crosshair marker,
 regardless of which tool left it on screen.
 
+### Pixel readout (bar under the image)
+The bar below every image viewer reports the pixel under the cursor:
+`x (col)`, `y (row)` and `intensity`, and — wherever a calibration is
+available — the reciprocal-space position too: **2θ**, **Q**, **d** and the
+azimuth **η**. It tracks incoming frames during live acquisition without the
+mouse moving, and it updates when the geometry changes underneath it (editing
+a beam centre or Lsd, or a fit landing) rather than waiting for the next
+cursor move.
+
+Details worth knowing:
+
+- **2θ is tilt-aware.** It is the exact inverse of the same forward
+  projection the ring overlays are drawn with, so on a tilted geometry the
+  readout and the rings always agree.
+- **η = 0 is straight up (+Z)** and increases towards +Y — the same
+  convention the cake's η axis and the η spokes of the bin grid use.
+- **d is shown as `—` at the beam centre**, where it diverges.
+- **Without a wavelength** only 2θ and η appear; Q and d need λ. Without a
+  distance / beam centre / pixel size the pixel cannot be placed at all and
+  the bar shows just x, y and intensity, exactly as it did before.
+- **Calibrate tags the value `(seed)`** while it is computed from the seed
+  boxes rather than a fitted result, so the number never quietly changes
+  meaning once a calibration lands. Pick BC, "Send →" from the Data Viewer
+  and manual seed edits all move it immediately.
+- **Mask Builder displays the raw detector image** while a calibration lives
+  in the transformed frame, so the hovered pixel is mapped across before the
+  geometry is applied. If the loaded image does not match the detector the
+  calibration was fit on, the reciprocal-space fields are omitted rather than
+  guessed.
+
 ### Top-N brightest pixels (image toolbar)
 A **Top-N pixels** toggle button (with an **N** spin box) sits on the image toolbar.
 When on, the **N highest-intensity pixels** of the current frame are marked with a

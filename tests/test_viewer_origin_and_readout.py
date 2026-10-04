@@ -361,3 +361,75 @@ def test_every_tab_with_a_compass_listens_for_the_origin_flip(app, tab_cls, view
     viewer = getattr(tab, viewer_attr)
     assert viewer.receivers(viewer.originChanged) > 0, \
         f"{cls_name} never connected to originChanged"
+
+
+# ── radial readout hook (2θ / Q / d / η) ─────────────────────────────
+
+def test_no_radial_fn_leaves_the_readout_byte_identical(viewer):
+    """The default must be indistinguishable from before the hook existed —
+    every viewer without a calibration depends on it."""
+    viewer.set_image(FRAME)
+    viewer._hover_xy = (1.2, 2.9)
+    viewer._refresh_coord_bar()
+    before = viewer._coord_bar.text()
+    assert before == ("  x (col) = 1    y (row) = 2    "
+                      "intensity = 9    (image 4×3 px)")
+
+
+def test_radial_fn_clause_appears_before_the_image_size(viewer):
+    viewer.set_image(FRAME)
+    viewer._hover_xy = (1.2, 2.9)
+    viewer.set_radial_readout_fn(lambda c, r: f"2θ = {c + r}°")
+    text = viewer._coord_bar.text()
+    assert "intensity = 9    2θ = 3°    (image 4×3 px)" in text
+
+
+def test_radial_fn_receives_the_same_floored_pixel_as_the_readout(viewer):
+    """The clause must describe the pixel the bar names, not a rounded one."""
+    seen = []
+    viewer.set_image(FRAME)
+    viewer._hover_xy = (1.9, 2.1)                 # floors to col 1, row 2
+    viewer.set_radial_readout_fn(lambda c, r: seen.append((c, r)) or "x")
+    assert seen[-1] == (1, 2)
+    assert "x (col) = 1    y (row) = 2" in viewer._coord_bar.text()
+
+
+def test_radial_fn_returning_empty_adds_no_separator(viewer):
+    """A geometry that cannot place the pixel yields "" — and must not leave
+    a double gap behind where the clause would have been."""
+    viewer.set_image(FRAME)
+    viewer._hover_xy = (1.2, 2.9)
+    viewer.set_radial_readout_fn(lambda c, r: "")
+    assert viewer._coord_bar.text() == ("  x (col) = 1    y (row) = 2    "
+                                        "intensity = 9    (image 4×3 px)")
+
+
+def test_a_raising_radial_fn_degrades_to_the_plain_readout(viewer):
+    """A half-edited geometry must not take the status bar down with it."""
+    def boom(c, r):
+        raise RuntimeError("geometry mid-edit")
+    viewer.set_image(FRAME)
+    viewer._hover_xy = (1.2, 2.9)
+    viewer.set_radial_readout_fn(boom)
+    assert viewer._coord_bar.text() == ("  x (col) = 1    y (row) = 2    "
+                                        "intensity = 9    (image 4×3 px)")
+
+
+def test_setting_the_fn_refreshes_without_the_cursor_moving(viewer):
+    """A fit landing changes the geometry but not the cursor position."""
+    viewer.set_image(FRAME)
+    viewer._hover_xy = (1.2, 2.9)
+    viewer.set_radial_readout_fn(lambda c, r: "first")
+    assert "first" in viewer._coord_bar.text()
+    viewer.set_radial_readout_fn(lambda c, r: "second")
+    assert "second" in viewer._coord_bar.text()
+
+
+def test_radial_fn_survives_frames_streaming_in(viewer):
+    """The live-acquisition path re-renders through _coord_text too."""
+    viewer.set_image(FRAME)
+    viewer._hover_xy = (1.2, 2.9)
+    viewer.set_radial_readout_fn(lambda c, r: "2θ = 1.5°")
+    viewer.set_image(FRAME + 100, autorange=False, reset_levels=False)
+    text = viewer._coord_bar.text()
+    assert "intensity = 109" in text and "2θ = 1.5°" in text

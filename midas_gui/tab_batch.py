@@ -23,6 +23,7 @@ from midas_gui.constants import (KERNELS, ERROR_MODELS,
 from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_file,
                                geometry_fields_from_file,
                                resolve_calibration_fields, full_calibration_snapshot,
+                               pixel_readout_text,
                                collapse_cake_eta,
                                make_calib_values_button,
                                rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
@@ -347,6 +348,9 @@ class BatchTab(QtWidgets.QWidget):
         self._drift_worker = None
         self._drift_traj = None
         self._calib_result = None
+        # Geometry behind the Detector-view pixel readout, resolved lazily and
+        # dropped by _refresh_detector_preview; see _radial_readout.
+        self._readout_geom = None
         self._wf_started = False
         self._monitor_worker = None
         self._integrated_fids: set = set()   # frame ids already displayed (batch + monitor)
@@ -794,12 +798,36 @@ class BatchTab(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _radial_readout(self, col, row) -> str:
+        """2θ / Q / d / η under the cursor — see
+        ``widgets.ImageViewer.set_radial_readout_fn``.
+
+        Reads the cached geometry rather than resolving the calibration on
+        every hover: the "From file" source parses a file, which this must
+        not do at cursor-move rate. ``_refresh_detector_preview`` drops the
+        cache whenever the calibration source changes.
+
+        The preview is drawn with ``set_raw_frame`` under this same
+        calibration's ``im_trans``, so the hovered pixel is already in the
+        geometry's frame.
+        """
+        if self._readout_geom is None:
+            fields, _note = self._calib_fields_in_use()
+            self._readout_geom = fields or {}
+        return pixel_readout_text(col, row, self._readout_geom)
+
     def _refresh_detector_preview(self, *_args) -> None:
         """Refresh the Detector-view tab's frame + Rmin/Rmax/bin-grid overlay —
         called on new/changed data, a calibration-source change, or any of
         the Rmin/Rmax/R-bin/η-bin/Show-bin-grid controls changing. The Rmax
         auto-fill and overlay must not depend on a frame already being
         loaded — calibration commonly arrives before data does."""
+        # The calibration may have changed under us (this is the hub every
+        # source change routes through), so the readout's cached geometry is
+        # no longer trustworthy. Dropping it here keeps _radial_readout free
+        # of file IO on the hover path.
+        self._readout_geom = None
+        self._det_view._refresh_coord_bar()
         # current_frame() already applies dark/bright/background correction
         # to each constituent frame before any "Preview: sum first N"
         # summing (see DataLoaderPanel._start_preview_worker) — correcting
@@ -1701,6 +1729,7 @@ class BatchTab(QtWidgets.QWidget):
         # η-collapsed profile the other two views show.
         self._cake_stack_view = CakeStackViewer()
         self._det_view = ImageViewer()
+        self._det_view.set_radial_readout_fn(self._radial_readout)
         self._origin_btn = OriginToolButton(self._det_view)
         self._det_view._toolbar_layout.addWidget(self._origin_btn)
         self._det_view._toolbar_layout.addWidget(self._grid_chk)

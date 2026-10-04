@@ -26,7 +26,7 @@ from midas_gui.constants import (
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label, ring_xy_corrected, distortion_rho_d_um,
-    ring_on_image_mask, refresh_combo_items, rmax_corner_px,
+    ring_on_image_mask, refresh_combo_items, rmax_corner_px, pixel_readout_text,
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
     paramstest_pairs, parse_dspacing_text, browse_start_dir, warn_if_path_missing,
     suggest_working_dir, check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME)
@@ -553,7 +553,17 @@ class CalibrationTab(QtWidgets.QWidget):
         for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
             w.valueChanged.connect(self._update_seed_summary)
             w.valueChanged.connect(self._update_limits_label)
+            w.valueChanged.connect(self._refresh_pixel_readout)
         self._wl.valueChanged.connect(self._update_limits_label)
+        # The pixel readout is computed from the same seed geometry, and the
+        # cursor does not move when a spin box does — pyqtgraph only emits
+        # sigMouseMoved on actual motion, so without this the bar keeps
+        # reporting 2θ for the geometry that was current when the mouse last
+        # moved. Same staleness the Limits note above had.
+        self._wl.valueChanged.connect(self._refresh_pixel_readout)
+        self._pxY.valueChanged.connect(self._refresh_pixel_readout)
+        self._pxZ_spin.valueChanged.connect(self._refresh_pixel_readout)
+        self._pxZ_check.toggled.connect(self._refresh_pixel_readout)
         self._manual_seed_check.toggled.connect(self._on_seed_master_toggled)
         # Column 2 holds only two-decimal degree fields, so it does not need the
         # default numeric width — narrowing it is most of what keeps this card
@@ -899,6 +909,7 @@ class CalibrationTab(QtWidgets.QWidget):
         # Right: image + bottom tabs
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self._img_view = PickableImageViewer()
+        self._img_view.set_radial_readout_fn(self._radial_readout)
         self._img_view.bcPicked.connect(self._on_bc_picked)
         self._img_view.ringFitBC.connect(self._on_ring_fit_bc)
         self._img_view.dspacingPicksChanged.connect(self._on_dspacing_picks_changed)
@@ -1302,6 +1313,48 @@ class CalibrationTab(QtWidgets.QWidget):
                 "BC_y": self._seed_bcy.value(), "BC_z": self._seed_bcz.value(),
                 "tx": self._seed_tx.value(), "ty": self._seed_ty.value(),
                 "tz": self._seed_tz.value(), "wavelength_A": self._wl.value()}
+
+    def _readout_geometry(self) -> tuple:
+        """``(geom_dict, is_seed)`` for the pixel readout.
+
+        Prefers the fitted result once there is one, so the bar agrees with
+        the rings drawn over it; falls back to the live seed boxes, which is
+        what makes the readout useful during picking — before any fit exists,
+        which is when "what 2θ is this ring?" is actually being asked.
+        """
+        r = self._calib_result
+        if r is not None:
+            pxY = float(getattr(r, "pxY", 0.0) or self._pxY.value())
+            return ({"Lsd": float(r.Lsd), "BC_y": float(r.BC_y),
+                     "BC_z": float(r.BC_z), "pxY": pxY,
+                     "pxZ": float(getattr(r, "pxZ", 0.0) or pxY),
+                     "tx": float(getattr(r, "tx", 0.0) or 0.0),
+                     "ty": float(getattr(r, "ty", 0.0) or 0.0),
+                     "tz": float(getattr(r, "tz", 0.0) or 0.0),
+                     "wavelength_A": float(getattr(r, "wavelength_A", 0.0)
+                                           or self._wl.value())}, False)
+        pxY = self._pxY.value()
+        geom = dict(self._limit_seed_values())
+        geom["pxY"] = pxY
+        geom["pxZ"] = self._pxZ_spin.value() if self._pxZ_check.isChecked() else pxY
+        return geom, True
+
+    def _radial_readout(self, col, row) -> str:
+        """2θ / Q / d / η under the cursor — see
+        ``widgets.ImageViewer.set_radial_readout_fn``.
+
+        Tagged ``(seed)`` while it comes from the seed boxes rather than a
+        fit, so the number never quietly changes meaning the moment a
+        calibration lands.
+        """
+        geom, is_seed = self._readout_geometry()
+        text = pixel_readout_text(col, row, geom)
+        return f"{text}  (seed)" if text and is_seed else text
+
+    def _refresh_pixel_readout(self, *_):
+        """Re-render the readout against the current geometry without the
+        cursor having moved. See the connections in ``_build_ui``."""
+        self._img_view._refresh_coord_bar()
 
     @property
     def _limits(self) -> dict:
@@ -2657,6 +2710,9 @@ class CalibrationTab(QtWidgets.QWidget):
         from a project attempt), so rings that sit off the measured ones mean
         the fit, not the drawing."""
         self._calib_result = result
+        # The readout switches from the seed geometry to this one (and drops
+        # its "(seed)" tag) the moment it lands, with the cursor stationary.
+        self._img_view._refresh_coord_bar()
         for item in self._ring_items:
             self._img_view._iv.removeItem(item)
         self._ring_items.clear()
