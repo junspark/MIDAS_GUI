@@ -43,22 +43,22 @@ Build-critical reference for maintaining the PDF tab:
 
 ## Inherited from PR #7 (merged 2026-09-03, `092fbba`/`46e0fec`)
 
-- **No test coverage for three of the PR's six new modules** —
-  `job_queue.py` (background batch-integrate job queue, `screen`-backed),
-  `peak_fit_panel.py` (GSAS-2 peak-fit view), `batch_cli.py` (headless
-  batch runner). Skipped deliberately: useful tests need a live `screen`
-  session or a full widget harness, which was out of scope for the review
-  session. Import-only smoke tests were rejected as false assurance. The
-  other three (`provenance.py`, `zarr_cake.py`, `cake_params.py`) are
+- **No test coverage for two of the PR's six new modules** —
+  `job_queue.py` (background batch-integrate job queue, `screen`-backed) and
+  `peak_fit_panel.py` (GSAS-2 peak-fit view). Skipped deliberately: useful
+  tests need a live `screen` session or a full widget harness, which was out
+  of scope for the review session. Import-only smoke tests were rejected as
+  false assurance. `provenance.py`, `zarr_cake.py` and `cake_params.py` are
   covered — see `tests/test_provenance.py`, `tests/test_zarr_cake.py`.
+  **Updated 2026-10-03:** the third, `batch_cli.py`, is now partly covered by
+  `tests/test_batch_cli_omega.py` and `tests/test_batch_cli_zarr_grouping.py`
+  (the omega flags, the zarr-grouping flag, and the tab→argv→cfg round trip
+  for both) — but nothing else in that file is exercised.
 - **The per-frame output filename change is undeclared.** PR #7 moved Batch
   Integrate / Folder Monitor output from the verbatim frame id to
   `<froot>_<NNNNNN><tag>` (see DECISIONS 2026-09-02). No commit message in
   the PR mentions it. Anyone with a script globbing Batch Integrate output
   is broken by it. Needs a note to junspark, release notes, or both.
-- **`tab_batch.py:972` has an unused local `spec`** — the one new pyflakes
-  warning the PR introduced. Cosmetic; likely a leftover from the
-  Detector-view/overlay work.
 
 ## Package-side fixes (for MIDAS maintainers — NOT done in GUI)
 

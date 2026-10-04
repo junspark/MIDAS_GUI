@@ -1994,7 +1994,11 @@ class BatchTab(QtWidgets.QWidget):
         disk first: the background process (a fresh `python -m
         midas_gui.batch_cli`) has no access to this GUI's live state."""
         try:
-            spec = self._build_spec()
+            # Called for validation only — the background process rebuilds its
+            # own spec from the snapshot on disk, so the result is discarded.
+            # Keep the call: it is what reports a bad calibration up front,
+            # rather than letting the detached job fail where nobody sees it.
+            self._build_spec()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Calibration error", str(e)); return
 

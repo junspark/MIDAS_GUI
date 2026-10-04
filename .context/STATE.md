@@ -6,19 +6,19 @@ upstream's ring-coverage commit merged back — all local, nothing pushed)_
 
 ## Now working on
 
-**Reacting to the canonical repo taking PR #11.** Upstream merged all 48 of
-our commits on 2026-09-30 as eight staged checkpoints ending at our `7ccf0fb`,
-then added three follow-up fixes. Those are merged back here (`3bcba7f`), and
-last night's zarr grouping is committed ahead of it (`4ec0174`) so git could
-do a real three-way merge rather than a stash replay.
+**Clearing the decks before the next push.** PR #11 is behind us — upstream
+merged all 48 of our commits on 2026-09-30 as eight staged checkpoints ending
+at our `7ccf0fb`, then added follow-ups, all merged back here (`3bcba7f`,
+then `1c5c9af` for their ring-coverage commit). Since then: three Calibrate
+fixes reported from the beamline, and a housekeeping pass (ROADMAP reconciled,
+the PR#7 pyflakes nit fixed, scratch dirs pruned).
 
-`main` is **14 commits ahead of `origin/main` and nothing is pushed.** That is
+`main` is **21 commits ahead of `origin/main` and nothing is pushed.** That is
 the next action and it needs your word, since it is also the next PR upstream.
 
 Needing you, in the order it matters:
 - **Push, then open the next PR upstream.** Upstream's staged-checkpoint
-  method worked well on 48 commits; this one is two commits and does not need
-  it.
+  method worked well on 48 commits; this one is small enough not to need it.
 - **Eyes on a real zarr-grouping run.** The `Fe9Cr_KGT6038_after_failure_ff`
   folder with Dark set to both bracketing dark files, grouping *per source
   file*, should give 3 archives rather than 435. Verified only against
@@ -52,8 +52,19 @@ Open follow-ups, none blocking:
   by the actual seed geometry, which is the more honest axis.
 - Test suite needs two runs to cover: `--forked` races with `--basetemp`,
   unforked segfaults on multiple `CalibrationTab`s. See DECISIONS 2026-09-09.
-- `test_apply_project_calibration_single_detector` still hits the known
-  pyqtgraph teardown SIGABRT (reproduces on clean HEAD; not ours).
+- **Counting the suite:** a `--forked` run prints no `N passed` summary line
+  at all — `test_apply_project_calibration_single_detector`'s SIGABRT emits a
+  `Fatal Python error: Aborted` dump that swallows it, and counting the `.`
+  progress characters undercounts for the same reason (the dump breaks the
+  line format). Get the total from
+  `pytest tests/ --collect-only -q | awk -F': ' '/^tests\/.*: [0-9]+$/{n+=$2} END{print n}'`
+  and subtract the failures/skips the short summary does print. Suite counts
+  recorded before 2026-10-03 came from the progress-character method and are
+  therefore too low.
+- `test_apply_project_calibration_single_detector` hits the known pyqtgraph
+  teardown SIGABRT (reproduces on clean HEAD; not ours). **It is intermittent,
+  not constant** — the full 2026-10-03 run passed it. Treat a single green run
+  as weak evidence either way.
 
 - Still untested (ROADMAP.md): `job_queue.py`, `peak_fit_panel.py`.
   `batch_cli.py` now has `tests/test_batch_cli_omega.py` and
@@ -71,6 +82,46 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-10-03 — upstream's ring-coverage commit merged back, plus a
+housekeeping pass.** `1c5c9af` (merge) and the cleanup commit on top of it,
+both local. Upstream's `6030371` (predicted rings bounded by true detector
+coverage rather than a fixed 30°) was the only commit of theirs we did not
+have. It touches `helpers.py`/`tab_calibrate.py`/`hydra_calib_widgets.py` —
+the same `tab_calibrate.py` the three Calibrate fixes below had just
+rewritten — but git auto-merged everything except `STATE.md`, and the
+auto-merge was checked by hand rather than trusted: the `rmax_corner_px`
+import, the `_draw_rings` bound, and this fork's mask-overlay work all
+landed intact. `max_two_theta_deg` was also spot-checked numerically (a
+centred 2048² detector at Lsd 200 mm gives 55°, off-centre 69°, short-Lsd
+71° — all far past the old hardcoded 30°, which is the bug it fixes).
+
+Housekeeping in the same pass:
+- `tab_batch.py`'s unused local `spec` in `_run_as_job` (the one pyflakes
+  warning PR #7 introduced, tracked in ROADMAP) is gone. The *call* stays —
+  it is the pre-flight that reports a bad calibration before a detached job
+  launches — with a comment saying so, since the bare call now looks
+  pointless. An AST sweep for other unused locals turned up only
+  tuple-unpack/loop targets (which pyflakes does not flag) and
+  `batch_cli.py`'s deliberate `app = QApplication(...)` GC anchor; nothing
+  else was touched.
+- ROADMAP reconciled: the pyflakes item removed, and the PR#7 coverage item
+  corrected from three uncovered modules to two — `batch_cli.py` picked up
+  `test_batch_cli_omega.py` and `test_batch_cli_zarr_grouping.py` along the
+  way and nobody had updated the entry.
+- Pruned `.scratch/`, `.pytest_cache/`, every `__pycache__/` and five stale
+  `/tmp/mg_suite_*` basetemps. All gitignored; nothing tracked was touched.
+
+**Verified:** full suite on the merged tree — 1,195 collected, **2 failed, 3
+skipped** (so 1,190 passed), the known set exactly (`test_pva_live_source_roundtrip`,
+`test_apply_project_calibration_single_detector`, and the three
+frozen-point skips). Worth recording: the *pre-merge* baseline run passed
+`test_apply_project_calibration_single_detector` and this one failed it, on
+the same tree-modulo-cleanup — that failure is **intermittent**, so a single
+green run is not evidence it is fixed.
+**Not verified with eyes on it:** nothing new on screen — the merge changes
+which rings get predicted on a wide/short-Lsd geometry, and that has not
+been seen rendered.
 
 **2026-10-01 — Calibrate: predicted rings now bounded by true detector
 coverage, not a fixed 30°.** `helpers._predict_ring_radii` generated
