@@ -29,7 +29,7 @@ from midas_gui.constants import DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM, DEFAULT_LS
 from midas_gui.helpers import (
     _fspin, im_trans_codes_from_checkboxes, geometry_fields_from_file,
     _predict_ring_radii, ring_xy_corrected, distortion_rho_d_um, paramstest_pairs,
-    write_standalone_paramstest, apply_dict_to_widgets,
+    write_standalone_paramstest, apply_dict_to_widgets, rmax_corner_px,
     _PARAMSTEST_DISTORTION)
 from midas_gui.widgets import ResidualBarChart, _mono_font
 from midas_gui.dialogs import _SaveParamstestDialog, ManualSeedDialog, show_error
@@ -396,8 +396,8 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
                                     result.BC_y, result.BC_z, pxY, pxZ)
         dist = dict(getattr(result, "distortion", {}) or {})
         pen = pg.mkPen("lime", width=1.2)
-        max_r = max(result.NrPixelsY, result.NrPixelsZ)
-        for r in (r for r in _predict_ring_radii(result) if 0 < r < max_r):
+        max_r = rmax_corner_px(result.BC_y, result.BC_z, result.NrPixelsY, result.NrPixelsZ)
+        for r in (r for r in _predict_ring_radii(result) if 0 < r <= max_r):
             try:
                 two_theta_deg = math.degrees(math.atan(r * pxY / float(result.Lsd)))
                 ys, zs = ring_xy_corrected(

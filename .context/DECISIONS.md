@@ -3,6 +3,64 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-01 — Ring prediction bound by detector geometry, not a flat 30°
+
+Reported symptom: after a Calibrate fit, the image overlay and the radial
+profile's ring markers were missing rings that visibly lie within the frame.
+
+Cause: `helpers._predict_ring_radii()` generated the candidate ring list from
+the calibrant's wavelength/d-spacings with `two_theta_max_deg=30.0` hardcoded
+inline for the lattice/space-group path, and silently defaulted to the same
+30° by never passing `max_2theta_deg` to `simulate_rings_from_dspacings()`
+for the explicit-d-spacing path. Both decisions happen purely in
+wavelength/d-spacing space — no Lsd, pixel size, beam centre, or detector
+size is consulted. A later pixel-radius filter in the two overlay call sites
+(`tab_calibrate._draw_rings`, `hydra_calib_widgets._redraw_rings`) used
+`max(NrPixelsY, NrPixelsZ)` as a stand-in for "does it fit on the detector,"
+but that is an axis-aligned size, not the true distance to the farthest
+corner from an (often off-centre) beam centre — and it runs only *after* the
+30°-limited list was already built, so it cannot recover a ring the
+generation step never produced. Net effect: any geometry whose real 2θ
+coverage exceeds 30° (short Lsd, wide detector, off-centre beam — not an
+unusual combination) silently lost real rings near the frame edges/corners.
+
+Fix: added `helpers.max_two_theta_deg(bc_y, bc_z, ny, nz, lsd_um, pxY_um,
+pxZ_um)` — the true max 2θ reached at the farthest detector corner, reusing
+the same beam-centre/corner-distance reasoning as the existing
+`rmax_corner_px` (used for the Batch/Queue Rmin/Rmax "Corner" preset), but in
+physical units so it also works with non-square pixels. `_predict_ring_radii`
+now computes this from the result's own geometry and passes it as
+`max_2theta_deg` on both ring-generation paths, falling back to 30° only when
+`NrPixelsY`/`NrPixelsZ` aren't known yet (a result built before an image was
+loaded) or geometry fields are missing entirely (a minimal `SimpleNamespace`
+in a test) — both existing cases pinned by
+`tests/test_manual_dspacing_calib_ui.py::test_manual_fit_result_flows_through_on_done_with_correct_rings`
+and
+`tests/test_helpers.py::test_predict_ring_radii_uses_d_list_branch_not_crystalline_fallback`
+respectively, both unchanged by this fix. The two overlay call sites' post-hoc
+pixel filter was also corrected to `rmax_corner_px(...)` (was
+`max(NrPixelsY, NrPixelsZ)`), since leaving the old axis-aligned filter in
+place would have silently re-clipped exactly the farther, corner-region rings
+the generation-side fix now produces. New
+`tests/test_helpers.py::test_predict_ring_radii_uses_detector_coverage_not_fixed_30deg`
+pins a short-Lsd/wide-detector geometry whose true coverage is ~70° and
+asserts a 45°-2θ ring (inside the old 30° cutoff's blind spot) is predicted.
+
+Deliberately out of scope: the Hydra multi-panel geometry card
+(`hydra_geometry_card.py`) already exposes a user-editable max-2θ spinbox
+(default 25°) on a separate code path from the single-detector Calibrate tab
+and from `hydra_calib_widgets.py`'s per-panel overlay — it already lets a
+user dial coverage in, so it wasn't touched. `simulate_rings`/
+`simulate_rings_from_dspacings` keep their `max_2theta_deg=30.0` default
+signature; only the caller that had no business picking a fixed number
+(`_predict_ring_radii`) now supplies a computed one.
+
+**Verified:** `tests/test_helpers.py`, `tests/test_manual_dspacing_calib_ui.py`,
+`tests/test_manual_fit_conditioning.py`, `tests/test_batch_queue_ui.py`,
+`tests/test_hydra_calib_ui.py`, `tests/test_smoke.py` all green per-file on a
+clean `HOME`. `pyflakes` on the three touched files shows only the same
+pre-existing unused-import warnings as before.
+
 _Condensed 2026-08-31 (~2150 → ~500 lines): cut verification transcripts,
 file-by-file implementation narrative, and duplicated/superseded content;
 kept the durable "why" behind each decision. See git history before this

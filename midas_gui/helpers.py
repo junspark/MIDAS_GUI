@@ -1060,12 +1060,27 @@ def apply_field_corrections(img: np.ndarray, *, dark=None, bright=None,
 # ── Ring prediction (calibrant → ring radii in px) ──────────────────────────────
 
 def _predict_ring_radii(result) -> list:
-    """Predicted ring radii (px) for the result's calibrant geometry."""
+    """Predicted ring radii (px) for the result's calibrant geometry, out to
+    the farthest corner the detector frame actually reaches — not an
+    arbitrary wavelength-side cutoff. Falls back to 30° only when the
+    detector's pixel dimensions aren't known (e.g. a result built before an
+    image was loaded)."""
+    max_2theta = 30.0
+    ny = getattr(result, "NrPixelsY", 0) or 0
+    nz = getattr(result, "NrPixelsZ", 0) or 0
+    if ny > 0 and nz > 0:
+        try:
+            max_2theta = max_two_theta_deg(
+                result.BC_y, result.BC_z, ny, nz, result.Lsd,
+                result.pxY, getattr(result, "pxZ", None))
+        except Exception:
+            max_2theta = 30.0
     d_list = getattr(result, "_d_list", None)
     if d_list:
         try:
             rings = simulate_rings_from_dspacings(
-                d_list, result.wavelength_A, result.Lsd, result.pxY)
+                d_list, result.wavelength_A, result.Lsd, result.pxY,
+                max_2theta_deg=max_2theta)
             return sorted({round(r["radius_px"], 3) for r in rings})
         except Exception:
             return []
@@ -1076,7 +1091,7 @@ def _predict_ring_radii(result) -> list:
         lat = Lattice(a=lp["a"], b=lp["b"], c=lp["c"],
                       alpha=lp["alpha"], beta=lp["beta"], gamma=lp["gamma"])
         refs = generate_hkls(SpaceGroup.from_number(lp["sg"]), lat,
-                             wavelength_A=result.wavelength_A, two_theta_max_deg=30.0)
+                             wavelength_A=result.wavelength_A, two_theta_max_deg=max_2theta)
         return sorted({round(result.Lsd * math.tan(math.radians(r.two_theta_deg))
                              / result.pxY, 3) for r in refs})
     except Exception:
@@ -1799,6 +1814,20 @@ def rmax_edge_px(bc_y: float, bc_z: float, ny: int, nz: int) -> float:
     smaller than :func:`rmax_corner_px`, excludes the corner regions beyond
     that edge."""
     return float(max(bc_y, ny - 1 - bc_y, bc_z, nz - 1 - bc_z))
+
+
+def max_two_theta_deg(bc_y: float, bc_z: float, ny: int, nz: int,
+                      lsd_um: float, pxY_um: float, pxZ_um: float = None) -> float:
+    """True maximum 2theta reached anywhere on the detector frame — the
+    farthest CORNER from the beam centre in physical units (handles an
+    off-centre beam and non-square pixels), converted through Lsd. This is
+    the bound a predicted ring list should use, instead of an arbitrary
+    wavelength-side cutoff."""
+    pxZ_um = pxZ_um or pxY_um
+    dy_um = max(bc_y, ny - 1 - bc_y) * pxY_um
+    dz_um = max(bc_z, nz - 1 - bc_z) * pxZ_um
+    corner_um = math.hypot(dy_um, dz_um)
+    return math.degrees(math.atan(corner_um / lsd_um))
 
 
 def _thinned_bin_edges(lo: float, hi: float, step: float, max_count: int) -> np.ndarray:

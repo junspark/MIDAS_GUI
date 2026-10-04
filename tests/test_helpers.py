@@ -627,6 +627,32 @@ def test_predict_ring_radii_uses_d_list_branch_not_crystalline_fallback():
     assert radii == expected
 
 
+def test_predict_ring_radii_uses_detector_coverage_not_fixed_30deg():
+    """A short-Lsd / wide-detector geometry reaches well past the old
+    hardcoded 30 deg cutoff — a ring out there must still be predicted,
+    since it is a real ring that lies within the frame."""
+    from types import SimpleNamespace
+    from midas_gui.helpers import _predict_ring_radii, max_two_theta_deg
+
+    wavelength_A, lsd_um, px_um = 0.1729, 100000.0, 200.0
+    ny = nz = 2000
+    bc_y = bc_z = 999.5  # centered beam
+
+    two_theta_target_deg = 45.0
+    d = wavelength_A / (2.0 * math.sin(math.radians(two_theta_target_deg / 2.0)))
+
+    coverage = max_two_theta_deg(bc_y, bc_z, ny, nz, lsd_um, px_um)
+    assert coverage > two_theta_target_deg > 30.0  # this geometry really reaches past 30 deg
+
+    result = SimpleNamespace(
+        _d_list=[d], wavelength_A=wavelength_A, Lsd=lsd_um, pxY=px_um, pxZ=px_um,
+        BC_y=bc_y, BC_z=bc_z, NrPixelsY=ny, NrPixelsZ=nz, _calibrant_name="custom")
+
+    radii = _predict_ring_radii(result)
+    expected_radius_px = round(lsd_um * math.tan(math.radians(two_theta_target_deg)) / px_um, 3)
+    assert radii == [expected_radius_px]
+
+
 def test_apply_field_corrections_skips_mismatched_shape_instead_of_raising():
     """Regression test for a crash hit loading a saved session whose dark/
     bright/background paths were computed against a different detector

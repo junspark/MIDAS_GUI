@@ -1,8 +1,8 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-01 (upstream accepted PR #11; their follow-ups merged
-back, and last night's zarr grouping committed — all local, nothing pushed)_
+_Last updated: 2026-10-03 (three Calibrate fixes from the beamline, then
+upstream's ring-coverage commit merged back — all local, nothing pushed)_
 
 ## Now working on
 
@@ -71,6 +71,28 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-10-01 — Calibrate: predicted rings now bounded by true detector
+coverage, not a fixed 30°.** `helpers._predict_ring_radii` generated
+candidate rings from the calibrant's wavelength/d-spacings with a hardcoded
+`two_theta_max_deg=30.0`, decided before any detector geometry was
+consulted — so on a short-Lsd/wide-detector/off-centre-beam geometry whose
+real coverage exceeds 30°, real rings beyond it were never generated at all
+(the single-detector image overlay, its radial-profile ring markers, and the
+Hydra multi-panel overlay all fed from this one function). New
+`helpers.max_two_theta_deg()` computes the true max 2θ from the farthest
+detector corner (reusing the same beam-centre/corner-distance reasoning as
+the existing `rmax_corner_px`), with a safe fallback to 30° only when
+detector dimensions aren't known yet. Also fixed the redundant post-hoc
+pixel filter in `tab_calibrate._draw_rings`/`hydra_calib_widgets._redraw_rings`
+(`max(NrPixelsY, NrPixelsZ)` → `rmax_corner_px(...)`), which was an
+axis-aligned approximation, not the true corner distance, and could have
+clipped a few farther rings even after the generation-side fix. New test
+`tests/test_helpers.py::test_predict_ring_radii_uses_detector_coverage_not_fixed_30deg`.
+**Verified:** the 5 touched/related test files green per-file on a clean
+`HOME` (helpers/manual-dspacing-ui/manual-fit-conditioning/batch-queue-ui/
+hydra-calib-ui), plus `test_smoke.py`; `pyflakes` unchanged (same
+pre-existing warnings only).
 
 **2026-09-30 — one zarr per rotation, not one per frame.** `4ec0174`,
 committed 2026-10-01, not pushed. The

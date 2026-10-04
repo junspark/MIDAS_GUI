@@ -26,7 +26,7 @@ from midas_gui.constants import (
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _predict_ring_radii, _NoScrollComboBox,
     make_kedge_label, make_pixel_label, ring_xy_corrected, distortion_rho_d_um,
-    ring_on_image_mask, refresh_combo_items,
+    ring_on_image_mask, refresh_combo_items, rmax_corner_px,
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
     paramstest_pairs, parse_dspacing_text, browse_start_dir, warn_if_path_missing,
     suggest_working_dir, check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME)
@@ -2660,8 +2660,8 @@ class CalibrationTab(QtWidgets.QWidget):
         for item in self._ring_items:
             self._img_view._iv.removeItem(item)
         self._ring_items.clear()
-        max_r = max(result.NrPixelsY, result.NrPixelsZ)
-        radii = [r for r in _predict_ring_radii(result) if 0 < r < max_r]
+        max_r = rmax_corner_px(result.BC_y, result.BC_z, result.NrPixelsY, result.NrPixelsZ)
+        radii = [r for r in _predict_ring_radii(result) if 0 < r <= max_r]
         visible = self._show_rings_check.isChecked()
         pen = pg.mkPen("lime", width=1.2)
         curves = self._ring_curves(result, radii)
