@@ -195,6 +195,41 @@ def write_into_extracted(extracted_dir, snap: dict) -> int:
     return written
 
 
+def write_into_hdf5(h5_file, snap: dict) -> int:
+    """Materialise ``snap`` as datasets inside an already-open HDF5 file.
+
+    The HDF5 counterpart of :func:`write_into_extracted`, for Batch
+    Correction's reduced-frame output (``frame_correct.write_corrected_h5``),
+    which writes a plain ``.h5`` rather than a zarr store. Same contract:
+    paths are written exactly as :func:`read_tree` recorded them, so the
+    output's ``instrument/`` tree mirrors the source file's, and a dataset
+    HDF5 refuses (an exotic dtype, a name colliding with one already
+    written) is skipped rather than failing the whole copy.
+
+    Variable-length unicode is written through ``h5py.string_dtype()``;
+    numpy's fixed-width ``U`` dtype has no HDF5 equivalent and would
+    otherwise be one of those silent skips.
+
+    Returns how many datasets were written.
+    """
+    if not snap:
+        return 0
+    import h5py
+    written = 0
+    for path, arr in snap.items():
+        try:
+            arr = np.asarray(arr)
+            if arr.dtype.kind == "U":
+                h5_file.create_dataset(path, data=arr.astype(object),
+                                       dtype=h5py.string_dtype())
+            else:
+                h5_file.create_dataset(path, data=arr)
+            written += 1
+        except Exception:
+            continue
+    return written
+
+
 def copy_into_zip(zarr_zip_path, h5_path, **kwargs) -> int:
     """``snapshot`` + ``write_into_extracted`` against a closed ``.zarr.zip``.
 

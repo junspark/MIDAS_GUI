@@ -824,6 +824,168 @@ class ProjectionWorker(QtCore.QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class BatchCorrectionWorker(QtCore.QThread):
+    """Reduce every selected HDF5 file's sub-frame stack and write the result
+    back out as HDF5 — the engine of the Batch Correction tab.
+
+    One output file per input file, holding that file's reduced chunks as a
+    single ``(M, H, W)`` float32 dataset. Chunks never cross a file boundary,
+    which is what makes the per-file output well defined in the first place.
+
+    Everything numeric lives in ``midas_gui.frame_correct``; this class is
+    the Qt shell around it — threading, progress, cancellation, and the
+    per-file bookkeeping (dark resolution, metadata alignment) that has to
+    happen once per file rather than once per chunk.
+
+    Memory is bounded by ONE chunk plus one output stack, never a whole input
+    file: each chunk reads only its own raw sub-frames through an h5py slice.
+    That is the same lesson ``_HDF5StackGlobSource`` records the hard way —
+    decoding a whole 1442-sub-frame VAREX file to produce one frame cost
+    23.9 GB and ~230 s over NFS.
+
+    All GUI-derived inputs (the loader's dark/bright/background arrays, the
+    output settings) are captured by the caller before construction, so
+    ``run()`` touches no Qt widget.
+    """
+    progress = QtCore.pyqtSignal(int, int, str)   # done, total, message
+    fileDone = QtCore.pyqtSignal(str)             # output path just written
+    finished = QtCore.pyqtSignal(list)            # every output path
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, paths, dataset: str, *, chunk_size=None, op: str = "mean",
+                 out_dir: str, suffix: str = "_corr",
+                 out_dataset: str = "exchange/data",
+                 dark=None, bright=None, background=None,
+                 bright_mode: str = "divide", auto_dark: bool = True,
+                 dark_dataset: str = "exchange/data_dark",
+                 clip_negatives: bool = True, compression=None,
+                 level: int = 4, shuffle: bool = False,
+                 raw_start=None, raw_end=None, parent=None):
+        super().__init__(parent)
+        self._paths = [Path(p) for p in paths]
+        self._dataset, self._out_dataset = dataset, out_dataset
+        self._chunk_size, self._op = chunk_size, op
+        self._out_dir, self._suffix = Path(out_dir), suffix
+        self._dark, self._bright, self._background = dark, bright, background
+        self._bright_mode = bright_mode
+        self._auto_dark, self._dark_dataset = auto_dark, dark_dataset
+        self._clip = clip_negatives
+        self._compression, self._level, self._shuffle = compression, level, shuffle
+        self._raw_start, self._raw_end = raw_start, raw_end
+        self._cancel = False
+
+    def cancel(self):
+        """Ask the run to stop. Checked between chunks, so the file being
+        written finishes its current chunk rather than leaving a torn
+        dataset — the partial file is simply never written."""
+        self._cancel = True
+
+    def _out_path(self, src: Path) -> Path:
+        """``<out_dir>/<source stem><suffix>.h5``, with the detector tag kept.
+
+        ``Path.stem`` only strips the LAST suffix, so
+        ``run_009243.vrx.h5`` would stem to ``run_009243.vrx`` and the
+        output would read ``run_009243.vrx_corr.h5``. Split the whole dotted
+        tail off instead, the same way ``frame_correct.split_scan_name``
+        does, so the result is ``run_009243_corr.h5``.
+        """
+        base = src.name.split(".")[0]
+        return self._out_dir / f"{base}{self._suffix}.h5"
+
+    def _plan(self) -> list:
+        """``[(path, [(lo, hi), …])]`` — every file's chunk ranges, from
+        dataset SHAPE alone (one h5py header read each, no pixels). Done up
+        front so the progress bar has a real total instead of counting up to
+        an unknown end."""
+        import h5py
+        from midas_gui.frame_correct import chunk_ranges
+        plan = []
+        for path in self._paths:
+            with h5py.File(str(path), "r") as f:
+                dset = f[self._dataset]
+                if dset.ndim == 2:
+                    plan.append((path, [(0, 0)]))
+                    continue
+                plan.append((path, chunk_ranges(
+                    int(dset.shape[0]), chunk_size=self._chunk_size,
+                    raw_start=self._raw_start, raw_end=self._raw_end)))
+        return plan
+
+    def run(self):
+        try:
+            import h5py
+            from midas_gui.frame_correct import (reduce_chunk, resolve_dark,
+                                                 write_corrected_h5)
+            plan = self._plan()
+            total = sum(len(ranges) for _p, ranges in plan)
+            if total == 0:
+                self.failed.emit(
+                    "Nothing to do: the selected frame range leaves no sub-frames.")
+                return
+            done = 0
+            outputs = []
+            for path, ranges in plan:
+                if self._cancel:
+                    break
+                tree = h5_metadata.read_tree(path)
+                frames = []
+                with h5py.File(str(path), "r") as f:
+                    dset = f[self._dataset]
+                    n_raw = int(dset.shape[0]) if dset.ndim == 3 else 1
+                    shape = tuple(dset.shape[-2:])
+                    # One dark per file, resolved once — see
+                    # frame_correct.resolve_dark for the ladder and the real
+                    # data it was derived from. `why` is logged so the choice
+                    # can be audited afterwards instead of trusted.
+                    dark, why = resolve_dark(
+                        path, dark_dataset=self._dark_dataset, shape=shape,
+                        fallback=self._dark, auto=self._auto_dark)
+                    self.progress.emit(done, total, f"{path.name}: dark = {why}")
+                    n_aligned = _HDF5StackGlobSource._metadata_frame_count(f, n_raw)
+                    for lo, hi in ranges:
+                        if self._cancel:
+                            break
+                        raw = (np.asarray(dset[lo:hi + 1], dtype=np.float32)
+                               if dset.ndim == 3 else
+                               np.asarray(dset[...], dtype=np.float32)[None])
+                        frames.append(reduce_chunk(
+                            raw, self._op, dark=dark, bright=self._bright,
+                            bright_mode=self._bright_mode,
+                            background=self._background,
+                            clip_negatives=self._clip))
+                        done += 1
+                        self.progress.emit(
+                            done, total,
+                            f"{path.name}  chunk {len(frames)}/{len(ranges)} "
+                            f"(raw {lo}–{hi})")
+                if self._cancel:
+                    break
+                out = write_corrected_h5(
+                    self._out_path(path), frames, dataset=self._out_dataset,
+                    metadata=h5_metadata.align(tree, ranges, n_aligned),
+                    frame_ranges=ranges,
+                    attrs={"midas_gui_source": str(path),
+                           "midas_gui_combine_op": self._op,
+                           "midas_gui_chunk_size": int(self._chunk_size or 0),
+                           "midas_gui_dark": why},
+                    provenance_entry=provenance.build_entry(
+                        "batch_correction", inputs=[str(path)],
+                        compute_checksums=False,
+                        extra={"op": self._op,
+                               "chunk_size": int(self._chunk_size or 0),
+                               "dark": why, "clip_negatives": bool(self._clip)}),
+                    compression=self._compression, level=self._level,
+                    shuffle=self._shuffle)
+                outputs.append(out)
+                self.fileDone.emit(out)
+            if self._cancel:
+                self.progress.emit(done, total,
+                                   f"Cancelled — {len(outputs)} file(s) written.")
+            self.finished.emit(outputs)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class AllFrameStatsWorker(QtCore.QThread):
     """Compute unmasked pixel values across an entire stack off the GUI thread.
 

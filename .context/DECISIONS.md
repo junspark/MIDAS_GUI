@@ -3,6 +3,94 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-05 — Batch Correction: correct per sub-frame, and pick the dark per file
+
+New feature (asked for at the beamline): reduce each HDF5 file's sub-frame
+stack to one frame per group of N sub-frames — mean/median/sum/max — with
+dark/bright/background correction, written back out as HDF5, one output file
+per input file. New `midas_gui/frame_correct.py` + `tab_batch_correct.py` +
+`workers.BatchCorrectionWorker`. Two decisions are worth the ink.
+
+### 1. Corrections are applied per raw sub-frame, and the clip is deferred
+
+The order is: correct each sub-frame with `clip_negative=False`, combine,
+then clip the combined frame once.
+
+The obvious alternative — combine, then correct — is wrong for `sum` and
+only for `sum`: an N-frame sum must lose `N × dark`, and correcting
+afterwards loses one. This is the same bug `workers.StreamPreviewWorker`
+already documents avoiding for its preview sum. For `mean`/`max`/`median`
+the two orders agree exactly, because dark subtraction and a flat-field
+divide are monotone per-pixel maps and `max`/`median` commute with any such
+map. So the per-sub-frame rule is correct for all four and there is no
+per-op branching in `reduce_chunk`.
+
+The clip is separated out because it is *not* linear: clipping each
+sub-frame at zero before summing discards the negative half of the read
+noise and biases the sum upward, while clipping once at the end is unbiased
+for `sum`/`mean` and (clip being monotone) identical for `max`/`median`.
+Clipping once at the end is therefore uniformly right, and is also what
+makes an "untick to see negative pixels" option meaningful for checking
+whether a dark over-subtracts.
+
+`mean`/`sum`/`max` accumulate one frame at a time rather than materialising
+a corrected stack — a 10-frame chunk of 2880² in float64 is 660 MB, paid on
+every chunk of a long run. `median` has no streaming form and does
+materialise, in float32.
+
+### 2. The dark is resolved PER FILE, as the nearest preceding `dark_before`
+
+The first design (from the screenlog corpus alone) was "the bracketing dark:
+`<froot>_dark_before_<first data number − 1>`". Surveying the real data
+proved that wrong, and the correction matters:
+
+* The 198 caking screenlogs in `~/midas_runs/midas_screen_logs` gave 192
+  resolved runs, and **192/192 read the dark from `exchange/data_dark`** —
+  so there is no separate dark image format to support, only the question of
+  which file holds it. Two patterns, ~50/50: a `<froot>_dark_before` sibling,
+  or the data file's own `data_dark`.
+* The 160 VAREX scan folders still on
+  `/home/beams/S20IDUSER/mnt/s20a/*/varex*/` showed what the logs could not:
+  **darks are re-measured throughout a scan.** A folder is a series of
+  segments, each of the form `dark_before … data … dark_after`.
+  `Fe9Cr_KGT6038_load1_waxs` alone holds 11 `dark_before` and 8 `dark_after`
+  files among its data. Of the 936 data files in the 56 dark-bearing
+  folders, **936 have a preceding `dark_before`**, at a median distance of 8
+  files and a maximum of 121. The other 102 folders carry none at all (the
+  self-dark convention).
+
+So a folder-wide rule would be right only for a scan's first segment and
+would hand a stale dark to the ~900 files after it. The per-file rule —
+nearest preceding `dark_before`, then nearest following `dark_after`, then
+the file's own `data_dark`, then the loader's Dark field — reproduces the
+logged choice whenever a scan has one segment, so it is compatible with the
+log corpus rather than a departure from it. `dark_after` never appears in
+the logs but is common on disk; it is handled anyway.
+
+Both corpora are replayed as tests (`tests/test_dark_autodetect.py`), which
+skip when the share isn't mounted. They currently pass at 936/936 real files
+and 191/192 logged runs. The one exception is named explicitly in
+`MANUAL_OVERRIDE_LOGS` rather than hidden behind a loosened assertion: that
+operator passed an explicit `-P` override pointing at a *different scan's*
+folder, at a file with no dark marker in its name. No filesystem rule can
+recover that, and none should guess — a deliberate cross-scan dark is what
+the loader's own Dark field (`resolve_dark(auto=False)`) is for. A second
+such case will fail the test rather than pass unnoticed.
+
+The chosen dark is named in the Log per file and stored in the output's
+`midas_gui_dark` attribute, so a run is auditable afterwards rather than
+trusted.
+
+### Scope
+
+HDF5 input only. "Chunks restart at every file" has no meaning for TIFF/GE,
+where a file holds exactly one frame and there is no sub-frame stack to
+group; a TIFF selection says so rather than silently applying the
+consecutive-*file* grouping `workers._ChunkCombinedFileSource` implements
+for Batch Integrate. That remains available if it is ever wanted here.
+
+---
+
 ## 2026-10-01 — Ring prediction bound by detector geometry, not a flat 30°
 
 Reported symptom: after a Calibrate fit, the image overlay and the radial

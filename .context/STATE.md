@@ -1,10 +1,14 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-03 (three Calibrate fixes from the beamline, then
-upstream's ring-coverage commit merged back — all local, nothing pushed)_
+_Last updated: 2026-10-05 (new Batch Correction tab — all local, nothing pushed)_
 
 ## Now working on
+
+**Batch Correction landed (2026-10-05); AgBeh calibration still open.**
+New optional tab: chunked frame reduction (mean/median/sum/max over N
+sub-frames per file) with field correction, HDF5 out. See "Recently
+completed" and DECISIONS 2026-10-05.
 
 **Clearing the decks before the next push.** PR #11 is behind us — upstream
 merged all 48 of our commits on 2026-09-30 as eight staged checkpoints ending
@@ -13,10 +17,15 @@ then `1c5c9af` for their ring-coverage commit). Since then: three Calibrate
 fixes reported from the beamline, and a housekeeping pass (ROADMAP reconciled,
 the PR#7 pyflakes nit fixed, scratch dirs pruned).
 
-`main` is **21 commits ahead of `origin/main` and nothing is pushed.** That is
+`main` is **24 commits ahead of `origin/main` and nothing is pushed.** That is
 the next action and it needs your word, since it is also the next PR upstream.
 
 Needing you, in the order it matters:
+- **Eyes on a real Batch Correction run.** Verified only against synthetic
+  two-file stacks plus a name-level replay of the real share. What needs a
+  live run: that the Log names a sensible dark for each file of a multi-file
+  VAREX scan, that the reduced frames look right loaded back into the Data
+  Viewer, and that the output HDF5 opens downstream.
 - **Push, then open the next PR upstream.** Upstream's staged-checkpoint
   method worked well on 48 commits; this one is small enough not to need it.
 - **Eyes on a real zarr-grouping run.** The `Fe9Cr_KGT6038_after_failure_ff`
@@ -82,6 +91,44 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-10-05 — Batch Correction.** Asked for at the beamline: average /
+median / sum / max over a designated number of frames per file, with
+appropriate background subtraction, written out as HDF5. New optional tab
+(ships hidden), `midas_gui/frame_correct.py`, and
+`workers.BatchCorrectionWorker`.
+
+Most of it is reuse: `helpers._COMBINE_OPS` already had all four ops
+including median, `helpers._stack_chunk_bounds` already owned the per-file
+chunk arithmetic, `DataLoaderPanel(unify_combine=True)` already surfaces the
+"Combine sub-frames: N / op:" row, and `h5_metadata.align` already averages
+per-frame metadata over each chunk. Genuinely new: the correction ORDER, the
+dark ladder, and an HDF5 writer (`h5_metadata.write_into_hdf5`).
+
+- **Correct per sub-frame, combine, clip once.** Only `sum` makes it
+  visible — correcting the combined frame subtracts one dark from an
+  N-times-larger signal. mean/max/median agree either way (monotone
+  per-pixel maps commute with max/median), so one path serves all four. The
+  clip is deferred because it is not linear and would bias a sum upward.
+- **The dark is resolved per FILE, as the nearest preceding `dark_before`.**
+  The first design was folder-wide ("first data number − 1"), which
+  surveying the real share proved wrong: darks are re-measured mid-scan, so
+  a folder is a series of bracketed segments. 936/936 real data files have a
+  preceding `dark_before` (median 8 files away, max 121); a folder-wide rule
+  would have been right only for the first segment.
+- **Both corpora are replayed as tests**, skipping when the share isn't
+  mounted: 936 real files on `/home/beams/S20IDUSER/mnt/s20a` and 191 of 192
+  historical runs from `~/midas_runs/midas_screen_logs`. The 192nd is named
+  in `MANUAL_OVERRIDE_LOGS` — an operator `-P` override pointing at another
+  scan's folder, unknowable from filenames — rather than hidden behind a
+  loosened assertion.
+- Output carries `frame_ranges`, the chunk-averaged `instrument/` tree, the
+  dark that was used, and a provenance stamp. Compression is optional
+  (none/gzip/lzf + shuffle), chunked one frame per HDF5 chunk.
+- HDF5 input only; a TIFF/GE selection says why rather than silently
+  grouping consecutive files.
+
+Suite: **1,600 collected, 1,595 passed**, 2 known failures, 3 known skips.
 
 **2026-10-03 — the Mask Builder shows the detector the same way up as
 everything else.** Reported from the beamline: the displayed image should
