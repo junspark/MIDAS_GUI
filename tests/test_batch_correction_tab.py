@@ -374,7 +374,7 @@ def test_the_preview_reports_the_planned_output_frame_count(tab, inputs,
     # those re-triggers the panel's own autofill, which opens the source to
     # recount and leaves a worker thread behind that never joins under
     # --forked.
-    monkeypatch.setattr(tab, "_chunk_settings", lambda: (4, "mean", None, None))
+    monkeypatch.setattr(tab, "_chunk_settings", lambda: (4, None, None))
     tab._refresh_name_preview()
     assert f"{N_RAW} raw sub-frame(s) → 3 output frame(s)" in tab._name_lbl.text()
 
@@ -388,7 +388,7 @@ def test_an_end_of_zero_is_flagged_rather_than_silently_keeping_one_frame(
     frame_range() special-cases `hi > 0`. A unify_combine panel bakes the
     bounds straight into source_cfg(), where 0 is taken literally."""
     tab._loader._set_explicit_paths([str(inputs[0])])
-    monkeypatch.setattr(tab, "_chunk_settings", lambda: (4, "mean", 0, 0))
+    monkeypatch.setattr(tab, "_chunk_settings", lambda: (4, 0, 0))
     tab._refresh_name_preview()
     text = tab._name_lbl.text()
     assert "→ 1 output frame(s)" in text
@@ -398,7 +398,7 @@ def test_an_end_of_zero_is_flagged_rather_than_silently_keeping_one_frame(
 def test_a_full_window_is_not_flagged(tab, inputs, monkeypatch):
     tab._loader._set_explicit_paths([str(inputs[0])])
     monkeypatch.setattr(tab, "_chunk_settings",
-                        lambda: (4, "mean", 0, N_RAW - 1))
+                        lambda: (4, 0, N_RAW - 1))
     tab._refresh_name_preview()
     assert "check start/end" not in tab._name_lbl.text()
 
@@ -475,6 +475,34 @@ def test_buttons_come_back_after_a_failed_run(tab, inputs, monkeypatch):
 
 def test_cancel_is_dead_before_anything_runs(tab):
     assert not tab._cancel_btn.isEnabled()
+
+
+def test_the_panels_single_choice_op_dropdown_is_hidden(tab):
+    """One run can produce several methods, so the method lives in the
+    Correction card's checkboxes. Leaving the panel's single-choice "op:"
+    dropdown visible put a dead control immediately beside the live one.
+
+    isHidden(), not isVisible(): nothing is "visible" in an offscreen test
+    whose window was never shown, so isVisible() would pass here however
+    the code behaved.
+    """
+    assert tab._loader._combine_op_combo.isHidden()
+    assert tab._loader._combine_op_lbl.isHidden()
+    # The chunk-size spin is still the panel's to own, and must NOT be hidden.
+    assert not tab._loader._combine_chunk.isHidden()
+
+
+def test_other_panels_keep_their_op_dropdown(app):
+    """Batch Integrate reads the method off this dropdown, so hiding it is
+    strictly Batch Correction's business."""
+    from midas_gui.widgets import DataLoaderPanel
+    panel = DataLoaderPanel(mode="stream", unify_combine=True)
+    assert not panel._combine_op_combo.isHidden()
+    assert not panel._combine_op_lbl.isHidden()
+
+
+def test_chunk_settings_does_not_hand_back_an_unused_op(tab):
+    assert len(tab._chunk_settings()) == 3
 
 
 def test_methods_are_checkboxes_and_default_to_mean(tab):

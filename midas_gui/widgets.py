@@ -4108,7 +4108,8 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._combine_op_combo.addItem("Max", "max")
             self._combine_op_combo.addItem("Median", "median")
             cr.addWidget(self._combine_chunk)
-            cr.addWidget(QtWidgets.QLabel("op:")); cr.addWidget(self._combine_op_combo)
+            self._combine_op_lbl = QtWidgets.QLabel("op:")
+            cr.addWidget(self._combine_op_lbl); cr.addWidget(self._combine_op_combo)
             cr.addStretch(1)
             self._combine_row.setVisible(self._unify_combine)
             card.body.addWidget(self._combine_row)
@@ -4264,6 +4265,24 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._set_explicit_paths(paths)
         self._update_combine_visibility()
         self._load()
+
+    def set_combine_op_visible(self, visible: bool) -> None:
+        """Show or hide the "op:" selector beside "Combine sub-frames".
+
+        For a consumer that chooses the combine method itself rather than
+        reading it off this panel — Batch Correction, where the method is a
+        set of checkboxes because one run can produce several. Leaving the
+        dropdown on screen there put a dead control immediately beside the
+        live one, which is exactly as confusing as it sounds. The chunk-size
+        spin stays either way: that is still this panel's to own.
+
+        ``source_cfg()`` keeps emitting ``combine_op`` regardless, so a
+        hidden selector changes nothing for any other consumer.
+        """
+        for widget in (getattr(self, "_combine_op_lbl", None),
+                       getattr(self, "_combine_op_combo", None)):
+            if widget is not None:
+                widget.setVisible(bool(visible))
 
     def _update_combine_visibility(self):
         """Show the "Combine sub-frames" row (stream mode only) whenever the

@@ -10,7 +10,15 @@ Three follow-ups the same day, all from beamline feedback.
 ### Several methods per run, one folder each
 
 The method is now chosen by checkboxes on the tab, not by the loader's
-single-choice "op:" dropdown (which this tab ignores). Each selected method
+single-choice "op:" dropdown. That dropdown is HIDDEN here
+(``DataLoaderPanel.set_combine_op_visible(False)``) rather than merely
+ignored: the first cut left it on screen, and a dead control sitting
+immediately beside the live one is indistinguishable from a second,
+contradictory setting — it was asked about within the hour. The chunk-size
+spin beside it stays, since that genuinely is the panel's to own.
+``_chunk_settings()`` no longer returns ``combine_op`` either, for the same
+reason: a value nobody consumes is how the dropdown came to look
+meaningful. Batch Integrate is untouched — the dropdown is live there. Each selected method
 writes a full set of outputs into
 ``<out_dir>/dark_subtracted_<op>/``, a leaf of Batch Integrate's own output
 folder — so reduced frames sit beside the cakes, and a mean and a max of the

@@ -2653,8 +2653,10 @@ Batch Integrate uses, so a reduced frame covers exactly the exposures Batch
 Integrate would have integrated together. Leave it at 0 to combine each
 file's whole stack into one frame.
 
-The **methods** are the checkboxes in the Correction card (not that row's
-`op:` dropdown, which this tab ignores). Tick any combination of Mean /
+The **methods** are the checkboxes in the Correction card. The panel's own
+single-choice `op:` dropdown is hidden in this tab — one run can produce
+several reductions, so the method is not a single choice here. (It is still
+live in Batch Integrate, where it is.) Tick any combination of Mean /
 Median / Sum / Max; each produces its own complete set of outputs in its own
 `dark_subtracted_<method>/` folder. Several methods cost **one pass over the
 data, not one each** — reading a sub-frame off disk and correcting it is the

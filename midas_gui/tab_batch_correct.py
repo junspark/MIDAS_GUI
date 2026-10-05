@@ -91,6 +91,10 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         # entire reduction control, reused rather than rebuilt.
         self._loader = DataLoaderPanel(mode="stream", unify_combine=True)
         self._loader.setMinimumWidth(200)
+        # The method is chosen by the checkboxes in the Correction card (one
+        # run can produce several), so the panel's single-choice "op:"
+        # dropdown would be a dead control sitting beside the live one.
+        self._loader.set_combine_op_visible(False)
         self._loader.dataChanged.connect(self._on_data_changed)
         # The range/combine spins don't emit dataChanged, so the planned
         # frame count would go stale exactly when it matters most.
@@ -274,8 +278,7 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         note = QtWidgets.QLabel(
             "Each sub-frame is corrected before the frames are combined, so a "
             "Sum of N frames loses N darks rather than one. Set N in "
-            "“Combine sub-frames” on the left; the method is chosen here, not "
-            "by that row's “op:” dropdown.")
+            "“Combine sub-frames” on the left; the method is chosen here.")
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         card.body.addWidget(note)
@@ -334,7 +337,7 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         read, no pixels."""
         try:
             import h5py
-            chunk, _op, fr_start, fr_end = self._chunk_settings()
+            chunk, fr_start, fr_end = self._chunk_settings()
             with h5py.File(str(src), "r") as f:
                 dset = f[self._loader._dataset()]
                 if dset.ndim == 2:
@@ -425,9 +428,15 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         return []
 
     def _chunk_settings(self) -> tuple:
+        """``(chunk_size, frame_start, frame_end)`` from the loader.
+
+        Deliberately does NOT return the panel's ``combine_op``: the method
+        is this tab's own (the Correction card's checkboxes), and returning
+        a value nobody uses is how the dropdown came to look meaningful.
+        """
         cfg = self._loader.source_cfg()
-        return (cfg.get("chunk_size"), cfg.get("combine_op", "mean"),
-                cfg.get("frame_start"), cfg.get("frame_end"))
+        return (cfg.get("chunk_size"), cfg.get("frame_start"),
+                cfg.get("frame_end"))
 
     def _on_data_changed(self):
         self._maybe_autofill_output_dir()
@@ -441,7 +450,7 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         self._cancel_btn.setEnabled(self._running)
 
     def _worker_kwargs(self, paths) -> dict:
-        chunk, op, fr_start, fr_end = self._chunk_settings()
+        chunk, fr_start, fr_end = self._chunk_settings()
         return dict(
             dataset=self._loader._dataset(), chunk_size=chunk,
             op=self._selected_ops(),
@@ -466,7 +475,7 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             return
         try:
             import h5py
-            chunk, op, fr_start, fr_end = self._chunk_settings()
+            chunk, fr_start, fr_end = self._chunk_settings()
             path = Path(paths[0])
             with h5py.File(str(path), "r") as f:
                 dset = f[self._loader._dataset()]
@@ -530,7 +539,7 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             show_error(self, "Output folder not writable", reason)
             return
 
-        chunk, _op, _s, _e = self._chunk_settings()
+        chunk, _s, _e = self._chunk_settings()
         ops = self._selected_ops()
         if not ops:
             show_error(self, "No method selected",
