@@ -128,7 +128,28 @@ dark ladder, and an HDF5 writer (`h5_metadata.write_into_hdf5`).
 - HDF5 input only; a TIFF/GE selection says why rather than silently
   grouping consecutive files.
 
-Suite: **1,600 collected, 1,595 passed**, 2 known failures, 3 known skips.
+Same day, from beamline feedback: methods are now **checkboxes, not a
+dropdown** — any combination of Mean/Median/Sum/Max in one run, each into
+its own `dark_subtracted_<op>/` leaf of Batch Integrate's output folder, and
+all computed from **one pass** over the data. A **Suggest** button fills the
+convention. Found and fixed a shared-widget trap while doing it: `end(0=all)`
+is only true for a non-unify panel, so `end = 0` in Batch Integrate / Batch
+Correction silently clamped the window to sub-frame 0 — relabelled, and the
+tab now prints "N raw → M output frame(s)".
+
+Cross-checked against the beamline's own `BatchCorrection.m`, which
+independently confirms the `N × dark` ordering. Four deliberate differences
+from it are recorded in DECISIONS (no zero-clipping there, `CorrectBadPixels`,
+`FramesToIgnore`, and the SAXS variant's per-second normalisation).
+
+Suite: **1,626 collected, 1,620 passed**, 3 failures, 3 known skips.
+`test_app_builds_offscreen` is the third failure and is **config-driven, not
+code-driven**: it asserts `count == len(ALWAYS_TABS) + len(DEFAULT_VISIBLE_TABS)`,
+but a saved `ui.visible_tabs` overlays `DEFAULT_VISIBLE_TABS` with a list that
+*includes* the four ALWAYS tabs, so the sum double-counts them. It passes with
+a clean `HOME`, and breaks for any user who has ever toggled a tab in
+Preferences. Pre-existing (CLAUDE.md already lists it); the fix is to compare
+against `shipped_defaults()` or against the tab set rather than a count.
 
 **2026-10-03 — the Mask Builder shows the detector the same way up as
 everything else.** Reported from the beamline: the displayed image should

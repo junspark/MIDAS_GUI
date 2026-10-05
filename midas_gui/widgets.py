@@ -4053,7 +4053,17 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._fr_stride = _NoScrollSpinBox(); self._fr_stride.setRange(1, 100000); self._fr_stride.setValue(1); self._fr_stride.setFixedWidth(64)
             self._fr_stride.setToolTip("Take every Nth frame (1 = every frame).\n\n" + _fr_tip)
             sf = S.Form()
-            sf.row(("start:", self._fr_start), ("end(0=all):", self._fr_end))
+            # "0 = all" is true only for a NON-unify panel, where
+            # frame_range() special-cases `hi > 0` (see there). A
+            # unify_combine panel bakes start/end straight into
+            # source_cfg(), where 0 is taken literally — as raw sub-frame 0
+            # for a single HDF5 file, or file number 0 (matching nothing)
+            # for a multi-file pick. Advertising "0=all" there sent a user
+            # to a single-sub-frame window that silently nullified
+            # "Combine sub-frames".
+            sf.row(("start:", self._fr_start),
+                   ("end:" if self._unify_combine else "end(0=all):",
+                    self._fr_end))
             if not self._unify_combine:
                 sf.row(("stride:", self._fr_stride))
             card.body.addLayout(sf)

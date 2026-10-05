@@ -18,6 +18,8 @@ from conftest import force_rmtree
 
 from midas_gui.helpers import (SCRATCH_DIRNAME, check_output_dir_writable,
                                scratch_dir, session_scratch_dir,
+                               correction_subdir,
+                               suggest_correction_output_dir,
                                suggest_integration_output_dir,
                                suggest_working_dir)
 
@@ -99,6 +101,50 @@ def test_batch_keeps_its_own_froot_detector_tail():
         "/net/s20iddata/export/park_may26_bc/sam1/ge3")
     assert suggest_working_dir(src) == Path(
         "/net/s20iddata/export/park_may26_bc")
+
+
+def test_batch_correction_writes_into_batchs_own_output_folder():
+    """Batch Correction's per-op folders are leaves of Batch Integrate's own
+    output folder, not a parse of their own — so the two tabs can never
+    disagree about where a froot's output lives, and the reduced frames sit
+    beside the cakes rather than burying them."""
+    src = "/net/s20iddata/export/park_may26/ge3/sam1/sam1_000001.tif"
+    base = suggest_correction_output_dir(src)
+    assert base == Path("/net/s20iddata/export/park_may26_bc/sam1/ge3")
+    assert base / correction_subdir("mean") == Path(
+        "/net/s20iddata/export/park_may26_bc/sam1/ge3/dark_subtracted_mean")
+
+
+def test_each_method_gets_its_own_leaf_folder():
+    """One run can produce several reductions; a mean and a max of the same
+    scan must not land on top of each other."""
+    names = {correction_subdir(op) for op in ("mean", "median", "sum", "max")}
+    assert names == {"dark_subtracted_mean", "dark_subtracted_median",
+                     "dark_subtracted_sum", "dark_subtracted_max"}
+
+
+def test_batch_correction_keeps_the_detector_segment():
+    """Two detectors in one scan must not write into the same folder — the
+    output filenames alone would not distinguish them."""
+    a = suggest_correction_output_dir(
+        "/net/x/export/expt/varexD/sam1/sam1_000001.h5")
+    b = suggest_correction_output_dir(
+        "/net/x/export/expt/varexE/sam1/sam1_000001.h5")
+    assert a != b and a.name == "varexD" and b.name == "varexE"
+
+
+def test_batch_correction_follows_the_shallow_fallback_too():
+    """A flat folder has no positional layout to read; it must still land
+    somewhere sensible rather than returning None. It inherits Batch's own
+    fallback wholesale, froot segment included."""
+    src = "/data/sam1/sam1_000001.h5"
+    assert (suggest_correction_output_dir(src, expid_fallback="junetest")
+            == suggest_integration_output_dir(src, expid_fallback="junetest")
+            == Path("/data/sam1/junetest_bc/sam1"))
+
+
+def test_batch_correction_proposes_nothing_without_a_data_path():
+    assert suggest_correction_output_dir("") is None
 
 
 # ── Writability ──────────────────────────────────────────────────────────────

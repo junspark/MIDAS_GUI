@@ -116,6 +116,79 @@ def chunk_ranges(n_raw: int, *, chunk_size: Optional[int] = None,
 #  Reduction
 # ═════════════════════════════════════════════════════════════════════════════
 
+def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
+                       bright_mode: str = "divide", background=None,
+                       clip_negatives: bool = True) -> dict:
+    """``{op: frame}`` for several ops over ONE pass of ``frames``.
+
+    Correcting a sub-frame is the same work whichever op consumes it, and
+    reading it off disk is far more expensive than either, so selecting
+    mean + median + sum + max costs one pass rather than four. That is the
+    whole reason this exists; :func:`reduce_chunk` is a thin wrapper for
+    the single-op case so there is only one implementation of the ordering
+    rule described in the module docstring.
+
+    Only ``median`` needs the corrected stack kept — the others accumulate
+    one frame at a time — so the memory cost is a single plane per op
+    unless median is asked for.
+    """
+    names = []
+    for op in ops:
+        name = "mean" if str(op).lower() == "average" else str(op).lower()
+        if name not in _COMBINE_OPS:
+            raise ValueError(f"Unknown combine op {op!r}; expected one of "
+                             f"{', '.join(sorted(_COMBINE_OPS))}.")
+        if name not in names:
+            names.append(name)
+    if not names:
+        raise ValueError("reduce_chunk_multi: no ops selected.")
+
+    has_fields = dark is not None or bright is not None or background is not None
+    need_stack = "median" in names
+    need_total = "sum" in names or "mean" in names
+
+    planes = []
+    total = None
+    running_max = None
+    n = 0
+    for frame in frames:
+        arr = np.asarray(frame)
+        if has_fields:
+            # clip_negative=False — clipped once per op at the end. See the
+            # module docstring for why the clip cannot move earlier.
+            cur = apply_field_corrections(
+                arr, dark=dark, bright=bright, bright_mode=bright_mode,
+                background=background, clip_negative=False).astype(np.float32)
+        else:
+            cur = arr.astype(np.float32, copy=False)
+        n += 1
+        if need_stack:
+            planes.append(cur)
+        if need_total:
+            total = cur.astype(np.float64) if total is None else total + cur
+        if "max" in names:
+            running_max = cur.copy() if running_max is None else \
+                np.maximum(running_max, cur, out=running_max)
+    if n == 0:
+        raise ValueError("reduce_chunk: no frames to combine.")
+
+    raw_out = {}
+    if "mean" in names:
+        raw_out["mean"] = total / n
+    if "sum" in names:
+        raw_out["sum"] = total
+    if "max" in names:
+        raw_out["max"] = running_max
+    if "median" in names:
+        raw_out["median"] = np.median(np.stack(planes, axis=0), axis=0)
+
+    out = {}
+    for name in names:
+        plane = np.asarray(raw_out[name], dtype=np.float32)
+        out[name] = np.clip(plane, 0.0, None) if clip_negatives else plane
+    return out
+
+
 def reduce_chunk(frames, op: str = "mean", *, dark=None, bright=None,
                  bright_mode: str = "divide", background=None,
                  clip_negatives: bool = True) -> np.ndarray:
@@ -130,50 +203,9 @@ def reduce_chunk(frames, op: str = "mean", *, dark=None, bright=None,
     streaming form and does materialise, in float32.
     """
     name = "mean" if str(op).lower() == "average" else str(op).lower()
-    if name not in _COMBINE_OPS:
-        raise ValueError(f"Unknown combine op {op!r}; expected one of "
-                         f"{', '.join(sorted(_COMBINE_OPS))}.")
-    has_fields = dark is not None or bright is not None or background is not None
-
-    def corrected(frame) -> np.ndarray:
-        arr = np.asarray(frame)
-        if not has_fields:
-            return arr.astype(np.float32, copy=False)
-        # clip_negative=False — the clip happens once, below, on the combined
-        # frame. See the module docstring.
-        return apply_field_corrections(
-            arr, dark=dark, bright=bright, bright_mode=bright_mode,
-            background=background, clip_negative=False).astype(np.float32)
-
-    if name == "median":
-        # Materialise the list before stacking: np.stack([]) raises its own
-        # "need at least one array" before any emptiness check downstream
-        # could fire, and an empty chunk should report what is actually
-        # wrong with it.
-        planes = [corrected(f) for f in frames]
-        if not planes:
-            raise ValueError("reduce_chunk: no frames to combine.")
-        out = np.median(np.stack(planes, axis=0), axis=0)
-    else:
-        acc = None
-        n = 0
-        for frame in frames:
-            cur = corrected(frame)
-            n += 1
-            if acc is None:
-                # float64 for the additive ops so a long sum doesn't lose
-                # low-order bits; max stays in the frame's own float32.
-                acc = cur.astype(np.float64) if name in ("sum", "mean") else cur.copy()
-            elif name == "max":
-                np.maximum(acc, cur, out=acc)
-            else:
-                acc += cur
-        if acc is None:
-            raise ValueError("reduce_chunk: no frames to combine.")
-        out = (acc / n) if name == "mean" else acc
-
-    out = np.asarray(out, dtype=np.float32)
-    return np.clip(out, 0.0, None) if clip_negatives else out
+    return reduce_chunk_multi(
+        frames, [name], dark=dark, bright=bright, bright_mode=bright_mode,
+        background=background, clip_negatives=clip_negatives)[name]
 
 
 # ═════════════════════════════════════════════════════════════════════════════

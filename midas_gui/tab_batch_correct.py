@@ -35,9 +35,12 @@ from PyQt5 import QtCore, QtWidgets
 from midas_gui import frame_correct as FC
 from midas_gui import style as S
 from midas_gui.dialogs import show_error
-from midas_gui.helpers import (_NoScrollComboBox, _NoScrollSpinBox,
+from midas_gui.helpers import (CORRECTION_EXT, CORRECTION_SUFFIX,
+                               correction_subdir,
+                               _NoScrollComboBox, _NoScrollSpinBox,
                                apply_dict_to_widgets, browse_start_dir,
-                               check_output_dir_writable, widgets_to_dict,
+                               check_output_dir_writable,
+                               suggest_correction_output_dir, widgets_to_dict,
                                warn_if_path_missing)
 from midas_gui.widgets import DataLoaderPanel, ImageViewer, LogPanel
 from midas_gui.workers import BatchCorrectionWorker
@@ -49,9 +52,22 @@ class BatchCorrectionTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._worker: Optional[BatchCorrectionWorker] = None
+        # Explicit, rather than asking the worker whether it isRunning():
+        # `finished` is emitted from INSIDE QThread.run(), so at the moment
+        # the handler fires the thread is still alive and isRunning() is
+        # True. Deciding button state from that left Run/Preview disabled
+        # and Cancel enabled after a completed run, with nothing scheduled
+        # to correct it.
+        self._running = False
         self._outputs: list = []
         self._im_trans: list = []
+        self._expid_provider = None   # () -> str, wired by app.py
         self._build_ui()
+
+    def set_expid_provider(self, provider) -> None:
+        """Header Exp ID field, read live for the output-path suggestion —
+        same callback Batch Integrate and Calibrate take."""
+        self._expid_provider = provider
 
     # ── cross-tab wiring ────────────────────────────────────────────────
     def set_display_transform(self, codes):
@@ -76,6 +92,12 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         self._loader = DataLoaderPanel(mode="stream", unify_combine=True)
         self._loader.setMinimumWidth(200)
         self._loader.dataChanged.connect(self._on_data_changed)
+        # The range/combine spins don't emit dataChanged, so the planned
+        # frame count would go stale exactly when it matters most.
+        for attr in ("_fr_start", "_fr_end", "_combine_chunk"):
+            spin = getattr(self._loader, attr, None)
+            if spin is not None:
+                spin.valueChanged.connect(self._refresh_name_preview)
         split.addWidget(self._loader)
 
         # ── MIDDLE: output + options ──
@@ -100,6 +122,11 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         right.addTab(self._log, "Log")
         split.addWidget(right)
         split.setStretchFactor(2, 1)
+        for w in (self._out_ed, self._suffix_ed, self._ext_ed, self._out_ds_ed,
+                  self._dark_ds_ed):
+            w.setCursorPosition(0)
+        self._refresh_name_preview()
+        self._on_ops_changed()
         self._refresh_enabled()
 
     def _build_output_card(self):
@@ -115,19 +142,35 @@ class BatchCorrectionTab(QtWidgets.QWidget):
                 self, "Output directory",
                 browse_start_dir(self._out_ed.text())) or ""))
         row.addWidget(browse)
+        self._suggest_btn = QtWidgets.QPushButton("Suggest")
+        self._suggest_btn.setToolTip(
+            "Fill in <outroot>/<expid>_bc/<froot>/<detector>/dark_subtracted/ "
+            "— Batch Integrate's own output convention with one more segment "
+            "naming what the files are, so a froot's reduced frames and its "
+            "cakes sit side by side.\n\n"
+            "Read positionally off the loaded source's folder depth, the same "
+            "way Batch Integrate's Suggest is, so it needs no Exp ID typed in.")
+        self._suggest_btn.clicked.connect(self._apply_suggested_output_dir)
+        row.addWidget(self._suggest_btn)
         card.body.addLayout(row)
 
         form = S.Form()
-        self._suffix_ed = QtWidgets.QLineEdit("_corr")
+        self._suffix_ed = QtWidgets.QLineEdit(CORRECTION_SUFFIX)
         self._suffix_ed.setToolTip(
-            "Appended to each source file's name stem.\n"
-            "run_009243.vrx.h5  →  run_009243_corr.h5")
+            "Appended to each source file's name stem, before the extension.\n"
+            "run_009243.vrx.h5  →  run_009243.dark_subtracted.hdf")
+        self._ext_ed = QtWidgets.QLineEdit(CORRECTION_EXT)
+        self._ext_ed.setFixedWidth(64)
+        self._ext_ed.setToolTip(
+            "Output file extension. .hdf, .h5, .hdf5 and .nxs are all\n"
+            "recognised as HDF5 by this GUI's own loaders.")
         self._out_ds_ed = QtWidgets.QLineEdit("exchange/data")
+        self._out_ds_ed.setMinimumWidth(150)
         self._out_ds_ed.setToolTip(
             "HDF5 path the reduced (M, H, W) stack is written to.\n"
             "Leaving this at exchange/data means the output can be loaded\n"
             "straight back into any tab of this GUI.")
-        form.row(("Suffix:", self._suffix_ed))
+        form.row(("Suffix:", self._suffix_ed), ("ext:", self._ext_ed))
         form.row(("Dataset:", self._out_ds_ed))
 
         self._comp_combo = _NoScrollComboBox()
@@ -155,12 +198,46 @@ class BatchCorrectionTab(QtWidgets.QWidget):
                  ("level:", self._comp_level))
         form.full(self._shuffle_chk)
         card.body.addLayout(form)
+        self._name_lbl = QtWidgets.QLabel("")
+        self._name_lbl.setWordWrap(True)
+        self._name_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        card.body.addWidget(self._name_lbl)
         self._comp_combo.currentIndexChanged.connect(self._refresh_compression_row)
+        self._suffix_ed.textChanged.connect(self._refresh_name_preview)
+        self._ext_ed.textChanged.connect(self._refresh_name_preview)
         self._refresh_compression_row()
         return card
 
     def _build_options_card(self):
         card = S.make_card("Correction")
+
+        # Checkboxes, not the loader's single-choice "op:" dropdown: the
+        # expensive part of a run is reading and correcting each sub-frame,
+        # which is identical whichever op consumes it, so computing all four
+        # costs one pass instead of four (frame_correct.reduce_chunk_multi).
+        # Each lands in its own dark_subtracted_<op> folder.
+        card.body.addWidget(QtWidgets.QLabel("Methods (one output set each):"))
+        self._op_chks = {}
+        grid = QtWidgets.QGridLayout(); grid.setSpacing(4)
+        for i, op in enumerate(FC.OPS):
+            chk = QtWidgets.QCheckBox(op.capitalize())
+            chk.setToolTip(
+                f"Write a {op} reduction into "
+                f"<output>/{correction_subdir(op)}/.\n\n"
+                "Several methods cost one pass over the data, not one each — "
+                "reading and\ncorrecting a sub-frame is the same work "
+                "whichever method consumes it.")
+            chk.toggled.connect(self._on_ops_changed)
+            self._op_chks[op] = chk
+            grid.addWidget(chk, i // 2, i % 2)
+        self._op_chks["mean"].setChecked(True)
+        card.body.addLayout(grid)
+        self._op_note = QtWidgets.QLabel("")
+        self._op_note.setWordWrap(True)
+        self._op_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        card.body.addWidget(self._op_note)
+        card.body.addWidget(S.hline())
+
         self._auto_dark_chk = QtWidgets.QCheckBox("Find each file's own dark")
         self._auto_dark_chk.setChecked(True)
         self._auto_dark_chk.setToolTip(
@@ -196,8 +273,9 @@ class BatchCorrectionTab(QtWidgets.QWidget):
 
         note = QtWidgets.QLabel(
             "Each sub-frame is corrected before the frames are combined, so a "
-            "Sum of N frames loses N darks rather than one. Set N and the "
-            "method in “Combine sub-frames” on the left.")
+            "Sum of N frames loses N darks rather than one. Set N in "
+            "“Combine sub-frames” on the left; the method is chosen here, not "
+            "by that row's “op:” dropdown.")
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         card.body.addWidget(note)
@@ -226,6 +304,105 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         card.body.addWidget(self._status)
         return card
 
+    def _refresh_name_preview(self):
+        """Show what the first input file will be called on disk, and how
+        many output frames it will produce.
+
+        The frame count is not decoration. start/end are a raw SUB-FRAME
+        window here, and leaving end at 0 clamps that window to sub-frame 0
+        alone — one output frame, with "Combine sub-frames" silently having
+        nothing to combine. Printing "20 raw → 1 frame" makes that visible
+        before a run rather than after one.
+        """
+        paths = self._h5_paths()
+        if not paths:
+            self._name_lbl.setText("")
+            return
+        src = Path(paths[0])
+        text = f"{src.name}  →  {self._out_name(src)}"
+        plan = self._plan_for(src)
+        if plan is not None:
+            n_raw, n_out = plan
+            text += f"\n{n_raw} raw sub-frame(s) → {n_out} output frame(s)"
+            if n_out == 1 and n_raw > 1 and (self._chunk_settings()[0] or 0) != 0:
+                text += "  ⚠ check start/end"
+        self._name_lbl.setText(text)
+
+    def _plan_for(self, src: Path):
+        """``(raw sub-frames in file, output frames)`` for ``src`` under the
+        current settings, from the dataset SHAPE alone — one h5py header
+        read, no pixels."""
+        try:
+            import h5py
+            chunk, _op, fr_start, fr_end = self._chunk_settings()
+            with h5py.File(str(src), "r") as f:
+                dset = f[self._loader._dataset()]
+                if dset.ndim == 2:
+                    return 1, 1
+                n_raw = int(dset.shape[0])
+            return n_raw, len(FC.chunk_ranges(n_raw, chunk_size=chunk,
+                                              raw_start=fr_start, raw_end=fr_end))
+        except Exception:
+            return None
+
+    def _out_name(self, src: Path) -> str:
+        """Mirror of ``BatchCorrectionWorker._out_path``'s naming, for the
+        preview label. Kept trivial on purpose; the worker remains the one
+        that actually names the file."""
+        base = src.name.split(".")[0]
+        ext = self._ext_ed.text().strip() or CORRECTION_EXT
+        if not ext.startswith("."):
+            ext = "." + ext
+        return f"{base}{self._suffix_ed.text().strip()}{ext}"
+
+    def _apply_suggested_output_dir(self):
+        suggested = self._suggest_output_dir()
+        if suggested is None:
+            self._log.append("No data source loaded yet — nothing to suggest.")
+            return
+        self._out_ed.setText(str(suggested))
+        reason = check_output_dir_writable(suggested)
+        if reason:
+            self._log.append(f"Warning: {reason}")
+
+    def _suggest_output_dir(self) -> Optional[Path]:
+        cfg = self._loader.source_cfg()
+        rep = cfg.get("path")
+        if not rep:
+            paths = cfg.get("paths") or []
+            rep = paths[0] if paths else None
+        if not rep:
+            return None
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        return suggest_correction_output_dir(rep, expid_fallback=expid)
+
+    def _maybe_autofill_output_dir(self):
+        """Fill the Output folder once a source loads, unless something is
+        already there — same live auto-fill as Batch Integrate, which has no
+        separate confirm-and-launch step to catch a wrong guess either."""
+        if self._out_ed.text().strip():
+            return
+        suggested = self._suggest_output_dir()
+        if suggested is not None:
+            self._out_ed.setText(str(suggested))
+
+    def _selected_ops(self) -> list:
+        return [op for op in FC.OPS if self._op_chks[op].isChecked()]
+
+    def _on_ops_changed(self):
+        # Reachable mid-build: setting the default method fires `toggled`
+        # before the note label and the Run button exist.
+        if not hasattr(self, "_op_note"):
+            return
+        ops = self._selected_ops()
+        if not ops:
+            self._op_note.setText("⚠ pick at least one method.")
+        else:
+            self._op_note.setText("→ " + ",  ".join(
+                correction_subdir(op) + "/" for op in ops))
+        if hasattr(self, "_run_btn"):
+            self._refresh_enabled()
+
     def _refresh_compression_row(self):
         gzip = self._comp_combo.currentData() == "gzip"
         self._comp_level.setEnabled(gzip)
@@ -253,21 +430,24 @@ class BatchCorrectionTab(QtWidgets.QWidget):
                 cfg.get("frame_start"), cfg.get("frame_end"))
 
     def _on_data_changed(self):
+        self._maybe_autofill_output_dir()
+        self._refresh_name_preview()
         self._refresh_enabled()
 
     def _refresh_enabled(self):
-        running = bool(self._worker and self._worker.isRunning())
-        has = bool(self._h5_paths())
-        self._run_btn.setEnabled(has and not running)
-        self._preview_btn.setEnabled(has and not running)
-        self._cancel_btn.setEnabled(running)
+        has = bool(self._h5_paths()) and bool(self._selected_ops())
+        self._run_btn.setEnabled(has and not self._running)
+        self._preview_btn.setEnabled(has and not self._running)
+        self._cancel_btn.setEnabled(self._running)
 
     def _worker_kwargs(self, paths) -> dict:
         chunk, op, fr_start, fr_end = self._chunk_settings()
         return dict(
-            dataset=self._loader._dataset(), chunk_size=chunk, op=op,
+            dataset=self._loader._dataset(), chunk_size=chunk,
+            op=self._selected_ops(),
             out_dataset=self._out_ds_ed.text().strip() or "exchange/data",
             suffix=self._suffix_ed.text().strip(),
+            out_ext=self._ext_ed.text().strip() or CORRECTION_EXT,
             dark=self._loader.dark(), bright=self._loader.bright(),
             background=self._loader.background(),
             bright_mode=self._loader.bright_mode(),
@@ -306,6 +486,7 @@ class BatchCorrectionTab(QtWidgets.QWidget):
                     or "exchange/data_dark",
                     shape=tuple(raw.shape[-2:]), fallback=self._loader.dark(),
                     auto=self._auto_dark_chk.isChecked())
+            op = (self._selected_ops() or ["mean"])[0]
             img = FC.reduce_chunk(
                 raw, op, dark=dark, bright=self._loader.bright(),
                 bright_mode=self._loader.bright_mode(),
@@ -323,7 +504,7 @@ class BatchCorrectionTab(QtWidgets.QWidget):
 
     # ── run ─────────────────────────────────────────────────────────────
     def _run(self):
-        if self._worker and self._worker.isRunning():
+        if self._running:
             return
         paths = self._h5_paths()
         if not paths:
@@ -349,11 +530,16 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             show_error(self, "Output folder not writable", reason)
             return
 
-        chunk, op, _s, _e = self._chunk_settings()
+        chunk, _op, _s, _e = self._chunk_settings()
+        ops = self._selected_ops()
+        if not ops:
+            show_error(self, "No method selected",
+                       "Tick at least one of Mean / Median / Sum / Max.")
+            return
         self._outputs = []
         self._log.append(
-            f"Batch Correction — {len(paths)} file(s), op={op}, "
-            f"chunk={chunk or 'whole file'}, out={out_dir}")
+            f"Batch Correction — {len(paths)} file(s) × {len(ops)} method(s) "
+            f"({', '.join(ops)}), chunk={chunk or 'whole file'}, out={out_dir}")
         self._prog.setVisible(True); self._prog.setValue(0)
         self._worker = BatchCorrectionWorker(
             paths, out_dir=out_dir, parent=self, **self._worker_kwargs(paths))
@@ -361,12 +547,14 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         self._worker.fileDone.connect(self._on_file_done)
         self._worker.finished.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
+        self._running = True
         self._worker.start()
         self._refresh_enabled()
 
     def _cancel(self):
-        if self._worker and self._worker.isRunning():
+        if self._running and self._worker is not None:
             self._worker.cancel()
+            self._cancel_btn.setEnabled(False)
             self._status.setText("Cancelling after the current chunk…")
 
     def _on_progress(self, done, total, msg):
@@ -380,12 +568,14 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         self._log.append(f"  wrote {path}")
 
     def _on_finished(self, outputs):
+        self._running = False
         self._prog.setVisible(False)
         self._log.append(f"Done — {len(outputs)} file(s) written.")
         self._status.setText(f"Done — {len(outputs)} file(s) written.")
         self._refresh_enabled()
 
     def _on_failed(self, err):
+        self._running = False
         self._prog.setVisible(False)
         self._log.append(err)
         self._status.setText("Failed — see the Log tab.")
@@ -396,10 +586,12 @@ class BatchCorrectionTab(QtWidgets.QWidget):
     def _state_widgets(self) -> dict:
         return {
             "out_ed": self._out_ed, "suffix_ed": self._suffix_ed,
+            "ext_ed": self._ext_ed,
             "out_ds_ed": self._out_ds_ed, "comp_combo": self._comp_combo,
             "comp_level": self._comp_level, "shuffle_chk": self._shuffle_chk,
             "auto_dark_chk": self._auto_dark_chk, "dark_ds_ed": self._dark_ds_ed,
             "clip_chk": self._clip_chk,
+            **{f"op_{op}": chk for op, chk in self._op_chks.items()},
         }
 
     def get_state(self) -> dict:
@@ -415,6 +607,13 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             return
         apply_dict_to_widgets(self._state_widgets(), state.get("widgets", {}))
         self._refresh_compression_row()
+        self._on_ops_changed()
+        # A QLineEdit restored (or constructed) with text longer than its
+        # width shows its TAIL — "exchange/data" reading as "hange/data".
+        # Park every caret at 0 so each field reads from the start.
+        for w in (self._out_ed, self._suffix_ed, self._ext_ed, self._out_ds_ed,
+                  self._dark_ds_ed):
+            w.setCursorPosition(0)
         if state.get("loader"):
             try:
                 self._loader.set_state(state["loader"])

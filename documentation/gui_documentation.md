@@ -2646,13 +2646,27 @@ away the negative half of the read noise and bias the sum upward. Untick
 **Clip negatives to zero** to keep negative pixels — useful for checking
 whether a dark is centred or over-subtracting.
 
-### Setting N and the method
+### Setting N and the methods
 
-Both live in **Combine sub-frames** on the left-hand loader — the same
-control Batch Integrate uses, so *N* and the method mean exactly the same
-thing in both tabs, and a reduced frame covers exactly the exposures Batch
-Integrate would have integrated together. Leave the chunk size at 0 to
-combine each file's whole stack into one frame.
+*N* is **Combine sub-frames** on the left-hand loader — the same control
+Batch Integrate uses, so a reduced frame covers exactly the exposures Batch
+Integrate would have integrated together. Leave it at 0 to combine each
+file's whole stack into one frame.
+
+The **methods** are the checkboxes in the Correction card (not that row's
+`op:` dropdown, which this tab ignores). Tick any combination of Mean /
+Median / Sum / Max; each produces its own complete set of outputs in its own
+`dark_subtracted_<method>/` folder. Several methods cost **one pass over the
+data, not one each** — reading a sub-frame off disk and correcting it is the
+same work whichever method consumes it, so all four are computed from a
+single read.
+
+> **`start` / `end` are raw sub-frame indices here**, 0-based and inclusive,
+> within each file — not file numbers, and **not** "0 = all". That shorthand
+> holds only for the Pump Probe panel. Leaving `end` at 0 clamps the window
+> to sub-frame 0 alone, so one output frame comes out and *N* has nothing to
+> combine. The line under the Output card reports "20 raw sub-frame(s) → 4
+> output frame(s)" and flags the case, so check it before a long run.
 
 **Chunks never cross a file boundary.** A 12-sub-frame file at *N* = 5
 gives three output frames (5, 5, 2) and the next file starts again at its
@@ -2690,14 +2704,40 @@ needs.
 
 ### Output
 
+**Suggest** fills in Batch Integrate's own output folder (§7)
+
+```
+<outroot>/<expid>_bc/<froot>/<detector>/
+```
+
+and each selected method writes into a leaf of it:
+
+```
+<outroot>/<expid>_bc/<froot>/<detector>/dark_subtracted_mean/
+                                        dark_subtracted_median/
+                                        dark_subtracted_sum/
+                                        dark_subtracted_max/
+```
+
+so a froot's reduced frames sit beside its cakes rather than burying them,
+and a mean and a max of the same scan can't land on top of each other. It is
+read positionally off the loaded source's folder depth, exactly as Batch
+Integrate's Suggest is, so it needs no Exp ID typed in. The field also
+auto-fills on load when it is empty.
+
+The `<detector>` segment is kept even though the shorthand for this
+convention usually omits it: a scan recorded on two detectors would
+otherwise write both reductions into one folder, where the filenames alone
+do not distinguish them.
+
 | Control | Meaning |
 |---|---|
-| Output directory | Where the corrected files are written |
-| Suffix | Appended to each source stem — `run_009243.vrx.h5` → `run_009243_corr.h5` |
+| Output directory | Where the corrected files are written — **Suggest** fills in the convention above |
+| Suffix / ext | The output filename tail. Default `.dark_subtracted` + `.hdf` gives `run_009243.vrx.h5` → `run_009243.dark_subtracted.hdf`. The method is in the *folder*, not the name; it is also recorded inside each file as `midas_gui_combine_op`. A preview under the card shows the real name and frame count for the first input file |
 | Dataset | HDF5 path of the `(M, H, W)` float32 stack. Left at `exchange/data`, the output loads straight back into any tab of this GUI |
 | Compression | `None` (fastest, the right default for a scratch reduction), `gzip` (smallest, slowest) or `lzf` (in between) |
 | level | gzip only — higher is smaller and slower |
-| Shuffle | Byte-transposes each plane before compressing. On float32 detector data this groups the near-constant exponent bytes together and usually buys more than raising the gzip level |
+| Shuffle | **What it does:** HDF5 splits each 4-byte float32 pixel apart and stores all the byte-0s together, then all the byte-1s, and so on. Neighbouring detector pixels have similar magnitudes, so their exponent and high mantissa bytes are nearly identical — grouping them produces long runs of repeated bytes that gzip compresses far better. It is lossless, costs almost nothing, and typically helps more than raising the gzip level. It does nothing without compression, which is why it greys out when Compression is None |
 
 A compressed dataset is chunked one frame per HDF5 chunk, so reading a
 single frame never decompresses the whole stack.
@@ -2706,12 +2746,38 @@ Each output file also carries:
 
 * `frame_ranges` — the inclusive raw sub-frame range each output frame was
   built from, so "which exposures is this frame?" is answerable later;
-* the source's `instrument/` metadata tree, with every per-frame array
-  **averaged over each chunk** so it stays one value per output frame
-  (lights only — trailing dark acquisitions in the same flat array are
-  excluded);
+* the source's `instrument/` metadata tree — see **Metadata** below;
 * root attributes recording the source file, method, chunk size and dark;
 * a `provenance` stamp.
+
+### Metadata in the output
+
+Carried forward from the source file, not regenerated:
+
+1. **Read once per input file.** Every dataset under `instrument/` and
+   `active_instrument/` is copied — the few hundred EPICS PVs the DAQ
+   snapshots at acquisition time (motor positions, slit gaps, monochromator
+   angles, scaler channels).
+2. **Lights separated from darks.** A VAREX file records one metadata sample
+   per *acquisition*, lights and darks together in one flat array, so a
+   20-frame scan can carry a 40-entry array. The light/dark boundary is
+   recovered from the one anomalously large gap in the per-acquisition
+   timestamps, and only the leading light entries are used.
+3. **Averaged per chunk.** Any 1-D array with one entry per raw frame is
+   reduced to the **mean over each output frame's own sub-frame range**, so
+   its length matches the reduced image stack. Strings can't be averaged, so
+   they take the first entry of the range. Arrays that aren't per-frame are
+   copied through unchanged.
+4. **Written back at their original paths**, so the output's `instrument/`
+   tree mirrors the source's.
+
+Alongside it: `frame_ranges` (the inclusive raw sub-frame range behind each
+output frame), and root attributes `midas_gui_source`,
+`midas_gui_combine_op`, `midas_gui_chunk_size` and `midas_gui_dark` (the
+dark that was actually used), plus a `provenance` stamp.
+
+A source with no `instrument/` group simply produces none — nothing is
+invented.
 
 ### Preview
 

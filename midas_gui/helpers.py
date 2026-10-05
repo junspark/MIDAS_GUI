@@ -515,6 +515,42 @@ def suggest_integration_output_dir(data_path, *, expid_fallback: str = "") -> Op
             else parts.root / parts.froot)
 
 
+#: Batch Correction's per-op subfolder under the integration output dir —
+#: ``dark_subtracted_mean``, ``dark_subtracted_max``, … Named for what the
+#: files in it are, the same way Batch Integrate's output is split into
+#: per-format subfolders, so a froot's reduced frames and its cakes sit side
+#: by side instead of one burying the other. The op is in the folder name
+#: because one run can produce several: a mean and a max of the same scan
+#: must not land on top of each other.
+CORRECTION_SUBDIR_PREFIX = "dark_subtracted"
+
+
+def correction_subdir(op: str) -> str:
+    """``dark_subtracted_<op>`` — one output folder per combine method."""
+    return f"{CORRECTION_SUBDIR_PREFIX}_{str(op).lower()}"
+
+#: Tail of a Batch Correction output filename: ``<stem>.dark_subtracted.hdf``.
+#: ``.hdf`` is in ``H5_EXTS``, so the result loads straight back into any tab.
+CORRECTION_SUFFIX = ".dark_subtracted"
+CORRECTION_EXT = ".hdf"
+
+
+def suggest_correction_output_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:
+    """``<outroot>/<expid>_bc/<froot>/<detector>`` — the PARENT Batch
+    Correction writes its per-op folders into, giving e.g.
+    ``…/<detector>/dark_subtracted_mean/``.
+
+    Deliberately :func:`suggest_integration_output_dir` itself rather than a
+    parse of its own, so the two tabs can never disagree about where a
+    froot's analysis output lives — Batch Correction only adds a leaf (see
+    :func:`correction_subdir`). The ``<detector>`` segment is kept (the
+    shorthand for this convention usually omits it): a scan recorded on two
+    detectors would otherwise write both reductions into one folder, where
+    the filenames alone do not distinguish them.
+    """
+    return suggest_integration_output_dir(data_path, expid_fallback=expid_fallback)
+
+
 def suggest_working_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:
     """The bare ``<expid>_bc`` analysis root to use as a working directory.
 

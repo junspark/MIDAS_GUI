@@ -3,6 +3,83 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-05 (later) — Batch Correction: per-op folders, and the MATLAB cross-check
+
+Three follow-ups the same day, all from beamline feedback.
+
+### Several methods per run, one folder each
+
+The method is now chosen by checkboxes on the tab, not by the loader's
+single-choice "op:" dropdown (which this tab ignores). Each selected method
+writes a full set of outputs into
+``<out_dir>/dark_subtracted_<op>/``, a leaf of Batch Integrate's own output
+folder — so reduced frames sit beside the cakes, and a mean and a max of the
+same scan cannot overwrite each other. ``helpers.suggest_correction_output_dir``
+therefore returns the integration folder itself rather than appending a
+segment; ``helpers.correction_subdir(op)`` supplies the leaf.
+
+Several methods cost ONE pass, not one each
+(``frame_correct.reduce_chunk_multi``): reading a sub-frame off disk and
+correcting it is the same work whichever op consumes it, and it dominates
+the arithmetic. Only ``median`` forces the corrected stack to be kept, so
+memory is one plane per op otherwise. ``reduce_chunk`` is now a thin wrapper
+over it, which keeps a single implementation of the ordering rule.
+
+### "end(0=all)" was a lie for this panel
+
+Reported as "how come this is only yielding 1 frame?" — a 20-sub-frame file
+with Combine sub-frames = 5 produced one output frame. Cause: for a
+``unify_combine`` panel, ``start``/``end`` are baked straight into
+``source_cfg()`` and taken LITERALLY (raw sub-frame indices for a single
+HDF5 file, file numbers for a multi-file pick). "0 = all" is only true for a
+NON-unify panel, where ``frame_range()`` special-cases ``hi > 0``. So
+``end = 0`` clamped the window to sub-frame 0 alone and the combine had
+nothing to combine.
+
+The label is shared, so the fix is in ``widgets.DataLoaderPanel``: it now
+reads plain ``end:`` for a unify_combine panel and keeps ``end(0=all):``
+only where that is actually true. Batch Integrate benefits identically — it
+had the same trap. Batch Correction additionally prints "N raw sub-frame(s)
+→ M output frame(s)" under the Output card and flags a window that
+collapses to one frame, because a silently-correct-looking run is the
+failure mode here.
+
+### Cross-checked against the beamline's own MATLAB
+
+``~/matlab/matlab_tools/image-processing/BatchCorrection.m`` (driven by
+``~/mnt/s1b/__eval/projects_parkjs/BatchCorrection_*.m``) is the
+long-standing reference implementation. It independently confirms the
+ordering decision recorded in the entry below:
+
+```matlab
+im_bkg = (sum of all background frames) ./ ct      % dark = MEAN
+...
+sum_data = sum_data - im_bkg*length(FramesToCorrect);   % N x dark
+ave_data = sum_data./length(FramesToCorrect);
+```
+
+So: dark is the mean over the dark file's frames (as ours is), and a summed
+output loses ``N × dark``, not one (as ours does). It writes ``.sum`` and
+``.ave`` — our Sum and Mean — encoding the op in the extension where we
+encode it in the folder.
+
+Four differences, deliberately not closed here, recorded so they are not
+rediscovered as bugs:
+
+1. **The MATLAB does not clip at zero.** Ours defaults to clipping, matching
+   ``apply_field_corrections`` and the rest of this GUI, and exposes a
+   checkbox. Worth a beamline decision about which default is right.
+2. **``CorrectBadPixels``** is applied to the combined frame there. We have
+   no bad-pixel step in this tab (masking lives in the Mask Builder).
+3. **``FramesToIgnore``** drops arbitrary individual frames; our start/end
+   window is contiguous only.
+4. **The SAXS real-time variant normalises by exposure time**
+   (``.../saxs-waxs/BatchCorrection_RT_function.m``:
+   ``imdata_per_sec = imdata_ave / exptime``) and counts the frames that
+   actually exist rather than those promised by metadata. We do neither.
+
+---
+
 ## 2026-10-05 — Batch Correction: correct per sub-frame, and pick the dark per file
 
 New feature (asked for at the beamline): reduce each HDF5 file's sub-frame

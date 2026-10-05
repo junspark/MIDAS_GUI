@@ -83,15 +83,34 @@ def test_one_output_file_per_input_file(app, inputs, tmp_path):
 
 def test_output_name_keeps_the_stem_and_drops_the_detector_tag(app, inputs, tmp_path):
     """``Path.stem`` strips only the LAST suffix, so a naive stem would give
-    ``scan_000010.vrx_corr.h5``."""
+    ``scan_000010.vrx.dark_subtracted.hdf`` — carrying a detector tag that no
+    longer describes the file."""
+    import pathlib
     got = _run_worker(inputs, tmp_path / "out", app)
-    names = sorted(__import__("pathlib").Path(p).name for p in got["outputs"])
-    assert names == ["scan_000010_corr.h5", "scan_000011_corr.h5"]
+    names = sorted(pathlib.Path(p).name for p in got["outputs"])
+    assert names == ["scan_000010.dark_subtracted.hdf",
+                     "scan_000011.dark_subtracted.hdf"]
+    assert all(pathlib.Path(p).parent.name == "dark_subtracted_mean"
+               for p in got["outputs"])
 
 
-def test_custom_suffix_is_honoured(app, inputs, tmp_path):
-    got = _run_worker(inputs, tmp_path / "out", app, suffix="_avg10")
+def test_custom_suffix_and_extension_are_honoured(app, inputs, tmp_path):
+    got = _run_worker(inputs, tmp_path / "out", app, suffix="_avg10",
+                      out_ext=".h5")
     assert all(p.endswith("_avg10.h5") for p in got["outputs"])
+
+
+def test_a_bare_extension_gets_its_dot(app, inputs, tmp_path):
+    got = _run_worker(inputs, tmp_path / "out", app, out_ext="hdf5")
+    assert all(p.endswith(".dark_subtracted.hdf5") for p in got["outputs"])
+
+
+def test_the_default_output_extension_loads_back_as_hdf5(app, inputs, tmp_path):
+    """`.hdf` has to be in H5_EXTS or the reduced frames can't be reopened in
+    this GUI, which would make the whole output a dead end."""
+    from midas_gui.helpers import is_h5
+    got = _run_worker(inputs, tmp_path / "out", app)
+    assert all(is_h5(p) for p in got["outputs"])
 
 
 def test_chunking_splits_each_file_independently(app, inputs, tmp_path):
@@ -141,8 +160,45 @@ def test_unclipped_output_keeps_negative_pixels(app, inputs, tmp_path):
 
 @pytest.mark.parametrize("op", ["mean", "median", "sum", "max"])
 def test_every_op_runs_end_to_end(app, inputs, tmp_path, op):
+    import pathlib
     got = _run_worker(inputs, tmp_path / f"out_{op}", app, op=op)
     assert _read(got["outputs"][0]).shape == (3,) + SHAPE
+    assert pathlib.Path(got["outputs"][0]).parent.name == f"dark_subtracted_{op}"
+
+
+def test_several_ops_each_get_their_own_folder(app, inputs, tmp_path):
+    """One run, four methods: 2 files × 4 ops = 8 outputs, one folder each."""
+    import pathlib
+    got = _run_worker(inputs, tmp_path / "out", app,
+                      op=["mean", "median", "sum", "max"])
+    assert len(got["outputs"]) == 8
+    folders = {pathlib.Path(p).parent.name for p in got["outputs"]}
+    assert folders == {"dark_subtracted_mean", "dark_subtracted_median",
+                       "dark_subtracted_sum", "dark_subtracted_max"}
+
+
+def test_multi_op_results_match_running_each_op_alone(app, inputs, tmp_path):
+    """The single-pass optimisation must not change any answer."""
+    import pathlib
+    together = _run_worker(inputs, tmp_path / "multi", app,
+                           op=["mean", "sum", "max", "median"],
+                           clip_negatives=False)
+    by_folder = {pathlib.Path(p).parent.name: p for p in together["outputs"]
+                 if pathlib.Path(p).name.startswith("scan_000010")}
+    for op in ("mean", "sum", "max", "median"):
+        alone = _run_worker([inputs[0]], tmp_path / f"solo_{op}", app, op=op,
+                            clip_negatives=False)
+        assert np.allclose(_read(by_folder[f"dark_subtracted_{op}"]),
+                           _read(alone["outputs"][0])), op
+
+
+def test_each_output_records_the_op_that_made_it(app, inputs, tmp_path):
+    import h5py, pathlib
+    got = _run_worker(inputs, tmp_path / "out", app, op=["mean", "max"])
+    for path in got["outputs"]:
+        with h5py.File(path, "r") as f:
+            assert (f.attrs["midas_gui_combine_op"]
+                    == pathlib.Path(path).parent.name.rsplit("_", 1)[-1])
 
 
 # ── worker: dark resolution ─────────────────────────────────────────────
@@ -276,8 +332,96 @@ def tab(app):
     return BatchCorrectionTab()
 
 
+def test_suggested_output_dir_is_the_integration_folder(tab, inputs):
+    """Batch Correction writes its per-op folders INTO Batch Integrate's own
+    output folder, so a froot's reduced frames and its cakes sit side by
+    side rather than one burying the other."""
+    from midas_gui.helpers import suggest_integration_output_dir
+    tab._loader._set_explicit_paths([str(p) for p in inputs])
+    assert tab._suggest_output_dir() == suggest_integration_output_dir(
+        str(inputs[0]))
+
+
+def test_suggest_button_fills_the_field(tab, inputs):
+    tab._loader._set_explicit_paths([str(p) for p in inputs])
+    tab._out_ed.clear()
+    tab._apply_suggested_output_dir()
+    assert tab._out_ed.text()
+
+
+def test_suggest_with_no_source_says_so_instead_of_raising(tab):
+    tab._apply_suggested_output_dir()
+    assert tab._out_ed.text() == ""
+
+
+def test_the_name_preview_matches_what_the_worker_writes(tab, inputs, tmp_path,
+                                                         app):
+    """The preview label is a second implementation of the naming rule, so
+    pin the two together rather than trusting them to stay in step."""
+    import pathlib
+    tab._loader._set_explicit_paths([str(p) for p in inputs])
+    tab._refresh_name_preview()
+    # First line is "<source>  →  <output>"; the second is the frame plan.
+    previewed = tab._name_lbl.text().splitlines()[0].split("→")[-1].strip()
+    got = _run_worker([inputs[0]], tmp_path / "out", app)
+    assert previewed == pathlib.Path(got["outputs"][0]).name
+
+
+def test_the_preview_reports_the_planned_output_frame_count(tab, inputs,
+                                                            monkeypatch):
+    tab._loader._set_explicit_paths([str(p) for p in inputs])
+    # Drive _chunk_settings rather than the loader's spin boxes: setting
+    # those re-triggers the panel's own autofill, which opens the source to
+    # recount and leaves a worker thread behind that never joins under
+    # --forked.
+    monkeypatch.setattr(tab, "_chunk_settings", lambda: (4, "mean", None, None))
+    tab._refresh_name_preview()
+    assert f"{N_RAW} raw sub-frame(s) → 3 output frame(s)" in tab._name_lbl.text()
+
+
+def test_an_end_of_zero_is_flagged_rather_than_silently_keeping_one_frame(
+        tab, inputs, monkeypatch):
+    """start/end are a raw SUB-FRAME window for a single HDF5 file, so end=0
+    clamps it to sub-frame 0 alone and "Combine sub-frames" has nothing to
+    combine. The field was labelled "end(0=all)", which is only true for a
+    NON-unify panel — see widgets.DataLoaderPanel's start/end row, where
+    frame_range() special-cases `hi > 0`. A unify_combine panel bakes the
+    bounds straight into source_cfg(), where 0 is taken literally."""
+    tab._loader._set_explicit_paths([str(inputs[0])])
+    monkeypatch.setattr(tab, "_chunk_settings", lambda: (4, "mean", 0, 0))
+    tab._refresh_name_preview()
+    text = tab._name_lbl.text()
+    assert "→ 1 output frame(s)" in text
+    assert "check start/end" in text, "the no-op window was not flagged"
+
+
+def test_a_full_window_is_not_flagged(tab, inputs, monkeypatch):
+    tab._loader._set_explicit_paths([str(inputs[0])])
+    monkeypatch.setattr(tab, "_chunk_settings",
+                        lambda: (4, "mean", 0, N_RAW - 1))
+    tab._refresh_name_preview()
+    assert "check start/end" not in tab._name_lbl.text()
+
+
+def test_the_end_label_drops_its_0_equals_all_claim_for_this_panel(tab):
+    """The label is shared with Batch Integrate, and "0 = all" holds only
+    for a non-unify panel. Pin the corrected text so it can't drift back."""
+    from PyQt5 import QtWidgets
+    labels = [w.text() for w in tab._loader.findChildren(QtWidgets.QLabel)]
+    assert not any("0=all" in t for t in labels), \
+        "end(0=all) is wrong for a unify_combine panel"
+
+
+def test_long_field_text_reads_from_the_start_not_the_tail(tab):
+    """A QLineEdit narrower than its text shows the TAIL — "exchange/data"
+    rendering as "hange/data", which looks like a corrupted default."""
+    for field in (tab._out_ds_ed, tab._dark_ds_ed):
+        assert field.cursorPosition() == 0
+
+
 def test_tab_builds_and_round_trips_its_state(tab):
     tab._suffix_ed.setText("_reduced")
+    tab._ext_ed.setText(".h5")
     tab._comp_combo.setCurrentIndex(1)
     tab._clip_chk.setChecked(False)
     state = tab.get_state()
@@ -286,6 +430,7 @@ def test_tab_builds_and_round_trips_its_state(tab):
     other = BatchCorrectionTab()
     other.set_state(state)
     assert other._suffix_ed.text() == "_reduced"
+    assert other._ext_ed.text() == ".h5"
     assert other._comp_combo.currentData() == "gzip"
     assert other._clip_chk.isChecked() is False
 
@@ -297,6 +442,66 @@ def test_gzip_level_is_only_enabled_for_gzip(tab):
     assert tab._comp_level.isEnabled() and tab._shuffle_chk.isEnabled()
     tab._comp_combo.setCurrentIndex(2)          # lzf — shuffle applies, level doesn't
     assert not tab._comp_level.isEnabled() and tab._shuffle_chk.isEnabled()
+
+
+def test_buttons_come_back_after_a_completed_run(tab, inputs):
+    """Regression: `finished` is emitted from INSIDE QThread.run(), so the
+    thread is still alive when the handler fires. Deciding button state from
+    isRunning() left Run and Preview dead and only Cancel alive after a
+    successful run, with nothing scheduled to put it right."""
+    tab._loader._set_explicit_paths([str(p) for p in inputs])
+    tab._refresh_enabled()
+    assert tab._run_btn.isEnabled() and not tab._cancel_btn.isEnabled()
+
+    tab._running = True
+    tab._refresh_enabled()
+    assert not tab._run_btn.isEnabled() and tab._cancel_btn.isEnabled()
+
+    tab._on_finished(["/tmp/one.hdf"])
+    assert tab._run_btn.isEnabled(), "Run stayed disabled after the run ended"
+    assert tab._preview_btn.isEnabled(), "Preview stayed disabled"
+    assert not tab._cancel_btn.isEnabled(), "Cancel stayed enabled at rest"
+
+
+def test_buttons_come_back_after_a_failed_run(tab, inputs, monkeypatch):
+    # _on_failed raises a modal dialog, which blocks forever offscreen.
+    monkeypatch.setattr("midas_gui.tab_batch_correct.show_error",
+                        lambda *a, **k: None)
+    tab._loader._set_explicit_paths([str(p) for p in inputs])
+    tab._running = True
+    tab._on_failed("Traceback…\nboom")
+    assert tab._run_btn.isEnabled() and not tab._cancel_btn.isEnabled()
+
+
+def test_cancel_is_dead_before_anything_runs(tab):
+    assert not tab._cancel_btn.isEnabled()
+
+
+def test_methods_are_checkboxes_and_default_to_mean(tab):
+    assert tab._selected_ops() == ["mean"]
+    assert set(tab._op_chks) == set(("mean", "median", "sum", "max"))
+
+
+def test_unticking_every_method_disables_the_run(tab, inputs):
+    tab._loader._set_explicit_paths([str(p) for p in inputs])
+    tab._refresh_enabled()
+    assert tab._run_btn.isEnabled()
+    for chk in tab._op_chks.values():
+        chk.setChecked(False)
+    assert not tab._run_btn.isEnabled()
+    assert "at least one" in tab._op_note.text()
+
+
+def test_the_note_names_every_folder_that_will_be_written(tab):
+    tab._op_chks["max"].setChecked(True)
+    note = tab._op_note.text()
+    assert "dark_subtracted_mean/" in note and "dark_subtracted_max/" in note
+
+
+def test_selected_methods_reach_the_worker_kwargs(tab, inputs):
+    tab._loader._set_explicit_paths([str(p) for p in inputs])
+    tab._op_chks["median"].setChecked(True)
+    assert tab._worker_kwargs(inputs)["op"] == ["mean", "median"]
 
 
 def test_run_is_disabled_until_an_hdf5_source_is_selected(tab):

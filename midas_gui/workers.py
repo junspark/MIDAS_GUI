@@ -828,9 +828,16 @@ class BatchCorrectionWorker(QtCore.QThread):
     """Reduce every selected HDF5 file's sub-frame stack and write the result
     back out as HDF5 — the engine of the Batch Correction tab.
 
-    One output file per input file, holding that file's reduced chunks as a
-    single ``(M, H, W)`` float32 dataset. Chunks never cross a file boundary,
-    which is what makes the per-file output well defined in the first place.
+    One output file per input file PER OP, holding that file's reduced
+    chunks as a single ``(M, H, W)`` float32 dataset, in a
+    ``dark_subtracted_<op>`` subfolder of the chosen output directory.
+    Chunks never cross a file boundary, which is what makes the per-file
+    output well defined in the first place.
+
+    Several ops cost one pass, not several: reading a sub-frame off disk and
+    correcting it is the same work whichever op consumes it, so mean, median,
+    sum and max are all computed from one read (see
+    ``frame_correct.reduce_chunk_multi``).
 
     Everything numeric lives in ``midas_gui.frame_correct``; this class is
     the Qt shell around it — threading, progress, cancellation, and the
@@ -852,9 +859,9 @@ class BatchCorrectionWorker(QtCore.QThread):
     finished = QtCore.pyqtSignal(list)            # every output path
     failed   = QtCore.pyqtSignal(str)
 
-    def __init__(self, paths, dataset: str, *, chunk_size=None, op: str = "mean",
-                 out_dir: str, suffix: str = "_corr",
-                 out_dataset: str = "exchange/data",
+    def __init__(self, paths, dataset: str, *, chunk_size=None, op="mean",
+                 out_dir: str, suffix: str = ".dark_subtracted",
+                 out_ext: str = ".hdf", out_dataset: str = "exchange/data",
                  dark=None, bright=None, background=None,
                  bright_mode: str = "divide", auto_dark: bool = True,
                  dark_dataset: str = "exchange/data_dark",
@@ -864,8 +871,12 @@ class BatchCorrectionWorker(QtCore.QThread):
         super().__init__(parent)
         self._paths = [Path(p) for p in paths]
         self._dataset, self._out_dataset = dataset, out_dataset
-        self._chunk_size, self._op = chunk_size, op
+        self._chunk_size = chunk_size
+        # Accept a bare string or a list, so a single-op caller reads the
+        # same as it always did.
+        self._ops = [op] if isinstance(op, str) else list(op)
         self._out_dir, self._suffix = Path(out_dir), suffix
+        self._out_ext = out_ext if out_ext.startswith(".") else "." + out_ext
         self._dark, self._bright, self._background = dark, bright, background
         self._bright_mode = bright_mode
         self._auto_dark, self._dark_dataset = auto_dark, dark_dataset
@@ -880,17 +891,25 @@ class BatchCorrectionWorker(QtCore.QThread):
         dataset — the partial file is simply never written."""
         self._cancel = True
 
-    def _out_path(self, src: Path) -> Path:
-        """``<out_dir>/<source stem><suffix>.h5``, with the detector tag kept.
+    def _out_path(self, src: Path, op: str) -> Path:
+        """``<out_dir>/dark_subtracted_<op>/<source stem><suffix><ext>`` —
+        ``dark_subtracted_mean/run_009243.dark_subtracted.hdf`` by default.
 
-        ``Path.stem`` only strips the LAST suffix, so
-        ``run_009243.vrx.h5`` would stem to ``run_009243.vrx`` and the
-        output would read ``run_009243.vrx_corr.h5``. Split the whole dotted
-        tail off instead, the same way ``frame_correct.split_scan_name``
-        does, so the result is ``run_009243_corr.h5``.
+        The op is in the FOLDER rather than the filename so a mean and a max
+        of the same scan can't land on top of each other, while each file's
+        own name still matches its source. Which op produced a given file is
+        also recorded inside it, as the ``midas_gui_combine_op`` attribute.
+
+        ``Path.stem`` only strips the LAST suffix, so ``run_009243.vrx.h5``
+        would stem to ``run_009243.vrx`` and the output would read
+        ``run_009243.vrx.dark_subtracted.hdf``, carrying a detector tag that
+        no longer describes the file. Split the whole dotted tail off
+        instead, the same way ``frame_correct.split_scan_name`` does.
         """
+        from midas_gui.helpers import correction_subdir
         base = src.name.split(".")[0]
-        return self._out_dir / f"{base}{self._suffix}.h5"
+        return (self._out_dir / correction_subdir(op)
+                / f"{base}{self._suffix}{self._out_ext}")
 
     def _plan(self) -> list:
         """``[(path, [(lo, hi), …])]`` — every file's chunk ranges, from
@@ -914,7 +933,7 @@ class BatchCorrectionWorker(QtCore.QThread):
     def run(self):
         try:
             import h5py
-            from midas_gui.frame_correct import (reduce_chunk, resolve_dark,
+            from midas_gui.frame_correct import (reduce_chunk_multi, resolve_dark,
                                                  write_corrected_h5)
             plan = self._plan()
             total = sum(len(ranges) for _p, ranges in plan)
@@ -928,7 +947,7 @@ class BatchCorrectionWorker(QtCore.QThread):
                 if self._cancel:
                     break
                 tree = h5_metadata.read_tree(path)
-                frames = []
+                frames = {op: [] for op in self._ops}
                 with h5py.File(str(path), "r") as f:
                     dset = f[self._dataset]
                     n_raw = int(dset.shape[0]) if dset.ndim == 3 else 1
@@ -948,36 +967,42 @@ class BatchCorrectionWorker(QtCore.QThread):
                         raw = (np.asarray(dset[lo:hi + 1], dtype=np.float32)
                                if dset.ndim == 3 else
                                np.asarray(dset[...], dtype=np.float32)[None])
-                        frames.append(reduce_chunk(
-                            raw, self._op, dark=dark, bright=self._bright,
+                        combined = reduce_chunk_multi(
+                            raw, self._ops, dark=dark, bright=self._bright,
                             bright_mode=self._bright_mode,
                             background=self._background,
-                            clip_negatives=self._clip))
+                            clip_negatives=self._clip)
+                        for op, plane in combined.items():
+                            frames[op].append(plane)
                         done += 1
                         self.progress.emit(
                             done, total,
-                            f"{path.name}  chunk {len(frames)}/{len(ranges)} "
+                            f"{path.name}  chunk "
+                            f"{len(frames[self._ops[0]])}/{len(ranges)} "
                             f"(raw {lo}–{hi})")
                 if self._cancel:
                     break
-                out = write_corrected_h5(
-                    self._out_path(path), frames, dataset=self._out_dataset,
-                    metadata=h5_metadata.align(tree, ranges, n_aligned),
-                    frame_ranges=ranges,
-                    attrs={"midas_gui_source": str(path),
-                           "midas_gui_combine_op": self._op,
-                           "midas_gui_chunk_size": int(self._chunk_size or 0),
-                           "midas_gui_dark": why},
-                    provenance_entry=provenance.build_entry(
-                        "batch_correction", inputs=[str(path)],
-                        compute_checksums=False,
-                        extra={"op": self._op,
-                               "chunk_size": int(self._chunk_size or 0),
-                               "dark": why, "clip_negatives": bool(self._clip)}),
-                    compression=self._compression, level=self._level,
-                    shuffle=self._shuffle)
-                outputs.append(out)
-                self.fileDone.emit(out)
+                aligned = h5_metadata.align(tree, ranges, n_aligned)
+                for op in self._ops:
+                    out = write_corrected_h5(
+                        self._out_path(path, op), frames[op],
+                        dataset=self._out_dataset, metadata=aligned,
+                        frame_ranges=ranges,
+                        attrs={"midas_gui_source": str(path),
+                               "midas_gui_combine_op": op,
+                               "midas_gui_chunk_size": int(self._chunk_size or 0),
+                               "midas_gui_dark": why},
+                        provenance_entry=provenance.build_entry(
+                            "batch_correction", inputs=[str(path)],
+                            compute_checksums=False,
+                            extra={"op": op,
+                                   "chunk_size": int(self._chunk_size or 0),
+                                   "dark": why,
+                                   "clip_negatives": bool(self._clip)}),
+                        compression=self._compression, level=self._level,
+                        shuffle=self._shuffle)
+                    outputs.append(out)
+                    self.fileDone.emit(out)
             if self._cancel:
                 self.progress.emit(done, total,
                                    f"Cancelled — {len(outputs)} file(s) written.")
