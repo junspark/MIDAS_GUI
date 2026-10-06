@@ -43,6 +43,8 @@ from typing import Optional
 
 import numpy as np
 
+from midas_gui import h5_metadata
+
 #: Fixed per-frame scalars, present for any source regardless of hutch.
 #: ``current`` is storage-ring current in mA — NOT a beam monitor; the real
 #: ones are in :data:`ION_CHAMBER_H5_PATHS`.
@@ -82,12 +84,18 @@ SAMPLE_MOTOR_H5_GROUPS = {
 EXTRA_GROUPS = ("env", "motors")
 
 #: Column order and header spelling. ``transmission`` is derived, not read.
-_BASE_COLUMNS = (("frame", "frame"), ("I0", "I0"), ("I", "I"),
-                 ("transmission", "transmission"))
+#: Fixed per-frame scalars offered as the "env" extra group.
 _ENV_COLUMNS = (("current", "ring_current_mA"), ("temperature", "temperature"),
                 ("pressure", "pressure"))
 
 MOTOR_PREFIX = "motor:"
+
+#: Suffix on a dark-block column. The dark images themselves are not written
+#: out, but their monitor readings are a real measurement of the shutter-
+#: closed baseline and are the thing you subtract before taking any ratio.
+DARK_SUFFIX = "_dark"
+
+_SCALERS_PREFIX = "instrument/Scalers/"
 
 
 #: Profiles that name a 20-ID station, and the hutch each one means. Used
@@ -154,13 +162,107 @@ def _fmt(v) -> str:
     return "nan" if math.isnan(f) else f"{f:.6g}"
 
 
-def _transmission(row: dict):
-    """``I / I0``, or None when it is not defined. A zero I0 is a dropped
-    beam, not an infinite transmission."""
-    i, i0 = row.get("I"), row.get("I0")
-    if not (_is_real(i) and _is_real(i0)) or float(i0) == 0.0:
-        return None
-    return float(i) / float(i0)
+# ── which acquisitions were the light frames ─────────────────────────────────
+
+def scaler_channels(tree: dict, hutch: Optional[str]) -> list:
+    """Every per-acquisition scaler channel for ``hutch``, in file order.
+
+    Read from the file rather than from a mapping, because no mapping would
+    stay honest: the E group alone carries US/DS ion chambers, four blade
+    readings each, a pin diode and a TetrAMM, and which of them is wired to
+    what changes between setups. The ``*_sensitivity`` companions are
+    scalars, not per-acquisition, so they are not columns here.
+    """
+    if not hutch:
+        return []
+    prefix = f"{_SCALERS_PREFIX}{hutch}/"
+    out = []
+    for path, arr in tree.items():
+        if not path.startswith(prefix) or path.endswith("_sensitivity"):
+            continue
+        arr = np.atleast_1d(np.asarray(arr))
+        if arr.ndim == 1 and arr.dtype.kind in "fiub" and arr.size > 1:
+            out.append(path)
+    return sorted(out)
+
+
+def split_light_dark(tree: dict, *, n_light: int, n_dark: int,
+                     hutch: Optional[str]) -> tuple:
+    """``(light_offset, dark_offset, note)`` into the per-acquisition arrays.
+
+    A VAREX/Eiger HDF5 stack records one metadata sample per detector
+    acquisition — light *and* dark — in a single flat chronological array, so
+    a file with 20 light and 20 dark frames has 40 scaler entries and
+    something has to say which half is which.
+
+    The monitor itself is the signal: an ion chamber reads roughly ten times
+    higher with the shutter open, so the block with the larger I0 is the
+    light block. That is order-agnostic, which matters because the two
+    detectors disagree — VAREX trails its darks, and a 2026-10 Eiger file
+    puts them FIRST. The previous rule assumed the leading block was always
+    the lights, and so reported shutter-closed readings for every Eiger run.
+
+    The acquisition timestamps and the frame counts are used as a CHECK, not
+    as the decision: a clean split shows one anomalously long gap at the
+    boundary (confirmed on real data: 39 gaps of ~10.01 s and one of 15.39 s,
+    exactly at index 19). When the gap disagrees with the intensity, the note
+    says so rather than quietly preferring one.
+
+    ``dark_offset`` is None when the arrays hold only the light frames.
+    """
+    total = 0
+    for path in scaler_channels(tree, hutch) or list(tree):
+        arr = np.atleast_1d(np.asarray(tree[path]))
+        if arr.ndim == 1:
+            total = max(total, int(arr.size))
+    n_light = int(n_light or 0)
+    n_dark = int(n_dark or 0)
+    if n_light <= 0 or total < n_light + n_dark or n_dark <= 0:
+        return 0, None, "single block (no dark acquisitions in the metadata)"
+
+    # Candidate split: the two blocks are [0, n_light) and [n_light, ...).
+    chans = scaler_channels(tree, hutch)
+    i0_path = (ION_CHAMBER_H5_PATHS.get(hutch, {}) or {}).get("ion_chamber_i0")
+    probe = i0_path if i0_path in tree else (chans[0] if chans else None)
+    if probe is None:
+        return 0, n_light, "no scaler to compare; assumed lights first"
+    arr = np.asarray(tree[probe], dtype=np.float64)
+    first = float(np.nanmean(arr[:n_light]))
+    second = float(np.nanmean(arr[n_light:n_light + n_dark]))
+    lights_first = first >= second
+    light_off, dark_off = (0, n_light) if lights_first else (n_dark, 0)
+
+    note = (f"lights {'first' if lights_first else 'second'} by {Path(probe).name}"
+            f" ({first:.5g} vs {second:.5g})")
+    gap = _gap_index(tree)
+    if gap is not None:
+        expected = n_light - 1 if lights_first else n_dark - 1
+        note += (f"; timestamp gap at {gap} "
+                 + ("agrees" if gap == expected else
+                    f"DISAGREES (expected {expected})"))
+    return light_off, dark_off, note
+
+
+def _gap_index(tree: dict) -> Optional[int]:
+    """Index of the one anomalously long inter-acquisition gap, or None.
+
+    The timestamps live at ``NDArray/NDArrayTimeStamp`` on the files checked;
+    ``misc/NDArrayTimeStamp`` is also accepted because that is where
+    ``workers._metadata_frame_count`` has always looked for them.
+    """
+    for key in ("NDArray/NDArrayTimeStamp", "misc/NDArrayTimeStamp"):
+        arr = tree.get(key)
+        if arr is None:
+            continue
+        ts = np.atleast_1d(np.asarray(arr, dtype=np.float64))
+        if ts.ndim != 1 or ts.size < 3:
+            continue
+        diffs = np.diff(ts)
+        typical = float(np.median(diffs))
+        idx = int(np.argmax(diffs))
+        if typical > 0 and diffs[idx] > 1.3 * typical:
+            return idx
+    return None
 
 
 # ── adapters: two paths, same rows ───────────────────────────────────────────
@@ -175,7 +277,7 @@ def rows_from_metas(metas) -> list:
     rows = []
     for n, meta in enumerate(metas):
         meta = meta or {}
-        row = {"frame": n,
+        row = {"frame": n, "source_file": "",
                "I0": meta.get("ion_chamber_i0"),
                "I": meta.get("ion_chamber_i")}
         for key, _header in _ENV_COLUMNS:
@@ -187,87 +289,120 @@ def rows_from_metas(metas) -> list:
     return rows
 
 
-def rows_from_aligned(aligned: dict, hutch: Optional[str], n_frames: int) -> list:
-    """Rows from Batch Correction's ``h5_metadata.align`` result.
+def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
+                   n_light: int, n_dark: int = 0, source: str = "") -> tuple:
+    """``(rows, note)`` straight from an unaligned :func:`h5_metadata.read_tree`.
 
-    ``aligned`` is ``{h5 path: one value per output frame}``. Arrays that
-    ``align`` could not reduce (2-D, or shorter than the frame count) are
-    left alone by it, so they are skipped here rather than mis-indexed.
+    Does its own slicing and chunk-averaging rather than taking
+    ``h5_metadata.align``'s output, because that helper reduces the LEADING
+    ``n_aligned`` entries and the light block is not always leading — see
+    :func:`split_light_dark`.
+
+    Every scaler channel the hutch has is written, under its own name,
+    exactly as recorded. No ratio is computed: a transmission needs an
+    air/empty-beam I/I0 reference that this file does not carry, so a column
+    called "transmission" here would be a raw ratio wearing a name it has
+    not earned. Each channel also gets a ``_dark`` companion — the dark
+    images are not written out, but their monitor readings are a real
+    measurement of the shutter-closed baseline.
     """
-    def series(h5_path):
-        arr = aligned.get(h5_path)
-        if arr is None:
+    light_off, dark_off, note = split_light_dark(
+        tree, n_light=n_light, n_dark=n_dark, hutch=hutch)
+    ranges = list(frame_ranges or [])
+    n_rows = len(ranges)
+
+    def chunked(h5_path, offset):
+        """One value per output frame, averaged over the same raw window the
+        image chunk used — shifted onto the requested block."""
+        arr = tree.get(h5_path)
+        if arr is None or offset is None:
             return None
         arr = np.atleast_1d(np.asarray(arr))
-        if arr.ndim != 1 or arr.size < n_frames:
+        if arr.ndim != 1 or arr.size < offset + n_light:
             return None
-        return arr
+        block = arr[offset:offset + n_light]
+        return h5_metadata._chunk_mean(block, ranges)
 
-    chambers = ION_CHAMBER_H5_PATHS.get(hutch, {})
-    named = {"I0": series(chambers.get("ion_chamber_i0")),
-             "I": series(chambers.get("ion_chamber_i"))}
+    series: dict = {}
+    for path in scaler_channels(tree, hutch):
+        name = path.rsplit("/", 1)[-1]
+        series[name] = chunked(path, light_off)
+        dark = chunked(path, dark_off)
+        if dark is not None:
+            series[name + DARK_SUFFIX] = dark
     for key, _header in _ENV_COLUMNS:
-        named[key] = series(METADATA_H5_PATHS[key])
-
-    # Motor leaves live under the hutch's SMS group(s); their channel names
-    # differ per station and are discovered rather than hardcoded.
-    motors = {}
+        series[key] = chunked(METADATA_H5_PATHS[key], light_off)
     for group in SAMPLE_MOTOR_H5_GROUPS.get(hutch, []):
-        for h5_path in aligned:
-            if h5_path.startswith(group + "/"):
-                leaf = "/".join(h5_path.split("/")[-2:])
-                arr = series(h5_path)
+        for path in tree:
+            if path.startswith(group + "/"):
+                leaf = "/".join(path.split("/")[-2:])
+                arr = chunked(path, light_off)
                 if arr is not None:
-                    motors[MOTOR_PREFIX + leaf] = arr
+                    series[MOTOR_PREFIX + leaf] = arr
 
     rows = []
-    for n in range(n_frames):
-        row = {"frame": n}
-        for key, arr in named.items():
+    for n in range(n_rows):
+        row = {"frame": n, "source_file": source}
+        for key, arr in series.items():
             row[key] = None if arr is None else arr[n]
-        for key, arr in motors.items():
-            row[key] = arr[n]
         rows.append(row)
-    return rows
+    return rows, note
 
 
 # ── writer ───────────────────────────────────────────────────────────────────
 
+#: Columns that identify a row rather than measure anything. Always present,
+#: and never counted when deciding whether the file is worth writing.
+_INDEX_COLUMNS = (("frame", "frame"), ("source_file", "source_file"))
+
+
 def _columns(rows, extras) -> list:
     """``[(row key, header)]`` for the columns worth writing.
 
-    A column every row leaves unavailable is dropped, not blanked: on D hutch
-    that means no ``I`` and no ``transmission`` at all, which says "this
-    station has no transmission monitor" instead of showing an empty column
-    that reads as a failure.
+    A column no row has a live value for is dropped rather than blanked: on
+    D hutch, or for a channel that was not wired up, an empty column reads as
+    a broken detector instead of an absent one. Channel columns keep their
+    own names — ``US_IC``, ``DS_IC``, ``D2PD`` — because naming one of them
+    "I" would be asserting which is the transmitted monitor, and that is
+    setup-dependent.
     """
     extras = set(extras or ())
-    cols = []
-    for key, header in _BASE_COLUMNS:
-        if key == "frame" or any(_is_real(r.get(key)) for r in rows):
-            cols.append((key, header))
+    cols = list(_INDEX_COLUMNS)
+    measured = {k for _k, _h in _INDEX_COLUMNS for k in ()}   # none
+    env_keys = {k for k, _h in _ENV_COLUMNS}
+    chan_keys = sorted({k for r in rows for k in r
+                        if k not in env_keys
+                        and not k.startswith(MOTOR_PREFIX)
+                        and k not in ("frame", "source_file")},
+                       key=lambda k: (k.endswith(DARK_SUFFIX), k))
+    for key in chan_keys:
+        if any(_is_real(r.get(key)) for r in rows):
+            cols.append((key, key))
+            measured.add(key)
     if "env" in extras:
-        cols += [(k, h) for k, h in _ENV_COLUMNS
-                 if any(_is_real(r.get(k)) for r in rows)]
+        for key, header in _ENV_COLUMNS:
+            if any(_is_real(r.get(key)) for r in rows):
+                cols.append((key, header))
+                measured.add(key)
     if "motors" in extras:
         names = sorted({k for r in rows for k in r if k.startswith(MOTOR_PREFIX)})
-        cols += [(k, k[len(MOTOR_PREFIX):]) for k in names
-                 if any(_is_real(r.get(k)) for r in rows)]
-    return cols
+        for key in names:
+            if any(_is_real(r.get(key)) for r in rows):
+                cols.append((key, key[len(MOTOR_PREFIX):]))
+                measured.add(key)
+    return cols if measured else []
 
 
 def write_ion_csv(path, rows, *, extras=()) -> Optional[str]:
     """Write the per-frame monitor CSV; return its path, or None if skipped.
 
     Nothing is written when no real value survives anywhere — an A-hutch or
-    unrecognised-path run should not litter the output folder with a file
-    containing only a frame counter.
+    unplaceable run should not litter the output folder with a file holding
+    only a frame counter.
     """
     rows = list(rows or ())
-    for row in rows:
-        row["transmission"] = _transmission(row)
     cols = _columns(rows, extras)
-    if not rows or len(cols) <= 1:          # frame counter alone is not data
+    if not rows or not cols:
         return None
     out = Path(str(path))
     out.parent.mkdir(parents=True, exist_ok=True)

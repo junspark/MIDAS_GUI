@@ -900,6 +900,67 @@ class BatchCorrectionWorker(QtCore.QThread):
         self._raw_start, self._raw_end = raw_start, raw_end
         self._cancel = False
 
+    def _collect_monitor_rows(self, acc: dict, path, tree, ranges, *,
+                              n_light: int, n_dark: int) -> None:
+        """Add one file's per-frame monitor rows to its froot's bucket.
+
+        Grouped by froot rather than per file because a froot is the unit a
+        measurement is actually thought about in — one scan, many numbered
+        files — and one CSV per file left the folder with as many sidecars
+        as exposures.
+        """
+        from midas_gui.frame_correct import split_scan_name
+        hutch = ion_csv.resolve_hutch(path, settings.active_profile())
+        # The acquisition timestamps live outside the instrument/ tree that
+        # gets copied into the output, so read them separately — they are
+        # the cross-check on which block of scaler entries is the lights.
+        csv_tree = dict(tree)
+        try:
+            csv_tree.update(h5_metadata.read_tree(path, groups=("NDArray",)))
+        except Exception:
+            pass
+        rows, note = ion_csv.rows_from_tree(
+            csv_tree, hutch, frame_ranges=ranges, n_light=n_light,
+            n_dark=n_dark, source=Path(path).name)
+        froot = split_scan_name(Path(path).name).froot or Path(path).stem
+        bucket = acc.setdefault(froot, {"rows": [], "notes": []})
+        bucket["rows"].extend(rows)
+        if note:
+            bucket["notes"].append(f"{Path(path).name}: {note}")
+
+    def _write_monitor_csvs(self, acc: dict, done: int, total: int) -> None:
+        """One ``<froot>_<detector>_metadata.csv`` per froot.
+
+        Written one level ABOVE the output directory. The output folder is
+        per-detector (``…/<froot>/<detector>/``) while the monitor readings
+        are a property of the exposure, shared by every detector that saw
+        it — so the froot level is where one file serves them all.
+        """
+        if not acc or self._out_dir is None:
+            return
+        det = self._out_dir.name
+        dest_dir = self._out_dir.parent or self._out_dir
+        for froot, bucket in sorted(acc.items()):
+            name = "_".join(p for p in (froot, det) if p) + "_metadata.csv"
+            try:
+                written = ion_csv.write_ion_csv(
+                    dest_dir / name, bucket["rows"],
+                    extras=self._ion_csv_extras)
+            except Exception:
+                self.progress.emit(done, total,
+                                   f"{name}: monitor CSV failed — "
+                                   + traceback.format_exc(limit=1).strip())
+                continue
+            if written:
+                for note in bucket["notes"]:
+                    self.progress.emit(done, total, f"  light/dark — {note}")
+                self.progress.emit(done, total, f"beam monitors: {written}")
+            else:
+                self.progress.emit(
+                    done, total,
+                    f"{froot}: no beam-monitor data to write "
+                    "(unrecognised hutch, or no live channel)")
+
     def cancel(self):
         """Ask the run to stop. Checked between chunks, so the file being
         written finishes its current chunk rather than leaving a torn
@@ -958,6 +1019,8 @@ class BatchCorrectionWorker(QtCore.QThread):
                 return
             done = 0
             outputs = []
+            #: froot -> {"rows": [...], "det": str, "dir": Path, "notes": []}
+            metadata_rows: dict = {}
             for path, ranges in plan:
                 if self._cancel:
                     break
@@ -966,6 +1029,13 @@ class BatchCorrectionWorker(QtCore.QThread):
                 with h5py.File(str(path), "r") as f:
                     dset = f[self._dataset]
                     n_raw = int(dset.shape[0]) if dset.ndim == 3 else 1
+                    # Dark acquisitions share the metadata axis with the
+                    # lights (one sample per detector acquisition), so their
+                    # count is what says the per-acquisition arrays are twice
+                    # as long as the image stack. See ion_csv.split_light_dark.
+                    _dk = f.get(self._dark_dataset)
+                    n_dark_frames = (int(_dk.shape[0])
+                                     if _dk is not None and _dk.ndim == 3 else 0)
                     shape = tuple(dset.shape[-2:])
                     # One dark per file, resolved once — see
                     # frame_correct.resolve_dark for the ladder and the real
@@ -998,37 +1068,18 @@ class BatchCorrectionWorker(QtCore.QThread):
                 if self._cancel:
                     break
                 aligned = h5_metadata.align(tree, ranges, n_aligned)
-                # One monitor CSV per SOURCE FILE, in the output root rather
-                # than in a dark_subtracted_<op>/ folder: the ion chambers
-                # are a property of the exposure, identical across the four
-                # ops, so one per op would be four copies of one table. Its
-                # frame numbering matches this file's own output stack.
+                # Accumulate this file's monitor rows under its froot; the
+                # CSV is written once per froot after the loop, not per file.
                 try:
-                    rows = ion_csv.rows_from_aligned(
-                        aligned,
-                        ion_csv.resolve_hutch(path, settings.active_profile()),
-                        len(ranges))
-                    written = ion_csv.write_ion_csv(
-                        self._out_dir / f"{path.stem}.ioncham.csv",
-                        rows, extras=self._ion_csv_extras)
-                    if written:
-                        # Reported, but deliberately NOT added to `outputs`:
-                        # that list is the corrected stacks this run
-                        # produced, and "Done — N file(s) written" should go
-                        # on meaning N methods, not N methods plus a sidecar.
-                        self.progress.emit(done, total,
-                                           f"beam monitors: {written}")
-                    else:
-                        self.progress.emit(
-                            done, total,
-                            f"{path.name}: no beam-monitor data to write "
-                            "(unrecognised hutch, or no live channel)")
+                    self._collect_monitor_rows(
+                        metadata_rows, path, tree, ranges, n_light=n_raw,
+                        n_dark=n_dark_frames)
                 except Exception:
                     # A sidecar must never cost the user the reduction that
                     # already succeeded.
                     self.progress.emit(
                         done, total,
-                        f"{path.name}: monitor CSV failed — "
+                        f"{path.name}: monitor metadata failed — "
                         + traceback.format_exc(limit=1).strip())
                 for op in self._ops:
                     out = write_corrected_h5(
@@ -1051,6 +1102,7 @@ class BatchCorrectionWorker(QtCore.QThread):
                         log=lambda msg: self.progress.emit(done, total, msg))
                     outputs.append(out)
                     self.fileDone.emit(out)
+            self._write_monitor_csvs(metadata_rows, done, total)
             if self._cancel:
                 self.progress.emit(done, total,
                                    f"Cancelled — {len(outputs)} file(s) written.")

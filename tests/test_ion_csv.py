@@ -71,132 +71,113 @@ def test_d_hutch_declares_no_transmission_channel():
     assert "ion_chamber_i0" in IC.ION_CHAMBER_H5_PATHS["D"]
 
 
-# ── the three absence modes ──────────────────────────────────────────────────
+# ── which acquisitions were the lights ───────────────────────────────────────
+#
+# A VAREX/Eiger stack records one metadata sample per detector acquisition,
+# light AND dark, in one flat array — 20 light + 20 dark frames give 40
+# scaler entries. Something has to say which half is which, and getting it
+# wrong reports the shutter-closed baseline as the beam.
 
-def test_absent_key_drops_the_column_entirely(tmp_path):
-    """D hutch: the transmitted channel does not exist. A column of blanks
-    would read as a broken detector rather than a station without one."""
-    header, _rows = _write(tmp_path, IC.rows_from_metas(
-        [{"ion_chamber_i0": 900.0}, {"ion_chamber_i0": 905.0}]))
-    assert header == ["frame", "I0"]
-
-
-def test_none_valued_key_also_drops_the_column(tmp_path):
-    """E hutch with no D2PD in the file — the documented auto-detect."""
-    header, _rows = _write(tmp_path, IC.rows_from_metas(
-        [{"ion_chamber_i0": 900.0, "ion_chamber_i": None}] * 2))
-    assert header == ["frame", "I0"]
+def _tree(light, dark, *, chan="instrument/Scalers/E/US_IC", ts=None):
+    """A per-acquisition tree with `light` then `dark` (or vice versa)."""
+    t = {chan: np.asarray(list(light) + list(dark), dtype=float)}
+    if ts is not None:
+        t["NDArray/NDArrayTimeStamp"] = np.asarray(ts, dtype=float)
+    return t
 
 
-def test_an_all_nan_channel_is_dropped(tmp_path):
-    """E hutch's inactive SMS sub-config reads NaN on every frame; the data
-    itself is what says which of HL/HR was live."""
-    rows = IC.rows_from_metas([
-        {"ion_chamber_i0": 1.0, "motor:HL/samX": 1.5, "motor:HR/samX": np.nan},
-        {"ion_chamber_i0": 1.0, "motor:HL/samX": 1.6, "motor:HR/samX": np.nan}])
-    header, _ = _write(tmp_path, rows, extras=("motors",))
-    assert "HL/samX" in header and "HR/samX" not in header
+def test_lights_are_the_brighter_block_wherever_it_sits():
+    """Order-agnostic on purpose: VAREX trails its darks, a 2026-10 Eiger
+    file puts them first. The monitor itself says which is which."""
+    lights, darks = [1000.0] * 4, [100.0] * 4
+    off, dark_off, note = IC.split_light_dark(
+        _tree(lights, darks), n_light=4, n_dark=4, hutch="E")
+    assert (off, dark_off) == (0, 4) and "lights first" in note
+
+    off, dark_off, note = IC.split_light_dark(
+        _tree(darks, lights), n_light=4, n_dark=4, hutch="E")
+    assert (off, dark_off) == (4, 0) and "lights second" in note
 
 
-def test_a_partly_nan_channel_keeps_its_column_and_says_nan(tmp_path):
-    """Dropping a column because SOME frames are NaN would lose the frames
-    that did read — and a blank there would be indistinguishable from None."""
-    rows = IC.rows_from_metas([{"ion_chamber_i0": 1.0, "motor:HL/samX": np.nan},
-                               {"ion_chamber_i0": 1.0, "motor:HL/samX": 2.0}])
-    header, data = _write(tmp_path, rows, extras=("motors",))
-    col = header.index("HL/samX")
-    assert [r[col] for r in data] == ["nan", "2"]
+def test_the_timestamp_gap_is_a_cross_check_not_the_decision():
+    """Steady cadence with one long gap at the boundary — it should agree,
+    and say so."""
+    ts = [0, 10, 20, 30, 45, 55, 65, 75]          # long gap between 3 and 4
+    _off, _d, note = IC.split_light_dark(
+        _tree([100.0] * 4, [1000.0] * 4, ts=ts), n_light=4, n_dark=4, hutch="E")
+    assert "lights second" in note and "gap at 3 agrees" in note
 
 
-# ── transmission ─────────────────────────────────────────────────────────────
-
-def test_transmission_is_computed_from_both_chambers(tmp_path):
-    header, data = _write(tmp_path, IC.rows_from_metas(
-        [{"ion_chamber_i0": 1000.0, "ion_chamber_i": 250.0}]))
-    assert header == ["frame", "I0", "I", "transmission"]
-    assert data[0] == ["0", "1000", "250", "0.25"]
-
-
-def test_a_dropped_beam_is_blank_not_a_division_error(tmp_path):
-    """I0 == 0 is a dropped beam, not infinite transmission."""
-    header, data = _write(tmp_path, IC.rows_from_metas(
-        [{"ion_chamber_i0": 0.0, "ion_chamber_i": 5.0},
-         {"ion_chamber_i0": 100.0, "ion_chamber_i": 5.0}]))
-    col = header.index("transmission")
-    assert [r[col] for r in data] == ["", "0.05"]
+def test_a_gap_that_contradicts_the_intensity_is_reported(tmp_path):
+    """Better to say the two signals disagree than to quietly pick one."""
+    ts = [0, 10, 25, 35, 45, 55, 65, 75]          # gap in the wrong place
+    _off, _d, note = IC.split_light_dark(
+        _tree([100.0] * 4, [1000.0] * 4, ts=ts), n_light=4, n_dark=4, hutch="E")
+    assert "DISAGREES" in note
 
 
-# ── optional column groups ───────────────────────────────────────────────────
-
-def test_extras_are_opt_in(tmp_path):
-    meta = {"ion_chamber_i0": 1.0, "current": 102.0, "motor:HR/samX": 3.0}
-    base, _ = _write(tmp_path, IC.rows_from_metas([meta]))
-    assert base == ["frame", "I0"]
-    env, _ = _write(tmp_path, IC.rows_from_metas([meta]), extras=("env",))
-    assert env == ["frame", "I0", "ring_current_mA"]
-    both, _ = _write(tmp_path, IC.rows_from_metas([meta]),
-                     extras=("env", "motors"))
-    assert both == ["frame", "I0", "ring_current_mA", "HR/samX"]
+def test_no_dark_block_means_a_single_block():
+    off, dark_off, note = IC.split_light_dark(
+        _tree([1.0] * 4, []), n_light=4, n_dark=0, hutch="E")
+    assert (off, dark_off) == (0, None) and "single block" in note
 
 
-def test_ring_current_is_not_confused_with_a_beam_monitor(tmp_path):
-    """It squatted in the writer's "I" slot once already; that bug is what
-    produced files reading I = 200.025 mA. It is an env column, nothing more."""
-    header, _ = _write(tmp_path, IC.rows_from_metas([{"current": 102.0}]),
-                       extras=("env",))
-    assert "I" not in header and "ring_current_mA" in header
+# ── the rows themselves ──────────────────────────────────────────────────────
+
+def test_every_hutch_channel_is_written_under_its_own_name():
+    """"Write out all IC numbers faithfully" — no channel is renamed to I or
+    I0, because naming one of them that would assert which is the
+    transmitted monitor, and that is setup-dependent."""
+    tree = {"instrument/Scalers/E/US_IC": np.array([10.0, 12.0, 1.0, 1.0]),
+            "instrument/Scalers/E/DS_IC": np.array([8.0, 9.0, 0.5, 0.5]),
+            "instrument/Scalers/E/D2PD": np.array([70.0, 72.0, 2.0, 2.0])}
+    rows, _note = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 1)],
+                                    n_light=2, n_dark=2)
+    assert rows[0]["US_IC"] == pytest.approx(11.0)
+    assert rows[0]["DS_IC"] == pytest.approx(8.5)
+    assert rows[0]["D2PD"] == pytest.approx(71.0)
+    assert "transmission" not in rows[0] and "I0" not in rows[0]
 
 
-# ── nothing worth writing ────────────────────────────────────────────────────
+def test_each_channel_gets_a_dark_companion():
+    """The dark IMAGES are not written out, but their monitor readings are a
+    real measurement of the shutter-closed baseline."""
+    tree = {"instrument/Scalers/E/US_IC": np.array([10.0, 12.0, 1.0, 3.0])}
+    rows, _ = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 1)],
+                                n_light=2, n_dark=2)
+    assert rows[0]["US_IC"] == pytest.approx(11.0)
+    assert rows[0]["US_IC" + IC.DARK_SUFFIX] == pytest.approx(2.0)
 
-def test_no_file_when_there_is_no_real_data(tmp_path):
-    """An unrecognised-path run must not litter the output folder with a file
-    containing only a frame counter."""
-    assert _write(tmp_path, IC.rows_from_metas([{}, {}])) is None
+
+def test_values_are_averaged_over_the_same_chunks_as_the_images():
+    tree = {"instrument/Scalers/E/US_IC": np.array([10.0, 20.0, 30.0, 40.0])}
+    rows, _ = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 1), (2, 3)],
+                                n_light=4, n_dark=0)
+    assert [r["US_IC"] for r in rows] == [pytest.approx(15.0), pytest.approx(35.0)]
+
+
+def test_sensitivity_companions_are_not_per_frame_columns():
+    tree = {"instrument/Scalers/E/US_IC": np.array([1.0, 2.0]),
+            "instrument/Scalers/E/US_IC_sensitivity": np.array([0])}
+    assert IC.scaler_channels(tree, "E") == ["instrument/Scalers/E/US_IC"]
+
+
+def test_an_unplaceable_source_writes_nothing(tmp_path):
+    rows, _ = IC.rows_from_tree({"instrument/Scalers/E/US_IC": np.array([1.0, 2.0])},
+                                None, frame_ranges=[(0, 1)], n_light=2)
+    assert IC.write_ion_csv(tmp_path / "m.csv", rows) is None
     assert not list(tmp_path.iterdir())
 
 
-def test_no_file_for_no_frames(tmp_path):
-    assert _write(tmp_path, []) is None
+def test_rows_carry_their_source_file_so_a_froot_csv_stays_traceable():
+    rows, _ = IC.rows_from_tree({"instrument/Scalers/E/US_IC": np.array([1.0, 2.0])},
+                                "E", frame_ranges=[(0, 1)], n_light=2,
+                                source="AgBeH_10s_000021.h5")
+    assert rows[0]["source_file"] == "AgBeH_10s_000021.h5"
 
 
-# ── the Batch Correction adapter ─────────────────────────────────────────────
-
-def test_rows_from_aligned_reads_the_hutch_channels(tmp_path):
-    aligned = {"instrument/Scalers/E/US_IC": np.array([100.0, 110.0]),
-               "instrument/Scalers/E/D2PD": np.array([25.0, 27.5]),
-               "instrument/StorageRing/SRCurrent": np.array([102.0, 102.0]),
-               "instrument/SMS/E/HL/samX": np.array([1.0, 2.0])}
-    rows = IC.rows_from_aligned(aligned, "E", 2)
-    header, data = _write(tmp_path, rows, extras=("env", "motors"))
-    assert header == ["frame", "I0", "I", "transmission",
-                      "ring_current_mA", "HL/samX"]
-    assert data[1] == ["1", "110", "27.5", "0.25", "102", "2"]
-
-
-def test_rows_from_aligned_ignores_a_series_too_short_to_index(tmp_path):
-    """h5_metadata.align leaves arrays it could not reduce alone, so they may
-    not be one-value-per-frame — indexing them anyway would silently pair the
-    wrong reading with the wrong frame."""
-    aligned = {"instrument/Scalers/E/US_IC": np.array([100.0])}   # 1 < 3 frames
-    rows = IC.rows_from_aligned(aligned, "E", 3)
-    assert all(r["I0"] is None for r in rows)
-    assert _write(tmp_path, rows) is None
-
-
-def test_rows_from_aligned_on_an_unknown_hutch_has_no_chambers():
-    rows = IC.rows_from_aligned(
-        {"instrument/Scalers/E/US_IC": np.array([1.0, 2.0])}, None, 2)
-    assert all(r["I0"] is None and r["I"] is None for r in rows)
-
-
-def test_both_adapters_agree_on_the_same_readings(tmp_path):
-    """The two tabs reach the data by different routes; the CSV they produce
-    for the same exposures must not differ."""
-    via_meta = IC.rows_from_metas(
-        [{"ion_chamber_i0": 100.0, "ion_chamber_i": 25.0},
-         {"ion_chamber_i0": 110.0, "ion_chamber_i": 27.5}])
-    via_tree = IC.rows_from_aligned(
-        {"instrument/Scalers/E/US_IC": np.array([100.0, 110.0]),
-         "instrument/Scalers/E/D2PD": np.array([25.0, 27.5])}, "E", 2)
-    assert _write(tmp_path, via_meta) == _write(tmp_path, via_tree)
+def test_header_leads_with_the_index_columns(tmp_path):
+    rows, _ = IC.rows_from_tree({"instrument/Scalers/E/US_IC": np.array([1.0, 2.0])},
+                                "E", frame_ranges=[(0, 1)], n_light=2, source="s.h5")
+    out = IC.write_ion_csv(tmp_path / "m.csv", rows)
+    assert open(out).readline().strip() == "frame,source_file,US_IC"
