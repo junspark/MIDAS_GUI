@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import datetime as _dt
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +48,7 @@ from midas_gui.job_queue import JobQueuePanel
 from midas_gui.cake_params import (parse_cake_csv, write_cake_csv,
                                    omega_for_window)
 from midas_gui import project
+from midas_gui import run_log
 from midas_gui import settings
 from midas_gui import style as S
 
@@ -1220,6 +1222,7 @@ class BatchTab(QtWidgets.QWidget):
         ``batch_cli._write_results_sidecar`` leaves in ``job.out_dir`` —
         reuses ``_populate_plots_from_attempt``'s replay logic, same as
         restoring a project's saved attempt."""
+        self._archive_job_log(job)
         if not job.out_dir:
             self._log.append(f"[batch] Job {job.session} has no recorded "
                              f"output folder — can't load its results.")
@@ -1989,6 +1992,13 @@ class BatchTab(QtWidgets.QWidget):
         self._cake_stack_view.set_axis_context(lsd, px, wl)
         self._view_tabs.setCurrentWidget(self._waterfall)
         self._log.append("─" * 40 + "\nStarting batch integration…")
+        self._open_screen_log("integrate", {
+            "Formats": ", ".join(self._fmt.checked_keys()) or "(none)",
+            "Kernel": self._kernel.currentData(),
+            "Output": self._out_ed.text().strip() or "(none)",
+            "Zarr group": self._zarr_grouping_key(),
+            "Run mode": self._run_mode.currentData(),
+        })
 
         # Frame range (from the loader)
         frame_range = self._loader.frame_range()
@@ -2056,7 +2066,7 @@ class BatchTab(QtWidgets.QWidget):
         self._worker.frame_done.connect(self._on_frame)
         self._worker.finished.connect(self._on_done)
         self._worker.failed.connect(self._on_fail)
-        self._worker.log_line.connect(self._log.append)
+        self._worker.log_line.connect(self._emit)
         self._worker.geom_ready.connect(lambda ctx, s=sig: self._cache_geom(s, ctx))
         self._worker.start()
 
@@ -2287,8 +2297,75 @@ class BatchTab(QtWidgets.QWidget):
         self._run_btn.setEnabled(True)
         self._abort_btn.setEnabled(False); self._abort_btn.setText("Abort")
 
+    # ── persistent run log (see midas_gui.run_log) ──────────────────
+
+    def _emit(self, msg: str) -> None:
+        """One line to the Log tab and to this run's on-disk screen log."""
+        self._log.append(msg)
+        if getattr(self, "_screen_log", None) is not None:
+            self._screen_log.write(msg)
+
+    def _open_screen_log(self, kind: str, fields: dict):
+        """Start a run log under ~/midas_runs/midas_screen_logs/<beamline>/
+        <expid>/. Best-effort — a log that cannot be opened costs one line in
+        the Log tab, never the run."""
+        from midas_gui import settings
+        profile = settings.active_profile()
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        try:
+            src = (self._loader.source_cfg() or {}).get("path")
+        except Exception:
+            src = None
+        self._screen_log = run_log.open_log(
+            kind, profile=profile, expid=expid,
+            stem=Path(src).stem if src else "")
+        if self._screen_log.path is None:
+            self._log.append("[batch] Note: no run log written — "
+                             + (self._screen_log.error or "could not open it"))
+            return
+        if not expid:
+            self._log.append(f"[batch] Note: Exp ID is blank, so this run's "
+                             f"log is filed under {run_log.NO_EXPID}/.")
+        self._screen_log.header("MIDAS GUI — Batch Integrate",
+                                {"Beamline": profile,
+                                 "Experiment": expid or "(blank)",
+                                 "Started": _dt.datetime.now().isoformat(
+                                     timespec="seconds"),
+                                 **fields})
+        self._log.append(f"[batch] Run log: {self._screen_log.path}")
+
+    def _close_screen_log(self) -> None:
+        if getattr(self, "_screen_log", None) is not None:
+            self._screen_log.close()
+            self._screen_log = None
+
+    def _archive_job_log(self, job) -> None:
+        """Copy a finished background job's screenlog into the same tree the
+        in-process run writes to.
+
+        The live file has to stay in JOBS_DIR — job adoption after a GUI
+        restart scans that one fixed location (see job_queue.JOBS_DIR) — so
+        this copies rather than moves. Without it, which run mode you happened
+        to use would decide whether your log was findable.
+        """
+        try:
+            src = Path(getattr(job, "logfile", "") or "")
+            if not src.is_file():
+                return
+            from midas_gui import settings
+            expid = self._expid_provider().strip() if self._expid_provider else ""
+            dest = run_log.log_path("integrate_job",
+                                    profile=settings.active_profile(),
+                                    expid=expid, stem=job.session)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(src.read_bytes())
+            self._log.append(f"[batch] Run log: {dest}")
+        except Exception as exc:
+            self._log.append(f"[batch] Could not archive the job log: {exc}")
+
     def _on_done(self, data):
         self._reset_run_buttons(); self._prog.setVisible(False)
+        self._close_screen_log()
         n = data["n"]; out = data.get("out_paths", [])
         aborted = data.get("aborted", False)
         verb = "aborted after" if aborted else "Done —"
@@ -2384,6 +2461,9 @@ class BatchTab(QtWidgets.QWidget):
 
     def _on_fail(self, msg):
         self._reset_run_buttons(); self._prog.setVisible(False)
+        if getattr(self, "_screen_log", None) is not None:
+            self._screen_log.write("ERROR:\n" + msg)
+        self._close_screen_log()
         show_error(self, "Integration failed", msg, log=self._log, log_prefix="\nERROR:\n")
 
     def _clear_results(self):

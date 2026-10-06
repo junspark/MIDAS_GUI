@@ -271,3 +271,44 @@ def test_job_queue_panel_wired_into_batch_tab_calls_populate(tab, tmp_path):
     tab._job_queue._on_job_done(job)  # simulate what _finalize_job would call
 
     assert tab._waterfall._nrows == 3
+
+
+# ── the finished job's screenlog reaches the shared log tree ────────────
+#
+# A background job already had a log, but in ~/.midas_gui/jobs — a fixed
+# location job adoption scans after a GUI restart, so it cannot move. It is
+# copied into ~/midas_runs/midas_screen_logs/<beamline>/<expid>/ instead,
+# where the in-process run writes its own. Without that, which run mode you
+# happened to use would decide whether your log was findable.
+
+def test_a_finished_job_log_is_copied_into_the_screen_log_tree(tab, tmp_path,
+                                                               monkeypatch):
+    from midas_gui import run_log
+    root = tmp_path / "midas_screen_logs"
+    monkeypatch.setattr(run_log, "LOG_ROOT", root)
+
+    live = tmp_path / "jobs" / "midasgui_batch_42.screenlog"
+    live.parent.mkdir(parents=True)
+    live.write_text("[launcher] DONE exit=0\n")
+
+    tab.set_expid_provider(lambda: "brown_sep26")
+    tab._archive_job_log(SimpleNamespace(logfile=str(live),
+                                         session="midasgui_batch_42"))
+
+    copies = list(root.rglob("*.screenlog"))
+    assert len(copies) == 1
+    assert copies[0].read_text() == "[launcher] DONE exit=0\n"
+    assert "midasgui_batch_42" in copies[0].name
+    assert "brown_sep26" in copies[0].parts
+    assert live.is_file(), "the live log must stay put for job adoption"
+
+
+def test_archiving_a_missing_job_log_is_a_no_op(tab, tmp_path, monkeypatch):
+    """A log is a record of work, not the work."""
+    from midas_gui import run_log
+    root = tmp_path / "midas_screen_logs"
+    monkeypatch.setattr(run_log, "LOG_ROOT", root)
+    tab.set_expid_provider(lambda: "e")
+    tab._archive_job_log(SimpleNamespace(logfile="/nonexistent/x.screenlog",
+                                         session="s"))      # must not raise
+    assert not root.exists()
