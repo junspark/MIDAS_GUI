@@ -26,6 +26,7 @@ thing ``sum`` gets wrong if done the obvious way) and the dark-file ladder.
 """
 from __future__ import annotations
 
+import datetime as _dt
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,7 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 
 from midas_gui import frame_correct as FC
+from midas_gui import run_log
 from midas_gui import style as S
 from midas_gui.dialogs import show_error
 from midas_gui.helpers import (CORRECTION_EXT, CORRECTION_SUFFIX,
@@ -62,6 +64,8 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         self._outputs: list = []
         self._im_trans: list = []
         self._expid_provider = None   # () -> str, wired by app.py
+        # Open only while a run is in flight — see _emit / _run / _close_log.
+        self._screen_log: Optional[run_log.ScreenLog] = None
         self._build_ui()
 
     def set_expid_provider(self, provider) -> None:
@@ -602,9 +606,12 @@ class BatchCorrectionTab(QtWidgets.QWidget):
                        "Tick at least one of Mean / Median / Sum / Max.")
             return
         self._outputs = []
-        self._log.append(
+        self._open_screen_log(paths, ops, chunk, out_dir)
+        self._emit(
             f"Batch Correction — {len(paths)} file(s) × {len(ops)} method(s) "
             f"({', '.join(ops)}), chunk={chunk or 'whole file'}, out={out_dir}")
+        for p in paths:
+            self._emit(f"  source: {p}", panel=False)
         self._prog.setVisible(True); self._prog.setValue(0)
         self._worker = BatchCorrectionWorker(
             paths, out_dir=out_dir, parent=self, **self._worker_kwargs(paths))
@@ -616,6 +623,56 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         self._worker.start()
         self._refresh_enabled()
 
+    def _emit(self, msg: str, *, screen: bool = True, panel: bool = True) -> None:
+        """One line to the on-screen panel and to this run's screen log.
+
+        The two are deliberately separable: per-chunk progress belongs in the
+        file (that is what makes a screenlog worth reading afterwards) but
+        would drown the panel, which already shows the same thing in the
+        status bar and progress bar.
+        """
+        if panel:
+            self._log.append(msg)
+        if screen and self._screen_log is not None:
+            self._screen_log.write(msg)
+
+    def _open_screen_log(self, paths, ops, chunk, out_dir) -> None:
+        """Start this run's on-disk log, beside the caking logs the dark
+        ladder was derived from. Best-effort: a log that cannot be opened
+        costs one line in the panel, never the run."""
+        from midas_gui import settings
+        profile = settings.active_profile()
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        stem = Path(paths[0]).stem if len(paths) == 1 else ""
+        self._screen_log = run_log.open_log(
+            "correct", profile=profile, expid=expid, stem=stem)
+        if self._screen_log.path is None:
+            self._log.append(
+                "Note: no run log written — "
+                + (self._screen_log.error or "could not open the log file"))
+            return
+        if not expid:
+            self._log.append(
+                f"Note: Exp ID is blank, so this run's log is filed under "
+                f"{run_log.NO_EXPID}/.")
+        self._screen_log.header("MIDAS GUI — Batch Correction", {
+            "Beamline": profile,
+            "Experiment": expid or "(blank)",
+            "Started": _dt.datetime.now().isoformat(timespec="seconds"),
+            "Files": len(paths),
+            "Methods": ", ".join(ops),
+            "Chunk": chunk or "whole file",
+            "Output": out_dir,
+            "Out dtype": self._dtype_combo.currentData() or "float32",
+            "Compression": self._comp_combo.currentData() or "none",
+        })
+        self._log.append(f"Run log: {self._screen_log.path}")
+
+    def _close_screen_log(self) -> None:
+        if self._screen_log is not None:
+            self._screen_log.close()
+            self._screen_log = None
+
     def _cancel(self):
         if self._running and self._worker is not None:
             self._worker.cancel()
@@ -625,24 +682,27 @@ class BatchCorrectionTab(QtWidgets.QWidget):
     def _on_progress(self, done, total, msg):
         self._prog.setMaximum(max(1, total)); self._prog.setValue(done)
         self._status.setText(msg)
-        if "dark = " in msg:
-            self._log.append(msg)
+        # Every progress line reaches the file; only the dark choice — the
+        # one decision worth auditing at a glance — reaches the panel.
+        self._emit(msg, panel="dark = " in msg)
 
     def _on_file_done(self, path):
         self._outputs.append(path)
-        self._log.append(f"  wrote {path}")
+        self._emit(f"  wrote {path}")
 
     def _on_finished(self, outputs):
         self._running = False
         self._prog.setVisible(False)
-        self._log.append(f"Done — {len(outputs)} file(s) written.")
+        self._emit(f"Done — {len(outputs)} file(s) written.")
+        self._close_screen_log()
         self._status.setText(f"Done — {len(outputs)} file(s) written.")
         self._refresh_enabled()
 
     def _on_failed(self, err):
         self._running = False
         self._prog.setVisible(False)
-        self._log.append(err)
+        self._emit(err)
+        self._close_screen_log()
         self._status.setText("Failed — see the Log tab.")
         self._refresh_enabled()
         show_error(self, "Batch Correction failed", err.strip().splitlines()[-1])
