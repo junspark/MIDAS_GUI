@@ -237,17 +237,35 @@ def _make_hutch_varex_h5(path, hutch, *, include_d2pd=True, n_light=10, size=64)
                               data=np.full(n_light, np.nan))   # inactive sub-config
 
 
-def test_hutch_resolved_from_source_path(tmp_path):
-    """Stopgap hutch detection: varexE/varexD in the path, case-insensitive;
-    anything else is simply unknown (every ion-chamber/sample-motor field
-    below then degrades to absent, same as any other unavailable metadata)."""
+def test_hutch_resolved_from_source_path(tmp_path, monkeypatch):
+    """Stopgap hutch detection: varexE/varexD in the path, case-insensitive.
+    The path outranks the active profile, which is only the fallback (see
+    ion_csv.resolve_hutch) — pinned here to a non-20-ID profile so this
+    asserts the PATH rule rather than whichever profile the machine
+    running the suite happens to have selected."""
     import midas_gui.workers as wk
+    from midas_gui import settings
+    monkeypatch.setattr(settings, "active_profile", lambda: "Default")
     assert wk._HDF5StackGlobSource(
         [tmp_path / "VarexE" / "scan.h5"], "exchange/data")._hutch == "E"
     assert wk._HDF5StackGlobSource(
         [tmp_path / "varexD" / "scan.h5"], "exchange/data")._hutch == "D"
     assert wk._HDF5StackGlobSource(
         [tmp_path / "ge3" / "scan.h5"], "exchange/data")._hutch is None
+
+
+def test_the_profile_resolves_a_hutch_the_path_cannot(tmp_path, monkeypatch):
+    """An Eiger run lives under eiger2/ and matches neither varex marker, so
+    path-only detection silently skipped every ion chamber on a file that
+    had them. The header profile is the fallback."""
+    import midas_gui.workers as wk
+    from midas_gui import settings
+    monkeypatch.setattr(settings, "active_profile", lambda: "20-ID-E")
+    assert wk._HDF5StackGlobSource(
+        [tmp_path / "eiger2" / "scan.h5"], "exchange/data")._hutch == "E"
+    monkeypatch.setattr(settings, "active_profile", lambda: "1-ID-E")
+    assert wk._HDF5StackGlobSource(
+        [tmp_path / "eiger2" / "scan.h5"], "exchange/data")._hutch is None
 
 
 def test_d_hutch_ion_chamber_is_i0_only(tmp_path):
@@ -306,11 +324,17 @@ def test_e_hutch_sample_motors_capture_both_hl_and_hr(tmp_path):
     assert np.isnan(meta["motor:HR/samX"])
 
 
-def test_unknown_hutch_has_no_ion_chamber_or_sample_motor_keys(tmp_path):
-    """A source path with neither varexE nor varexD attempts none of the new
-    fields — same "not every source has this metadata" contract the
-    existing temperature/pressure/current keys already follow."""
+def test_unknown_hutch_has_no_ion_chamber_or_sample_motor_keys(tmp_path,
+                                                               monkeypatch):
+    """A source neither the path nor the profile can place attempts none of
+    the new fields — same "not every source has this metadata" contract the
+    existing temperature/pressure/current keys already follow.
+
+    The profile is pinned off a 20-ID station, since it is now the fallback
+    and the machine running the suite is usually set to one."""
     import midas_gui.workers as wk
+    from midas_gui import settings
+    monkeypatch.setattr(settings, "active_profile", lambda: "Default")
     h5_dir = tmp_path / "ge3"
     h5_dir.mkdir()
     h5_path = h5_dir / "scan_001.h5"

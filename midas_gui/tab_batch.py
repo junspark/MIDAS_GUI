@@ -1662,9 +1662,9 @@ class BatchTab(QtWidgets.QWidget):
         self._ion_env_chk.setToolTip(
             "Add storage-ring current (mA), temperature and pressure "
             "columns.\n"
-            "Temperature and Pressure read NaN at 20-ID today — the source "
-            "files carry placeholder PVs — so those columns are dropped "
-            "rather than written as a wall of 'nan'.")
+            "Older 20-ID files carry placeholder PVs that read NaN for "
+            "temperature and pressure; a column that is NaN on every frame "
+            "is dropped rather than written as a wall of 'nan'.")
         self._ion_motors_chk = QtWidgets.QCheckBox("Sample motors")
         self._ion_motors_chk.setToolTip(
             "Add one column per sample-stage channel.\n"

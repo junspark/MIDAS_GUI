@@ -40,6 +40,25 @@ def test_hutch_is_read_from_the_path(path, want):
     assert IC.resolve_hutch(path) == want
 
 
+@pytest.mark.parametrize("profile,want", [
+    ("20-ID-E", "E"), ("20-id-e", "E"), ("20-ID-D", "D"),
+    ("1-ID-E", None),       # a different beamline that merely ends in E
+    ("17-BM", None), ("Default", None), ("", None), (None, None),
+])
+def test_the_profile_is_the_fallback_when_the_path_is_silent(profile, want):
+    """Reported from the beamline: an Eiger run lives under eiger2/, which
+    matches neither varexE nor varexD, so a file carrying perfectly good
+    Scalers/E/US_IC data silently produced no CSV. The header already says
+    which station the user is on."""
+    assert IC.resolve_hutch("/mnt/s20a/brown_sep26/eiger2/x.h5", profile) == want
+
+
+def test_the_path_outranks_the_profile():
+    """A varexD folder names the station outright; a stale profile must not
+    override it."""
+    assert IC.resolve_hutch("/mnt/s20a/x/varexD/y.h5", "20-ID-E") == "D"
+
+
 def test_station_a_has_no_monitor_mapping():
     """A's IC4_foil_I0/IC5_foil_I1 names look like a pair but no sample sits
     in its beam path, so claiming them would be worse than claiming nothing."""

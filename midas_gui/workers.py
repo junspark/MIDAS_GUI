@@ -1005,13 +1005,19 @@ class BatchCorrectionWorker(QtCore.QThread):
                 # frame numbering matches this file's own output stack.
                 try:
                     rows = ion_csv.rows_from_aligned(
-                        aligned, ion_csv.resolve_hutch(path), len(ranges))
+                        aligned,
+                        ion_csv.resolve_hutch(path, settings.active_profile()),
+                        len(ranges))
                     written = ion_csv.write_ion_csv(
                         self._out_dir / f"{path.stem}.ioncham.csv",
                         rows, extras=self._ion_csv_extras)
                     if written:
-                        self.fileDone.emit(written)
-                        outputs.append(written)
+                        # Reported, but deliberately NOT added to `outputs`:
+                        # that list is the corrected stacks this run
+                        # produced, and "Done — N file(s) written" should go
+                        # on meaning N methods, not N methods plus a sidecar.
+                        self.progress.emit(done, total,
+                                           f"beam monitors: {written}")
                     else:
                         self.progress.emit(
                             done, total,
@@ -2777,9 +2783,10 @@ class _HDF5StackGlobSource:
         self._hutch = self._resolve_hutch()
 
     def _resolve_hutch(self) -> Optional[str]:
-        """This source's hutch, from the first selected path — see
-        :func:`midas_gui.ion_csv.resolve_hutch` for why it is path-based."""
-        return ion_csv.resolve_hutch(self._paths[0] if self._paths else None)
+        """This source's hutch, from the first selected path, falling back to
+        the active profile — see :func:`midas_gui.ion_csv.resolve_hutch`."""
+        return ion_csv.resolve_hutch(self._paths[0] if self._paths else None,
+                                     settings.active_profile())
 
     def _metadata_h5_paths(self) -> dict:
         """Flat ``{key: h5_path}`` table for this source's hutch: the fixed

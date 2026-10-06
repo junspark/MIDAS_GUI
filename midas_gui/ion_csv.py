@@ -90,23 +90,36 @@ _ENV_COLUMNS = (("current", "ring_current_mA"), ("temperature", "temperature"),
 MOTOR_PREFIX = "motor:"
 
 
-def resolve_hutch(path) -> Optional[str]:
-    """Stopgap hutch detection from a source path.
+#: Profiles that name a 20-ID station, and the hutch each one means. Used
+#: only as a fallback — and deliberately NOT a prefix match: "1-ID-E" ends in
+#: E but is a different beamline entirely, and reading its scalers as 20-ID's
+#: would invent a monitor rather than report none.
+_PROFILE_HUTCH = {"20-id-e": "E", "20-id-d": "D"}
+
+
+def resolve_hutch(path, profile: Optional[str] = None) -> Optional[str]:
+    """Stopgap hutch detection, from the source path or the active profile.
 
     The HDF5 file's own ``active_instrument`` is documented as always empty
-    upstream, so there is no reliable per-file signal — infer it from
-    ``varexE``/``varexD`` in the path instead, case-insensitively. ``None``
-    (unrecognised layout) means every ion-chamber and sample-motor field is
-    simply skipped, the same as any other "not available for this source".
+    upstream (confirmed again on a real 2026-10 file, where it reads ``b""``),
+    so there is no per-file signal to use.
+
+    The path is tried first, since it is the more specific statement: a
+    ``varexE``/``varexD`` folder names the station outright. But that only
+    ever matched VAREX layouts — an Eiger run lives under ``eiger2/`` and
+    matched nothing, so a file carrying perfectly good ``Scalers/E/US_IC``
+    data silently produced no CSV. The profile is the fallback: the user has
+    already told the GUI which station they are on, in the header.
+
+    ``None`` (neither says) means every ion-chamber and sample-motor field is
+    skipped, the same as any other "not available for this source".
     """
-    if not path:
-        return None
-    text = str(path).lower()
+    text = str(path or "").lower()
     if "varexe" in text:
         return "E"
     if "varexd" in text:
         return "D"
-    return None
+    return _PROFILE_HUTCH.get(str(profile or "").strip().lower())
 
 
 def metadata_h5_paths(hutch: Optional[str]) -> dict:
