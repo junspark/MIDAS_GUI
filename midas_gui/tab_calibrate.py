@@ -526,16 +526,21 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_enables = (self._seed_en_bc, self._seed_en_lsd,
                               self._seed_en_tx, self._seed_en_ty, self._seed_en_tz,
                               self._seed_en_dist)
-        self._seed_en_bc.toggled.connect(self._seed_bcy.setEnabled)
-        self._seed_en_bc.toggled.connect(self._seed_bcz.setEnabled)
-        self._seed_en_lsd.toggled.connect(self._seed_lsd.setEnabled)
-        self._seed_en_tx.toggled.connect(self._seed_tx.setEnabled)
-        self._seed_en_ty.toggled.connect(self._seed_ty.setEnabled)
-        self._seed_en_tz.toggled.connect(self._seed_tz.setEnabled)
-        self._seed_en_dist.toggled.connect(self._seed_dist_btn.setEnabled)
-        for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
-            w.setEnabled(False)
-        self._seed_dist_btn.setEnabled(False)
+        #: Seed tick -> the widget(s) it gates. Driven by
+        #: _sync_seed_enabled() rather than by per-checkbox toggled->setEnabled
+        #: connections: a signal only fires when something *changes*, and
+        #: apply_dict_to_widgets restores every tick with signals BLOCKED — so
+        #: a project saved with seeds on reopened with the ticks checked and
+        #: every value box greyed out. Ticked, and uneditable.
+        self._seed_gated = (
+            (self._seed_en_bc, (self._seed_bcy, self._seed_bcz)),
+            (self._seed_en_lsd, (self._seed_lsd,)),
+            (self._seed_en_tx, (self._seed_tx,)),
+            (self._seed_en_ty, (self._seed_ty,)),
+            (self._seed_en_tz, (self._seed_tz,)),
+            (self._seed_en_dist, (self._seed_dist_btn,)),
+        )
+
         for cb in self._seed_enables:
             cb.toggled.connect(self._on_seed_enable_changed)
         # The summary line carries the seed *values*, so it has to follow the
@@ -568,7 +573,7 @@ class CalibrationTab(QtWidgets.QWidget):
         # Column 2 holds only two-decimal degree fields, so it does not need the
         # default numeric width — narrowing it is most of what keeps this card
         # (and with it the whole left column) from setting the panel width.
-        for w in (self._seed_ty, self._seed_tz):
+        for w in self._seed_tilts:
             w.setMaximumWidth(76)
         self._feedback_check = QtWidgets.QCheckBox("Feed result back to seed")
         self._feedback_check.setChecked(True)
@@ -605,6 +610,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_bc_lsd_warn.setVisible(False)
         seed.body.addWidget(self._seed_bc_lsd_warn)
         self._update_seed_dist_label()
+        self._sync_seed_enabled()
         self._update_seed_summary()
         self._update_seed_bc_lsd_warning()
         self._update_seed_btn_style()
@@ -1712,9 +1718,21 @@ class CalibrationTab(QtWidgets.QWidget):
                 self._manual_seed_check.setCheckState(QtCore.Qt.PartiallyChecked)
         finally:
             self._syncing_seed_master = False
+        self._sync_seed_enabled()
         self._update_seed_summary()
         self._update_seed_bc_lsd_warning()
         self._update_seed_btn_style()
+
+    def _sync_seed_enabled(self):
+        """A seed value box is editable exactly when its tick is on.
+
+        Derived from each checkbox's CURRENT state every time, so it is right
+        whether the tick was clicked, set programmatically, or restored from
+        a project with signals blocked."""
+        for cb, widgets in self._seed_gated:
+            on = cb.isChecked()
+            for w in widgets:
+                w.setEnabled(on)
 
     def _update_seed_btn_style(self):
         """Green "Manual seed..." once at least one parameter is ticked, so an

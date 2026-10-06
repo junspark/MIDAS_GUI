@@ -140,6 +140,8 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._seed_ty = _fspin(-180, 180, 4, 0.0, "°")
         self._seed_tz = _fspin(-180, 180, 4, 0.0, "°")
         self._seed_tilts = (self._seed_tx, self._seed_ty, self._seed_tz)
+        for _w in self._seed_tilts:
+            _w.setMaximumWidth(76)
         self._seed_en_bc = QtWidgets.QCheckBox("Beam centre")
         self._seed_en_lsd = QtWidgets.QCheckBox("Lsd")
         self._seed_en_tx = QtWidgets.QCheckBox("tx")
@@ -147,14 +149,19 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._seed_en_tz = QtWidgets.QCheckBox("tz")
         self._seed_enables = (self._seed_en_bc, self._seed_en_lsd,
                               self._seed_en_tx, self._seed_en_ty, self._seed_en_tz)
-        self._seed_en_bc.toggled.connect(self._seed_bcy.setEnabled)
-        self._seed_en_bc.toggled.connect(self._seed_bcz.setEnabled)
-        self._seed_en_lsd.toggled.connect(self._seed_lsd.setEnabled)
-        self._seed_en_tx.toggled.connect(self._seed_tx.setEnabled)
-        self._seed_en_ty.toggled.connect(self._seed_ty.setEnabled)
-        self._seed_en_tz.toggled.connect(self._seed_tz.setEnabled)
-        for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
-            w.setEnabled(False)
+        #: Seed tick -> the widget(s) it gates. Synced from the ticks rather
+        #: than wired as toggled->setEnabled, for the reason spelled out in
+        #: tab_calibrate's copy: a restore sets the ticks with signals
+        #: BLOCKED, so the signal never fires and the boxes stay greyed out
+        #: under a checked box.
+        self._seed_gated = (
+            (self._seed_en_bc, (self._seed_bcy, self._seed_bcz)),
+            (self._seed_en_lsd, (self._seed_lsd,)),
+            (self._seed_en_tx, (self._seed_tx,)),
+            (self._seed_en_ty, (self._seed_ty,)),
+            (self._seed_en_tz, (self._seed_tz,)),
+        )
+        self._sync_seed_enabled()
         for cb in self._seed_enables:
             cb.toggled.connect(self._on_seed_enable_changed)
         self._manual_seed_check.toggled.connect(self._on_seed_master_toggled)
@@ -262,7 +269,17 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
                 self._manual_seed_check.setCheckState(QtCore.Qt.PartiallyChecked)
         finally:
             self._syncing_seed_master = False
+        self._sync_seed_enabled()
         self._update_seed_summary()
+
+    def _sync_seed_enabled(self):
+        """A seed value box is editable exactly when its tick is on — derived
+        from the checkbox's current state, so a signal-blocked restore cannot
+        leave the two disagreeing."""
+        for cb, widgets in self._seed_gated:
+            on = cb.isChecked()
+            for w in widgets:
+                w.setEnabled(on)
 
     def _on_seed_master_toggled(self, *_args):
         if self._syncing_seed_master:

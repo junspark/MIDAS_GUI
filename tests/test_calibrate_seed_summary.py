@@ -111,3 +111,49 @@ def test_crystalline_limits_note_recentres_too(tab):
     assert "Lsd ±500 mm" in tab._limits_note.text()
     tab._seed_lsd.setValue(2000.0)
     assert "Lsd ±1000 mm" in tab._limits_note.text()
+
+
+# ── a ticked seed must be editable ───────────────────────────────────────────
+
+def test_ticking_a_seed_enables_its_value_box(tab):
+    assert not tab._seed_lsd.isEnabled()
+    tab._seed_en_lsd.setChecked(True)
+    assert tab._seed_lsd.isEnabled()
+    tab._seed_en_lsd.setChecked(False)
+    assert not tab._seed_lsd.isEnabled()
+
+
+def test_bc_gates_both_coordinates(tab):
+    tab._seed_en_bc.setChecked(True)
+    assert tab._seed_bcy.isEnabled() and tab._seed_bcz.isEnabled()
+
+
+def test_a_reopened_project_does_not_come_back_ticked_but_greyed_out(tab, app):
+    """Reported from the beamline: every box in the Manual seed dialog was
+    ticked and every value box greyed out, so the seed could be seen but not
+    edited.
+
+    The enabled state used to be wired as checkbox.toggled -> setEnabled, and
+    a signal only fires on a CHANGE — apply_dict_to_widgets restores each
+    tick with signals blocked, so nothing ever enabled the boxes again.
+    """
+    from midas_gui.tab_calibrate import CalibrationTab
+    tab._seed_en_bc.setChecked(True)
+    tab._seed_en_lsd.setChecked(True)
+    tab._seed_en_ty.setChecked(True)
+    tab._seed_lsd.setValue(13900.0)
+    state = tab.get_state()
+
+    fresh = CalibrationTab()
+    fresh.set_state(state)
+    assert fresh._seed_en_lsd.isChecked() and fresh._seed_lsd.isEnabled()
+    assert fresh._seed_en_bc.isChecked() and fresh._seed_bcy.isEnabled()
+    assert fresh._seed_en_ty.isChecked() and fresh._seed_ty.isEnabled()
+    # ...and an unticked one stays locked, rather than everything turning on.
+    assert not fresh._seed_en_tz.isChecked() and not fresh._seed_tz.isEnabled()
+
+
+def test_the_three_tilt_boxes_are_the_same_width(tab):
+    """tx is the same two-decimal degree field as ty and tz; only ty/tz were
+    being narrowed, so tx rendered wider than its own siblings."""
+    assert len({w.maximumWidth() for w in tab._seed_tilts}) == 1
