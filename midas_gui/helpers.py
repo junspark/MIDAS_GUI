@@ -529,10 +529,14 @@ def correction_subdir(op: str) -> str:
     """``dark_subtracted_<op>`` — one output folder per combine method."""
     return f"{CORRECTION_SUBDIR_PREFIX}_{str(op).lower()}"
 
-#: Tail of a Batch Correction output filename: ``<stem>.dark_subtracted.hdf``.
-#: ``.hdf`` is in ``H5_EXTS``, so the result loads straight back into any tab.
-CORRECTION_SUFFIX = ".dark_subtracted"
-CORRECTION_EXT = ".hdf"
+#: Tail of a Batch Correction output filename: ``<stem>_cor.hdf5``, i.e. the
+#: source name with its whole dotted extension replaced (see
+#: ``BatchCorrectionWorker._out_path``, which strips a detector tag like
+#: ``.vrx`` along with the extension — it no longer describes the file).
+#: ``.hdf5`` is in ``H5_EXTS``, so the result loads straight back into any tab.
+#: Both are editable per run; these are only the defaults.
+CORRECTION_SUFFIX = "_cor"
+CORRECTION_EXT = ".hdf5"
 
 
 def suggest_correction_output_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:

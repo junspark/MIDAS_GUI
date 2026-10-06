@@ -23,7 +23,8 @@ from midas_gui import provenance
 from midas_gui import settings
 from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections,
-                               read_hdf5_stack_chunk, load_profile_file)
+                               read_hdf5_stack_chunk, load_profile_file,
+                               CORRECTION_SUFFIX, CORRECTION_EXT)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -861,8 +862,9 @@ class BatchCorrectionWorker(QtCore.QThread):
     failed   = QtCore.pyqtSignal(str)
 
     def __init__(self, paths, dataset: str, *, chunk_size=None, op="mean",
-                 out_dir: str, suffix: str = ".dark_subtracted",
-                 out_ext: str = ".hdf", out_dataset: str = "exchange/data",
+                 out_dir: str, suffix: str = CORRECTION_SUFFIX,
+                 out_ext: str = CORRECTION_EXT,
+                 out_dataset: str = "exchange/data",
                  dark=None, bright=None, background=None,
                  bright_mode: str = "divide", auto_dark: bool = True,
                  dark_dataset: str = "exchange/data_dark",

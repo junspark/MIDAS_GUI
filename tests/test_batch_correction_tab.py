@@ -86,10 +86,11 @@ def test_output_name_keeps_the_stem_and_drops_the_detector_tag(app, inputs, tmp_
     ``scan_000010.vrx.dark_subtracted.hdf`` — carrying a detector tag that no
     longer describes the file."""
     import pathlib
+    from midas_gui.helpers import CORRECTION_SUFFIX, CORRECTION_EXT
     got = _run_worker(inputs, tmp_path / "out", app)
     names = sorted(pathlib.Path(p).name for p in got["outputs"])
-    assert names == ["scan_000010.dark_subtracted.hdf",
-                     "scan_000011.dark_subtracted.hdf"]
+    tail = f"{CORRECTION_SUFFIX}{CORRECTION_EXT}"
+    assert names == [f"scan_000010{tail}", f"scan_000011{tail}"]
     assert all(pathlib.Path(p).parent.name == "dark_subtracted_mean"
                for p in got["outputs"])
 
@@ -101,13 +102,14 @@ def test_custom_suffix_and_extension_are_honoured(app, inputs, tmp_path):
 
 
 def test_a_bare_extension_gets_its_dot(app, inputs, tmp_path):
+    from midas_gui.helpers import CORRECTION_SUFFIX
     got = _run_worker(inputs, tmp_path / "out", app, out_ext="hdf5")
-    assert all(p.endswith(".dark_subtracted.hdf5") for p in got["outputs"])
+    assert all(p.endswith(f"{CORRECTION_SUFFIX}.hdf5") for p in got["outputs"])
 
 
 def test_the_default_output_extension_loads_back_as_hdf5(app, inputs, tmp_path):
-    """`.hdf` has to be in H5_EXTS or the reduced frames can't be reopened in
-    this GUI, which would make the whole output a dead end."""
+    """The default extension has to be in H5_EXTS or the reduced frames
+    can't be reopened in this GUI, which would make the output a dead end."""
     from midas_gui.helpers import is_h5
     got = _run_worker(inputs, tmp_path / "out", app)
     assert all(is_h5(p) for p in got["outputs"])
