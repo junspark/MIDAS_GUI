@@ -407,14 +407,64 @@ def compression_kwargs(name: Optional[str], level: int = 4,
                      f"{', '.join(COMPRESSIONS)}.")
 
 
+#: Output dtypes offered for the corrected stack, in UI order.
+#:
+#: ``float32`` is the default and the honest one: GSAS-II's HDF5 image reader
+#: has no dtype gate at all (it dispatches on array *shape* and hands the
+#: array over uncast), and its integration casts to float anyway. ``uint32``
+#: exists only for workflows that pass the data to something integer-only —
+#: notably GSAS-II's *TIFF* reader, which truncates float32 to int32 on load.
+OUTPUT_DTYPES = ("float32", "uint32")
+
+
+def cast_for_output(arr, dtype: str = "float32"):
+    """``(array, n_clipped_low, n_clipped_high)`` — the on-disk copy.
+
+    Called on the fully corrected stack and nowhere else, so correction
+    arithmetic stays in float and only the serialised copy is narrowed.
+
+    Unsigned output cannot represent the negatives that background
+    subtraction routinely produces, and a bare ``astype`` would silently
+    WRAP them (-1 becomes 4294967295) rather than fail — so round first,
+    then clip, then report what was lost. Rounding is ``rint``, not the
+    truncation ``astype`` would do on its own: a 0.6 count belongs in bin 1.
+    NaN has no unsigned representation either and would convert to a
+    platform-defined value, so it is folded into the low clip rather than
+    left to chance.
+
+    A run that quietly destroyed half the detector must not be
+    indistinguishable from a clean one, which is why the counts come back
+    instead of being swallowed.
+    """
+    if dtype == "float32":
+        return np.asarray(arr, dtype=np.float32), 0, 0
+    if dtype != "uint32":
+        raise ValueError(f"Unknown output dtype {dtype!r}; expected one of "
+                         f"{', '.join(OUTPUT_DTYPES)}.")
+    hi = float(np.iinfo(np.uint32).max)
+    rounded = np.rint(np.asarray(arr, dtype=np.float64))
+    bad = np.isnan(rounded)
+    n_low = int(np.count_nonzero((rounded < 0.0) | bad))
+    n_high = int(np.count_nonzero(rounded > hi))
+    rounded = np.where(bad, 0.0, rounded)
+    return np.clip(rounded, 0.0, hi).astype(np.uint32), n_low, n_high
+
+
 def write_corrected_h5(path, frames, *, dataset: str = "exchange/data",
                        metadata: Optional[dict] = None,
                        frame_ranges: Optional[Sequence] = None,
                        attrs: Optional[dict] = None,
                        provenance_entry: Optional[dict] = None,
                        compression: Optional[str] = None, level: int = 4,
-                       shuffle: bool = False) -> str:
-    """Write reduced ``frames`` as one ``(M, H, W)`` float32 HDF5 dataset.
+                       shuffle: bool = False, dtype: str = "float32",
+                       log=None) -> str:
+    """Write reduced ``frames`` as one ``(M, H, W)`` HDF5 dataset.
+
+    ``dtype`` is one of :data:`OUTPUT_DTYPES` and is applied by
+    :func:`cast_for_output` at the last possible moment — immediately before
+    ``create_dataset``, after every correction has been done in float. When
+    a narrowing cast clips anything, ``log`` (a one-argument callable, if
+    given) is told how much.
 
     Also writes, when given: the per-chunk-averaged instrument metadata tree
     (``metadata``, from ``h5_metadata.align``) at its original paths; the
@@ -431,6 +481,12 @@ def write_corrected_h5(path, frames, *, dataset: str = "exchange/data",
     from midas_gui import h5_metadata, provenance as _prov
 
     arr = np.stack([np.asarray(f, dtype=np.float32) for f in frames], axis=0)
+    # The very last thing that happens to the pixels before they are written.
+    arr, n_low, n_high = cast_for_output(arr, dtype)
+    if log is not None and (n_low or n_high):
+        log(f"[correct] {dtype}: clipped {n_low:,} px below 0 and "
+            f"{n_high:,} px above {np.iinfo(np.uint32).max:,} "
+            f"({Path(str(path)).name})")
     out = Path(str(path))
     out.parent.mkdir(parents=True, exist_ok=True)
     kwargs = compression_kwargs(compression, level, shuffle)

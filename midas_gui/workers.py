@@ -867,6 +867,7 @@ class BatchCorrectionWorker(QtCore.QThread):
                  dark_dataset: str = "exchange/data_dark",
                  clip_negatives: bool = True, compression=None,
                  level: int = 4, shuffle: bool = False,
+                 out_dtype: str = "float32",
                  raw_start=None, raw_end=None, parent=None):
         super().__init__(parent)
         self._paths = [Path(p) for p in paths]
@@ -882,6 +883,13 @@ class BatchCorrectionWorker(QtCore.QThread):
         self._auto_dark, self._dark_dataset = auto_dark, dark_dataset
         self._clip = clip_negatives
         self._compression, self._level, self._shuffle = compression, level, shuffle
+        # On-disk dtype for the corrected stack. Applied by
+        # frame_correct.cast_for_output immediately before create_dataset,
+        # never upstream — see its docstring for why unsigned needs care.
+        # Imported here rather than at module scope, like every other
+        # frame_correct use in this file.
+        from midas_gui.frame_correct import OUTPUT_DTYPES
+        self._out_dtype = out_dtype if out_dtype in OUTPUT_DTYPES else "float32"
         self._raw_start, self._raw_end = raw_start, raw_end
         self._cancel = False
 
@@ -1000,7 +1008,8 @@ class BatchCorrectionWorker(QtCore.QThread):
                                    "dark": why,
                                    "clip_negatives": bool(self._clip)}),
                         compression=self._compression, level=self._level,
-                        shuffle=self._shuffle)
+                        shuffle=self._shuffle, dtype=self._out_dtype,
+                        log=lambda msg: self.progress.emit(done, total, msg))
                     outputs.append(out)
                     self.fileDone.emit(out)
             if self._cancel:

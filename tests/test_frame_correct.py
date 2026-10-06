@@ -218,6 +218,80 @@ def test_written_file_holds_the_frames_as_one_float32_stack(tmp_path):
     assert np.allclose(arr[2], 2.0)
 
 
+# ── output dtype (FC.cast_for_output) ────────────────────────────────────────
+#
+# GSAS-II does NOT require unsigned integers over HDF5 — its HDF5 image reader
+# has no dtype gate and its integration casts to float anyway. uint32 exists
+# for workflows that go through something integer-only (GSAS-II's own TIFF
+# reader truncates float32 to int32 on load). So float32 stays the default and
+# these pin the narrowing path's edges, which are where unsigned output bites.
+
+def test_float32_is_the_default_and_passes_values_through():
+    arr, low, high = FC.cast_for_output(np.array([[-5.0, 0.6]]))
+    assert arr.dtype == np.float32
+    assert (low, high) == (0, 0)
+    assert arr[0, 0] == -5.0          # negatives survive; nothing is clipped
+
+
+def test_uint32_rounds_rather_than_truncating():
+    """A 0.6 count belongs in bin 1. A bare astype would make it 0, which is
+    the truncation this option exists to avoid in the first place."""
+    arr, _, _ = FC.cast_for_output(np.array([[0.4, 0.5, 0.6, 1.5]]), "uint32")
+    assert arr.tolist() == [[0, 0, 1, 2]]   # rint: ties to even
+
+
+def test_uint32_clips_negatives_to_zero_instead_of_wrapping():
+    """The failure this guards is silent: np.float32(-1).astype(np.uint32) is
+    4294967295, so an unguarded cast turns background-subtracted pixels into
+    the brightest ones in the frame."""
+    arr, low, high = FC.cast_for_output(np.array([[-1.0, -500.0, 3.0]]), "uint32")
+    assert arr.tolist() == [[0, 0, 3]]
+    assert (low, high) == (2, 0)
+
+
+def test_uint32_clips_above_the_ceiling_and_counts_both_ends():
+    arr, low, high = FC.cast_for_output(np.array([[-2.0, 1e10, 1e10]]), "uint32")
+    assert arr.tolist() == [[0, 4294967295, 4294967295]]
+    assert (low, high) == (1, 2)
+
+
+def test_uint32_folds_nan_into_the_low_clip():
+    """NaN has no unsigned representation; astype would give a
+    platform-defined value rather than raise."""
+    arr, low, high = FC.cast_for_output(np.array([[np.nan, 5.0]]), "uint32")
+    assert arr.tolist() == [[0, 5]]
+    assert (low, high) == (1, 0)
+
+
+def test_unknown_output_dtype_is_rejected():
+    with pytest.raises(ValueError, match="Unknown output dtype"):
+        FC.cast_for_output(np.zeros((2, 2)), "int16")
+
+
+def test_written_file_honours_the_requested_dtype(tmp_path):
+    frames = [np.array([[-3.0, 0.6], [7.4, 1e10]], np.float32)]
+    out = FC.write_corrected_h5(tmp_path / "u.h5", frames, dtype="uint32")
+    arr = _read(out)
+    assert arr.dtype == np.uint32
+    assert arr[0].tolist() == [[0, 1], [7, 4294967295]]
+
+
+def test_a_clipping_write_reports_what_it_lost(tmp_path):
+    """Silent clipping would make a run that destroyed half the detector
+    indistinguishable from a clean one."""
+    msgs = []
+    FC.write_corrected_h5(tmp_path / "u.h5", [np.array([[-1.0, 1e10]], np.float32)],
+                          dtype="uint32", log=msgs.append)
+    assert len(msgs) == 1 and "clipped 1 px below 0" in msgs[0]
+
+
+def test_a_clean_write_says_nothing(tmp_path):
+    msgs = []
+    FC.write_corrected_h5(tmp_path / "u.h5", [np.array([[1.0, 2.0]], np.float32)],
+                          dtype="uint32", log=msgs.append)
+    assert msgs == []
+
+
 def test_written_file_records_which_raw_frames_each_output_came_from(tmp_path):
     ranges = [(0, 2), (3, 5)]
     out = FC.write_corrected_h5(tmp_path / "o.h5",

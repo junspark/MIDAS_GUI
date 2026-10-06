@@ -177,6 +177,24 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         form.row(("Suffix:", self._suffix_ed), ("ext:", self._ext_ed))
         form.row(("Dataset:", self._out_ds_ed))
 
+        self._dtype_combo = _NoScrollComboBox()
+        for name in FC.OUTPUT_DTYPES:
+            self._dtype_combo.addItem(name, name)
+        self._dtype_combo.setToolTip(
+            "On-disk dtype for the corrected stack.\n\n"
+            "float32 — the default, and what you want in almost every case.\n"
+            "          GSAS-II reads float HDF5 images fine: its HDF5 reader\n"
+            "          has no dtype check at all and its integration casts to\n"
+            "          float anyway.\n"
+            "uint32  — for workflows that hand the data to something\n"
+            "          integer-only. GSAS-II's *TIFF* reader is the usual\n"
+            "          reason: it truncates float32 to int32 on load.\n\n"
+            "The cast happens last, after every correction, so it never\n"
+            "affects the arithmetic. Unsigned output cannot hold negatives,\n"
+            "so values are rounded, then clipped to 0, and the number of\n"
+            "clipped pixels is reported in the progress log — background\n"
+            "subtraction routinely goes negative, and an unreported clip\n"
+            "would be invisible data loss.")
         self._comp_combo = _NoScrollComboBox()
         self._comp_combo.addItem("None", "none")
         self._comp_combo.addItem("gzip", "gzip")
@@ -197,7 +215,10 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         self._shuffle_chk.setToolTip(
             "Byte-transpose each plane before compressing. On float32\n"
             "detector data this groups the near-constant exponent bytes\n"
-            "together and typically buys more than raising the gzip level.")
+            "together and typically buys more than raising the gzip level.\n"
+            "(Less of a win on uint32 output, which has no exponent byte to\n"
+            "group — but still usually worth leaving on.)")
+        form.row(("Output dtype:", self._dtype_combo))
         form.row(("Compression:", self._comp_combo),
                  ("level:", self._comp_level))
         form.full(self._shuffle_chk)
@@ -466,6 +487,7 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             compression=self._comp_combo.currentData(),
             level=self._comp_level.value(),
             shuffle=self._shuffle_chk.isChecked(),
+            out_dtype=self._dtype_combo.currentData() or "float32",
             raw_start=fr_start, raw_end=fr_end)
 
     # ── preview ─────────────────────────────────────────────────────────
@@ -598,6 +620,7 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             "ext_ed": self._ext_ed,
             "out_ds_ed": self._out_ds_ed, "comp_combo": self._comp_combo,
             "comp_level": self._comp_level, "shuffle_chk": self._shuffle_chk,
+            "dtype_combo": self._dtype_combo,
             "auto_dark_chk": self._auto_dark_chk, "dark_ds_ed": self._dark_ds_ed,
             "clip_chk": self._clip_chk,
             **{f"op_{op}": chk for op, chk in self._op_chks.items()},
