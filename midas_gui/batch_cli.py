@@ -99,6 +99,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "rotation), or one for the whole run")
 
     p.add_argument("--multi-azimuth", action="store_true")
+    p.add_argument("--ion-csv-extras", default="",
+                   help="Comma-separated optional column groups for the "
+                        "per-frame beam-monitor CSV: 'env' (ring current, "
+                        "temperature, pressure) and/or 'motors' (sample-stage "
+                        "positions). The CSV itself is always written.")
     p.add_argument("--weighted", dest="weighted", action="store_true", default=True)
     p.add_argument("--no-weighted", dest="weighted", action="store_false")
 
@@ -255,6 +260,7 @@ def main(argv=None) -> int:
         weighted=args.weighted, multi_azimuth=args.multi_azimuth,
         omega_cfg=_omega_cfg(args),
         zarr_grouping=args.zarr_grouping,
+        ion_csv_extras=[g for g in args.ion_csv_extras.split(",") if g],
         im_trans=tuple(spec.TransOpt or ()), calibration_snapshot=calib_snapshot)
 
     exit_code = [0]

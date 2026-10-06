@@ -67,6 +67,10 @@ class RunItem:
     weighted: bool = True
     im_trans: tuple = ()
     multi_azimuth: bool = False
+    #: Optional column groups for the per-frame beam-monitor CSV
+    #: ("env", "motors"). A tuple, not a set, so RunItem stays hashable-ish
+    #: and serialises predictably like every other field here.
+    ion_csv_extras: tuple = ()
     #: Filled in by the tab for the per-sample project write.
     calibration_snapshot: Optional[dict] = None
     extra: dict = field(default_factory=dict)
@@ -156,6 +160,7 @@ class SampleRunScheduler(QtCore.QObject):
                 bright_mode=item.bright_mode, weighted=item.weighted,
                 context=context, im_trans=item.im_trans,
                 multi_azimuth=item.multi_azimuth,
+                ion_csv_extras=item.ion_csv_extras,
                 run_mode="sequential", n_workers=1)
         except Exception:
             self._on_failed(key, traceback.format_exc())

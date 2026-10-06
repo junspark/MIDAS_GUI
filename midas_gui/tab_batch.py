@@ -995,6 +995,16 @@ class BatchTab(QtWidgets.QWidget):
         ``zarr_grouping`` expects, from the combo's item data."""
         return self._zarr_grouping.currentData() or "frame"
 
+    def _ion_csv_extras(self) -> tuple:
+        """Optional beam-monitor CSV column groups, as the tuple
+        ``ion_csv.write_ion_csv`` expects. Collapsed into ONE value rather
+        than a kwarg per checkbox: a new batch option has to be threaded
+        through four independent run constructors (in-process, as-job argv,
+        CLI, queue), so each extra kwarg is paid for four times over."""
+        return tuple(k for k, chk in (("env", self._ion_env_chk),
+                                      ("motors", self._ion_motors_chk))
+                     if chk.isChecked())
+
     # ── GUI state (Save/Load GUI State) ─────────────────────────────
     def _state_widgets(self) -> dict:
         return {
@@ -1021,6 +1031,8 @@ class BatchTab(QtWidgets.QWidget):
             "preview_sum_n": self._preview_sum_n,
             "azim": self._azim,
             "multi_azimuth": self._multi_azimuth_chk,
+            "ion_env_chk": self._ion_env_chk,
+            "ion_motors_chk": self._ion_motors_chk,
             "var_check": self._var_check,
             "err_model": self._err_model,
             "bin_type": self._bin_type,
@@ -1631,6 +1643,36 @@ class BatchTab(QtWidgets.QWidget):
         # silently does nothing is worse than one that says why it can't.
         self._fmt.changed.connect(self._sync_zarr_grouping_enabled)
         self._sync_zarr_grouping_enabled()
+
+        # Per-frame beam-monitor CSV. Always written (it is small, and I0 is
+        # what SAXS normalises against); these only add OPTIONAL columns, so
+        # there is no on/off box to leave in the wrong state. See
+        # midas_gui.ion_csv for why a column with no live data anywhere is
+        # dropped rather than written blank.
+        ion_lbl = QtWidgets.QLabel(
+            "Ion-chamber CSV — written automatically, one row per frame "
+            "(frame, I0, I, transmission). Also include:")
+        ion_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        ion_lbl.setWordWrap(True)
+        out.body.addWidget(ion_lbl)
+        self._ion_env_chk = QtWidgets.QCheckBox("Ring current / T / P")
+        self._ion_env_chk.setToolTip(
+            "Add storage-ring current (mA), temperature and pressure "
+            "columns.\n"
+            "Temperature and Pressure read NaN at 20-ID today — the source "
+            "files carry placeholder PVs — so those columns are dropped "
+            "rather than written as a wall of 'nan'.")
+        self._ion_motors_chk = QtWidgets.QCheckBox("Sample motors")
+        self._ion_motors_chk.setToolTip(
+            "Add one column per sample-stage channel.\n"
+            "E hutch has two coexisting sub-configs (HL/HR) with no reliable "
+            "flag for which is in use; both are read, and the inactive one "
+            "is all-NaN and therefore dropped. The data says which was live.")
+        ion_row = QtWidgets.QHBoxLayout(); ion_row.setSpacing(6)
+        ion_row.addWidget(self._ion_env_chk)
+        ion_row.addWidget(self._ion_motors_chk)
+        ion_row.addStretch(1)
+        out.body.addLayout(ion_row)
         lv.addWidget(out)
 
         # ── Run mode ──
@@ -1978,6 +2020,7 @@ class BatchTab(QtWidgets.QWidget):
             "r_bin": self._r_bin.value(), "e_bin": self._e_bin.value(),
             "multi_azimuth": multi_azimuth,
             "zarr_grouping": self._zarr_grouping_key(),
+            "ion_csv_extras": list(self._ion_csv_extras()),
         }
         self._last_axis_ctx = (lsd, px, wl)
         # Stashed for the Save button, which runs long after this method
@@ -2007,6 +2050,7 @@ class BatchTab(QtWidgets.QWidget):
             weighted=weighted, context=context, im_trans=self._resolved_im_trans(),
             multi_azimuth=multi_azimuth, calibration_snapshot=calib_snapshot,
             zarr_grouping=self._zarr_grouping_key(),
+            ion_csv_extras=self._ion_csv_extras(),
             run_mode=self._run_mode.currentData(), n_workers=self._n_workers.value())
         self._worker.progress.connect(self._on_progress)
         self._worker.frame_done.connect(self._on_frame)
@@ -2148,6 +2192,12 @@ class BatchTab(QtWidgets.QWidget):
         # combo, so an omitted flag would silently fall back to per-frame
         # archives and the two run paths would disagree.
         argv += ["--zarr-grouping", self._zarr_grouping_key()]
+        # Same reasoning again: the job cannot see the checkboxes, so an
+        # omitted flag would quietly drop the optional columns on this path
+        # only, and the two run modes would disagree about the same run.
+        extras = self._ion_csv_extras()
+        if extras:
+            argv += ["--ion-csv-extras", ",".join(extras)]
 
         if self._corr_widget.polar_check.isChecked():
             argv += ["--polarization",

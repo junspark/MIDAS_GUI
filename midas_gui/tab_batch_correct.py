@@ -223,6 +223,36 @@ class BatchCorrectionTab(QtWidgets.QWidget):
                  ("level:", self._comp_level))
         form.full(self._shuffle_chk)
         card.body.addLayout(form)
+
+        # Per-frame beam-monitor CSV, one per SOURCE FILE in the output root.
+        # Always written (the ion chambers are a property of the exposure, so
+        # one copy per combine op would be the same table four times); these
+        # only add optional columns. Same control set as Batch Integrate — see
+        # midas_gui.ion_csv.
+        ion_lbl = QtWidgets.QLabel(
+            "Ion-chamber CSV — written automatically, one row per output "
+            "frame (frame, I0, I, transmission). Also include:")
+        ion_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        ion_lbl.setWordWrap(True)
+        card.body.addWidget(ion_lbl)
+        self._ion_env_chk = QtWidgets.QCheckBox("Ring current / T / P")
+        self._ion_env_chk.setToolTip(
+            "Add storage-ring current (mA), temperature and pressure "
+            "columns.\n"
+            "Temperature and Pressure read NaN at 20-ID today — the source "
+            "files carry placeholder PVs — so those columns are dropped "
+            "rather than written as a wall of 'nan'.")
+        self._ion_motors_chk = QtWidgets.QCheckBox("Sample motors")
+        self._ion_motors_chk.setToolTip(
+            "Add one column per sample-stage channel.\n"
+            "E hutch has two coexisting sub-configs (HL/HR) with no reliable "
+            "flag for which is in use; both are read, and the inactive one "
+            "is all-NaN and therefore dropped. The data says which was live.")
+        ion_row = QtWidgets.QHBoxLayout(); ion_row.setSpacing(6)
+        ion_row.addWidget(self._ion_env_chk)
+        ion_row.addWidget(self._ion_motors_chk)
+        ion_row.addStretch(1)
+        card.body.addLayout(ion_row)
         self._name_lbl = QtWidgets.QLabel("")
         self._name_lbl.setWordWrap(True)
         self._name_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
@@ -488,6 +518,10 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             level=self._comp_level.value(),
             shuffle=self._shuffle_chk.isChecked(),
             out_dtype=self._dtype_combo.currentData() or "float32",
+            ion_csv_extras=tuple(
+                k for k, chk in (("env", self._ion_env_chk),
+                                 ("motors", self._ion_motors_chk))
+                if chk.isChecked()),
             raw_start=fr_start, raw_end=fr_end)
 
     # ── preview ─────────────────────────────────────────────────────────
@@ -621,6 +655,8 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             "out_ds_ed": self._out_ds_ed, "comp_combo": self._comp_combo,
             "comp_level": self._comp_level, "shuffle_chk": self._shuffle_chk,
             "dtype_combo": self._dtype_combo,
+            "ion_env_chk": self._ion_env_chk,
+            "ion_motors_chk": self._ion_motors_chk,
             "auto_dark_chk": self._auto_dark_chk, "dark_ds_ed": self._dark_ds_ed,
             "clip_chk": self._clip_chk,
             **{f"op_{op}": chk for op, chk in self._op_chks.items()},

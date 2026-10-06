@@ -828,6 +828,14 @@ def integrate_attempt_gui_fields(meta: dict) -> dict:
                 "run": "One zarr for the whole run"}.get(inputs.get("zarr_grouping"))
     if zg_label:
         fields["zarr_grouping"] = zg_label
+    # Beam-monitor CSV column groups. Absent in every project saved before
+    # the CSV existed, which correctly leaves both boxes unticked — those
+    # attempts ran with the default columns only.
+    ion_extras = inputs.get("ion_csv_extras")
+    if ion_extras is not None:
+        ion_extras = set(ion_extras)
+        fields["ion_env_chk"] = "env" in ion_extras
+        fields["ion_motors_chk"] = "motors" in ion_extras
     if inputs.get("monitor_file"):
         fields["mon_ed"] = inputs["monitor_file"]
     q_cfg = inputs.get("q_cfg")

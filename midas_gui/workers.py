@@ -18,6 +18,7 @@ from PyQt5 import QtCore
 import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
 from midas_gui import calib
 from midas_gui import h5_metadata
+from midas_gui import ion_csv
 from midas_gui import provenance
 from midas_gui import settings
 from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_spec,
@@ -868,6 +869,7 @@ class BatchCorrectionWorker(QtCore.QThread):
                  clip_negatives: bool = True, compression=None,
                  level: int = 4, shuffle: bool = False,
                  out_dtype: str = "float32",
+                 ion_csv_extras=(),
                  raw_start=None, raw_end=None, parent=None):
         super().__init__(parent)
         self._paths = [Path(p) for p in paths]
@@ -890,6 +892,11 @@ class BatchCorrectionWorker(QtCore.QThread):
         # frame_correct use in this file.
         from midas_gui.frame_correct import OUTPUT_DTYPES
         self._out_dtype = out_dtype if out_dtype in OUTPUT_DTYPES else "float32"
+        # Per-frame beam-monitor sidecar. Always written — it is small, and
+        # the value it carries is the one SAXS normalises against. Only which
+        # OPTIONAL columns it carries is a choice; write_ion_csv already
+        # skips the file entirely when there is no real data behind it.
+        self._ion_csv_extras = set(ion_csv_extras or ())
         self._raw_start, self._raw_end = raw_start, raw_end
         self._cancel = False
 
@@ -991,6 +998,32 @@ class BatchCorrectionWorker(QtCore.QThread):
                 if self._cancel:
                     break
                 aligned = h5_metadata.align(tree, ranges, n_aligned)
+                # One monitor CSV per SOURCE FILE, in the output root rather
+                # than in a dark_subtracted_<op>/ folder: the ion chambers
+                # are a property of the exposure, identical across the four
+                # ops, so one per op would be four copies of one table. Its
+                # frame numbering matches this file's own output stack.
+                try:
+                    rows = ion_csv.rows_from_aligned(
+                        aligned, ion_csv.resolve_hutch(path), len(ranges))
+                    written = ion_csv.write_ion_csv(
+                        self._out_dir / f"{path.stem}.ioncham.csv",
+                        rows, extras=self._ion_csv_extras)
+                    if written:
+                        self.fileDone.emit(written)
+                        outputs.append(written)
+                    else:
+                        self.progress.emit(
+                            done, total,
+                            f"{path.name}: no beam-monitor data to write "
+                            "(unrecognised hutch, or no live channel)")
+                except Exception:
+                    # A sidecar must never cost the user the reduction that
+                    # already succeeded.
+                    self.progress.emit(
+                        done, total,
+                        f"{path.name}: monitor CSV failed — "
+                        + traceback.format_exc(limit=1).strip())
                 for op in self._ops:
                     out = write_corrected_h5(
                         self._out_path(path, op), frames[op],
@@ -1597,7 +1630,8 @@ class BatchWorker(QtCore.QThread):
                  drift_traj=None, parent=None,
                  dark=None, bright=None, background=None, bright_mode="divide",
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
-                 calibration_snapshot=None, zarr_grouping="frame"):
+                 calibration_snapshot=None, zarr_grouping="frame",
+                 ion_csv_extras=()):
         super().__init__(parent)
         # Full calibration (helpers.full_calibration_snapshot), embedded
         # verbatim in cake-mode HDF5 output — see cake_hdf5.write_cake_h5.
@@ -1618,6 +1652,10 @@ class BatchWorker(QtCore.QThread):
         # azimuthal sectors, keeping one profile per (frame, η bin) instead of
         # collapsing to one full-circle profile per frame.
         self._multi_azimuth = bool(multi_azimuth)
+        # Optional column groups for the per-frame beam-monitor CSV
+        # ("env", "motors"). The CSV itself is always written; only its
+        # optional columns are a choice. See midas_gui.ion_csv.
+        self._ion_csv_extras = set(ion_csv_extras or ())
         self._src  = source_cfg
         self._mask = mask
         self._out_dir = Path(out_dir) if out_dir else None
@@ -1935,6 +1973,9 @@ class BatchWorker(QtCore.QThread):
             # is the bug this splits.
             all_frame_idx = []
             all_omegas = []   # degrees, one per processed frame (like frame_ids)
+            # (abs frame index, metadata dict|None) per processed frame, for
+            # the run-level beam-monitor CSV written after the loop.
+            ion_meta: list = []
             # Real engine-collapsed 1-D lineout per frame, multi-azimuth mode
             # only — see cake_hdf5.write_cake_h5's collapsed_profiles/sigmas.
             all_cake_profiles, all_cake_sigmas = [], []
@@ -2112,6 +2153,25 @@ class BatchWorker(QtCore.QThread):
                     all_sigmas.append(sigma)
                 frame_omega = float(omega_of(abs_i))
                 all_omegas.append(frame_omega)
+                # Instrument metadata (temperature/pressure/ion-chamber/
+                # sample-motor positions), when the source can provide it
+                # (HDF5 stacks only — see
+                # _HDF5StackGlobSource.metadata_for_index) — always the mean
+                # across this chunk's raw sub-frames, regardless of the pixel
+                # combine op, and already aligned to the light-frame
+                # timestamps rather than a longer light+dark metadata array.
+                #
+                # Read here rather than inside the zarr branch below: the
+                # beam-monitor CSV is worth having whichever output formats
+                # are ticked, and zarr is not one of the defaults.
+                meta = None
+                get_meta = getattr(source, "metadata_for_index", None)
+                if get_meta is not None:
+                    try:
+                        meta = get_meta(abs_i)
+                    except Exception:
+                        meta = None
+                ion_meta.append((abs_i, meta))
                 if (want_zarr or self._multi_azimuth) and cake_2d is not None:
                     # Feeds the <lo>_<hi> token in the combined HDF5 stem,
                     # which both the plain and the cake writer below use —
@@ -2130,21 +2190,6 @@ class BatchWorker(QtCore.QThread):
                     # _HDF5StackGlobSource._fid).
                     group_key = (zarr_group_key_fn(abs_i)
                                  if zarr_group_key_fn is not None else fid)
-                    # Instrument metadata (temperature/pressure/ion-chamber/
-                    # sample-motor positions), when the source can provide it
-                    # (HDF5 stacks only — see
-                    # _HDF5StackGlobSource.metadata_for_index) — always the
-                    # mean across this chunk's raw sub-frames, regardless of
-                    # the pixel combine op, and already aligned to the
-                    # light-frame timestamps rather than a longer
-                    # light+dark metadata array.
-                    meta = None
-                    get_meta = getattr(source, "metadata_for_index", None)
-                    if get_meta is not None:
-                        try:
-                            meta = get_meta(abs_i)
-                        except Exception:
-                            meta = None
                     # Where this frame came from, so the source file's whole
                     # instrument/ PV snapshot can be copied forward into the
                     # archive (see h5_metadata). HDF5 stacks only — a TIFF
@@ -2240,6 +2285,33 @@ class BatchWorker(QtCore.QThread):
             lo = int(min(all_frame_idx)) if all_frame_idx else 0
             hi = int(max(all_frame_idx)) if all_frame_idx else 0
             combined_stem = f"{out_stem}.{lo:06d}_{hi:06d}.cake"
+
+            # Per-frame beam-monitor CSV. ONE file for the whole run, in the
+            # output root rather than beside an archive: under "frame"
+            # grouping there is one .zarr.zip per frame, so a sidecar per
+            # archive would be a file per row. Its frame column is the run's
+            # own 0-based processed index, matching all_profiles.
+            if self._out_dir is not None and ion_meta:
+                try:
+                    i_lo = int(min(i for i, _m in ion_meta))
+                    i_hi = int(max(i for i, _m in ion_meta))
+                    written = ion_csv.write_ion_csv(
+                        self._out_dir / f"{out_stem}.{i_lo:06d}_{i_hi:06d}"
+                                        ".ioncham.csv",
+                        ion_csv.rows_from_metas([m for _i, m in ion_meta]),
+                        extras=self._ion_csv_extras)
+                    if written:
+                        out_paths.append(written)
+                        self.log_line.emit(f"[batch] beam monitors: {written}")
+                    else:
+                        self.log_line.emit(
+                            "[batch] no beam-monitor data for this source "
+                            "(unrecognised hutch, or no live channel) — "
+                            "no monitor CSV written")
+                except Exception:
+                    # Never cost the user a finished run over a sidecar.
+                    self.log_line.emit("[batch] monitor CSV failed:\n"
+                                       + traceback.format_exc())
 
             prov_entry = provenance.build_entry(
                 'midas_gui.batch_integrate',
@@ -2675,41 +2747,13 @@ class _HDF5StackGlobSource:
     #: schema carries — fixed regardless of ``dataset`` (the cake-source
     #: dataset the user picked), since these live under the file's
     #: ``instrument/`` group, not under ``exchange/``.
-    _METADATA_H5_PATHS = {
-        "temperature": "instrument/GSAS2_PVS/Temperature",
-        "pressure": "instrument/GSAS2_PVS/Pressure",
-        "current": "instrument/StorageRing/SRCurrent",  # storage-ring current (mA) —
-        # NOT a beam monitor; see ion_chamber_i0/i below for the real thing.
-    }
-
-    #: Real beam-monitor ion chambers, by hutch — stopgap mapping, from the
-    #: beamline's own confirmation (cross-checked against
-    #: ~/mnt/s1b/bluesky_dev/mpe_xml/20ide_instr_attributes_trans.xml) rather
-    #: than the HDF5 file's own ``active_instrument`` (documented upstream as
-    #: currently always empty, so it can't be used to pick a hutch). D hutch
-    #: has no transmission monitor yet, hence no "i" entry there. E hutch's
-    #: "i" is itself setup-dependent (a pin diode, "D2PD", when present; a
-    #: dedicated SAXS ion chamber doesn't exist yet) — ``_read_metadata``'s
-    #: existing "path declared but absent in this file" handling already
-    #: degrades that to None gracefully, which doubles as the auto-detect.
-    #: Station A is deliberately excluded: no sample sits in its beam path,
-    #: so its scalers (however I0/I1-suggestive their names) aren't a
-    #: per-sample monitor pair.
-    _ION_CHAMBER_H5_PATHS = {
-        "D": {"ion_chamber_i0": "instrument/Scalers/D/IC2"},
-        "E": {"ion_chamber_i0": "instrument/Scalers/E/US_IC",
-              "ion_chamber_i": "instrument/Scalers/E/D2PD"},
-    }
-
-    #: Sample-motion-system motor groups, by hutch. E hutch has two
-    #: coexisting sub-configs (HL/HR) with no reliable way to tell which is
-    #: physically in use for a given file (same active_instrument gap, one
-    #: level down) — captured both rather than guessing; see
-    #: ``_read_sample_motors``.
-    _SAMPLE_MOTOR_H5_GROUPS = {
-        "D": ["instrument/SMS/D/HR"],
-        "E": ["instrument/SMS/E/HL", "instrument/SMS/E/HR"],
-    }
+    #: Per-frame instrument metadata, by hutch. The tables themselves live in
+    #: :mod:`midas_gui.ion_csv`, which the Batch Correction path also reads
+    #: them from — one mapping rather than two that can drift. Kept as class
+    #: attributes so existing references (and tests) still resolve.
+    _METADATA_H5_PATHS = ion_csv.METADATA_H5_PATHS
+    _ION_CHAMBER_H5_PATHS = ion_csv.ION_CHAMBER_H5_PATHS
+    _SAMPLE_MOTOR_H5_GROUPS = ion_csv.SAMPLE_MOTOR_H5_GROUPS
 
     def __init__(self, paths, dataset: str, *, chunk_size=None, op: str = "mean",
                  raw_start=None, raw_end=None):
@@ -2733,29 +2777,15 @@ class _HDF5StackGlobSource:
         self._hutch = self._resolve_hutch()
 
     def _resolve_hutch(self) -> Optional[str]:
-        """Stopgap hutch detection: the HDF5 file's own ``active_instrument``
-        is documented as always empty upstream (no reliable per-file signal),
-        so infer it from the source path instead — ``varexE``/``varexD`` in
-        the folder name, case-insensitive, checked against the first
-        selected path. ``None`` (unrecognized layout) means every
-        ion-chamber/sample-motor field below is simply skipped, same as any
-        other "not available for this source" case."""
-        if not self._paths:
-            return None
-        text = str(self._paths[0]).lower()
-        if "varexe" in text:
-            return "E"
-        if "varexd" in text:
-            return "D"
-        return None
+        """This source's hutch, from the first selected path — see
+        :func:`midas_gui.ion_csv.resolve_hutch` for why it is path-based."""
+        return ion_csv.resolve_hutch(self._paths[0] if self._paths else None)
 
     def _metadata_h5_paths(self) -> dict:
         """Flat ``{key: h5_path}`` table for this source's hutch: the fixed
         temperature/pressure/current entries plus whichever ion-chamber
         entries apply (none, for an unrecognized hutch)."""
-        paths = dict(self._METADATA_H5_PATHS)
-        paths.update(self._ION_CHAMBER_H5_PATHS.get(self._hutch, {}))
-        return paths
+        return ion_csv.metadata_h5_paths(self._hutch)
 
     def _raw_bounds(self, n: int) -> tuple:
         """0-based inclusive ``(lo, hi)`` raw sub-frame bounds within a file
@@ -3519,7 +3549,8 @@ class BatchRunCoordinator(QtCore.QObject):
                  dark=None, bright=None, background=None, bright_mode="divide",
                  weighted=True, context=None, im_trans=(), multi_azimuth=False,
                  run_mode="sequential", n_workers=1, parent=None,
-                 calibration_snapshot=None, zarr_grouping="frame"):
+                 calibration_snapshot=None, zarr_grouping="frame",
+                 ion_csv_extras=()):
         super().__init__(parent)
         self._args = dict(
             spec=spec, source_cfg=source_cfg, mask=mask, out_dir=out_dir, fmts=fmts,
@@ -3529,7 +3560,7 @@ class BatchRunCoordinator(QtCore.QObject):
             drift_traj=drift_traj, dark=dark, bright=bright, background=background,
             bright_mode=bright_mode, weighted=weighted, im_trans=im_trans,
             multi_azimuth=multi_azimuth, calibration_snapshot=calibration_snapshot,
-            zarr_grouping=zarr_grouping)
+            zarr_grouping=zarr_grouping, ion_csv_extras=ion_csv_extras)
         self._context = context
         self._run_mode = run_mode if run_mode == "batch_parallel" else "sequential"
         self._n_workers_requested = max(1, int(n_workers))
