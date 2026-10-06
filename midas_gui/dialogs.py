@@ -231,10 +231,29 @@ class ManualSeedDialog(QtWidgets.QDialog):
     per-panel seed dialog) add a "Distortion" row whose values live behind
     ``dist_btn``'s own dialog rather than inline, since 15 coefficients
     don't fit this grid.
+
+    ``refine_boxes`` (optional) maps a row key — "BC"/"Lsd"/"tx"/"ty"/"tz"/
+    "Distortion" — to the caller's *Refine* checkbox for that parameter.
+    Given them, each row gains a live label saying what the fit will actually
+    do with it. Seeding and refining are independent choices and all four
+    pairings mean something different, so the two panels showing different
+    ticks is correct — but it reads as a contradiction without this.
     """
 
+    #: (refined?, seeded?) -> what the fit does with the parameter. Phrased
+    #: as an outcome rather than echoing the tick, because the pairing is the
+    #: part that is not obvious: seeding a parameter you are NOT refining is
+    #: how you pin it to a measured value, which is a real calibration move
+    #: and the reason these two panels are not simply wired together.
+    _OUTCOME = {
+        (True, True): "refined, from this value",
+        (True, False): "refined, auto-seeded",
+        (False, True): "held at this value",
+        (False, False): "held at default",
+    }
+
     def __init__(self, *, en_bc, bcy, bcz, en_lsd, lsd, en_tx, tx, en_ty, ty,
-                en_tz, tz, en_dist=None, dist_btn=None,
+                en_tz, tz, en_dist=None, dist_btn=None, refine_boxes=None,
                 feedback_check=None, note=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Manual seed")
@@ -250,27 +269,58 @@ class ManualSeedDialog(QtWidgets.QDialog):
         info.setWordWrap(True)
         info.setStyleSheet("color:#bbb;font-size:11px;padding-bottom:6px;")
         layout.addWidget(info)
+        self._refine_boxes: dict = {}
+        self._status_lbls: dict = {}
+        self._seed_boxes: dict = {}
+        # Written by set_refine_boxes, which the caller can only call once
+        # its Refine card exists — in tab_calibrate that is built after this
+        # dialog, so the rows are laid out now and wired up later.
+        self._refine_hint = QtWidgets.QLabel(
+            "Seeding and refining are separate choices. Ticking a parameter "
+            "here only says where the fit STARTS; whether it is then free to "
+            "move is the Refine parameters card. Seeding something you are "
+            "not refining is how you pin it to a measured value.")
+        self._refine_hint.setWordWrap(True)
+        self._refine_hint.setStyleSheet(
+            "color:#888;font-size:10px;padding-bottom:6px;")
+        self._refine_hint.setVisible(False)
+        layout.addWidget(self._refine_hint)
 
         grid = QtWidgets.QGridLayout(); grid.setSpacing(6)
+
+        def status(key, en, row):
+            """Reserve this row's "what the fit will do" label. It stays
+            empty, and costs nothing, until set_refine_boxes fills it."""
+            lbl = QtWidgets.QLabel("")
+            grid.addWidget(lbl, row, 5)
+            self._status_lbls[key] = lbl
+            self._seed_boxes[key] = en
+            en.toggled.connect(self._sync_status)
+
         r = 0
         grid.addWidget(en_bc, r, 0)
         grid.addWidget(QtWidgets.QLabel("BC_y:"), r, 1); grid.addWidget(bcy, r, 2)
         grid.addWidget(QtWidgets.QLabel("BC_z:"), r, 3); grid.addWidget(bcz, r, 4)
+        status("BC", en_bc, r)
         r += 1
         grid.addWidget(en_lsd, r, 0)
         grid.addWidget(QtWidgets.QLabel("Lsd:"), r, 1); grid.addWidget(lsd, r, 2)
+        status("Lsd", en_lsd, r)
         r += 1
         for en, w, label in ((en_tx, tx, "tx:"), (en_ty, ty, "ty:"), (en_tz, tz, "tz:")):
             grid.addWidget(en, r, 0)
             grid.addWidget(QtWidgets.QLabel(label), r, 1); grid.addWidget(w, r, 2)
+            status(label.rstrip(":"), en, r)
             r += 1
         if en_dist is not None:
             grid.addWidget(en_dist, r, 0)
             grid.addWidget(QtWidgets.QLabel("Distortion:"), r, 1)
             if dist_btn is not None:
                 grid.addWidget(dist_btn, r, 2)
+            status("Distortion", en_dist, r)
             r += 1
         layout.addLayout(grid)
+        self._sync_status()
 
         if feedback_check is not None:
             layout.addWidget(feedback_check)
@@ -283,6 +333,34 @@ class ManualSeedDialog(QtWidgets.QDialog):
         if close_btn is not None:
             close_btn.clicked.connect(self.close)
         layout.addWidget(btns)
+
+    def set_refine_boxes(self, boxes: dict) -> None:
+        """Attach the caller's Refine checkboxes, keyed as in ``_OUTCOME``'s
+        rows. Separate from ``__init__`` because a caller may build this
+        dialog before its Refine card exists."""
+        self._refine_boxes = {k: v for k, v in (boxes or {}).items()
+                              if k in self._status_lbls}
+        self._refine_hint.setVisible(bool(self._refine_boxes))
+        for box in self._refine_boxes.values():
+            box.toggled.connect(self._sync_status)
+        self._sync_status()
+
+    def _sync_status(self, *_args):
+        """Repaint every row's outcome from the live Refine and seed ticks."""
+        for key, lbl in self._status_lbls.items():
+            if key not in self._refine_boxes:
+                continue
+            refined = self._refine_boxes[key].isChecked()
+            seeded = self._seed_boxes[key].isChecked()
+            lbl.setText(self._OUTCOME[(refined, seeded)])
+            lbl.setStyleSheet(
+                "font-size:10px;color:" + ("#d7861f" if refined else "#8a8a8a"))
+
+    def showEvent(self, event):
+        """The Refine card stays editable while this non-modal dialog is
+        closed, so refresh on every open rather than only at construction."""
+        self._sync_status()
+        super().showEvent(event)
 
 
 #: Limit rows: slot name → (label, default unit, default window,

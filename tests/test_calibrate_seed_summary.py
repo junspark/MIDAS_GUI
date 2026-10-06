@@ -157,3 +157,54 @@ def test_the_three_tilt_boxes_are_the_same_width(tab):
     """tx is the same two-decimal degree field as ty and tz; only ty/tz were
     being narrowed, so tx rendered wider than its own siblings."""
     assert len({w.maximumWidth() for w in tab._seed_tilts}) == 1
+
+
+# ── the seed dialog must reflect the Refine selection ────────────────────────
+#
+# Reported as "manual seed does not reflect the actual refine parameters
+# selection below". The two are NOT wired together on purpose: seeding a
+# parameter you are not refining is how you pin it to a measured value. So
+# each row states the OUTCOME of the pairing instead.
+
+def _status(tab):
+    return {k: l.text() for k, l in tab._seed_dialog._status_lbls.items()}
+
+
+def test_every_seed_row_says_what_the_fit_will_do(tab):
+    assert set(_status(tab)) == {"BC", "Lsd", "tx", "ty", "tz", "Distortion"}
+
+
+def test_refined_but_unseeded_reads_as_auto_seeded(tab):
+    tab._ref_lsd.setChecked(True)
+    tab._seed_en_lsd.setChecked(False)
+    assert _status(tab)["Lsd"] == "refined, auto-seeded"
+
+
+def test_refined_and_seeded_reads_as_starting_from_the_value(tab):
+    tab._ref_lsd.setChecked(True)
+    tab._seed_en_lsd.setChecked(True)
+    assert _status(tab)["Lsd"] == "refined, from this value"
+
+
+def test_seeded_but_not_refined_reads_as_pinned(tab):
+    """The combination that looked like a contradiction: the seed dialog
+    shows tx ticked while the Refine card calls tx fixed. Both are right —
+    it means hold tx at this value."""
+    tab._ref_tx.setChecked(False)
+    tab._seed_en_tx.setChecked(True)
+    assert _status(tab)["tx"] == "held at this value"
+
+
+def test_neither_reads_as_held_at_default(tab):
+    tab._ref_tx.setChecked(False)
+    tab._seed_en_tx.setChecked(False)
+    assert _status(tab)["tx"] == "held at default"
+
+
+def test_the_labels_follow_the_refine_card_live(tab):
+    """The Refine card stays editable while this non-modal dialog is open."""
+    tab._seed_en_ty.setChecked(True)
+    tab._ref_ty.setChecked(True)
+    assert _status(tab)["ty"] == "refined, from this value"
+    tab._ref_ty.setChecked(False)
+    assert _status(tab)["ty"] == "held at this value"

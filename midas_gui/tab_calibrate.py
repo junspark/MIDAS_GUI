@@ -643,6 +643,15 @@ class CalibrationTab(QtWidgets.QWidget):
         for w in (self._ref_lsd, self._ref_bc, self._ref_ty, self._ref_tz,
                   self._ref_tx, self._ref_wl):
             w.toggled.connect(self._on_refine_flags_changed)
+        # Let each Manual seed row say what the fit will actually do with
+        # that parameter. The two panels are deliberately NOT wired together
+        # — seeding something you are not refining is how you pin it to a
+        # measured value — but without this they only look like they
+        # disagree. Done here because this card is built after the dialog.
+        self._seed_dialog.set_refine_boxes(
+            {"BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
+             "ty": self._ref_ty, "tz": self._ref_tz,
+             "Distortion": self._ref_dist})
 
         # One row per parameter: the "refine?" checkbox on the left, and on the
         # right the ± window that bounds it — the two decisions about the same
