@@ -1192,15 +1192,33 @@ class DetectorGeometryCard(QtWidgets.QWidget):
 
     # ── Beam-centre picking / radial integration ──────────────────
 
+    def _set_bc(self, bc_y, bc_z):
+        """Move the beam centre to (bc_y, bc_z) as ONE change.
+
+        Setting the two spins separately fires valueChanged twice, so every
+        pick cost two full passes of _on_bc_changed -- and downstream, in
+        Hydra, two rebuilds of a 44-megapixel four-panel composite on the GUI
+        thread. The first of those ran at a geometry nobody asked for: the new
+        bc_y paired with the OLD bc_z. So this is not only half the work, it
+        drops a rebuild at a beam centre that never existed.
+        """
+        self._bcy.blockSignals(True); self._bcz.blockSignals(True)
+        try:
+            self._bcy.setValue(bc_y)
+            self._bcz.setValue(bc_z)
+        finally:
+            self._bcy.blockSignals(False); self._bcz.blockSignals(False)
+        self._on_bc_changed()
+
     def _on_bc_picked(self, bc_y, bc_z):
         """Single-click BC pick from the image (PickableImageViewer)."""
         self._bc_auto.setChecked(False)
-        self._bcy.setValue(bc_y); self._bcz.setValue(bc_z)   # triggers _on_bc_changed
+        self._set_bc(bc_y, bc_z)
 
     def _on_ring_fit_bc(self, bc_y, bc_z, r_px):
         """BC from a 3+ point circle fit on a ring (PickableImageViewer)."""
         self._bc_auto.setChecked(False)
-        self._bcy.setValue(bc_y); self._bcz.setValue(bc_z)   # triggers _on_bc_changed
+        self._set_bc(bc_y, bc_z)
 
     def _on_bc_changed(self, *_):
         """Beam centre (or a tilt) edited manually or by a pick — refresh
