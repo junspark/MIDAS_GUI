@@ -187,3 +187,41 @@ def test_state_without_panels_leaves_the_selection_alone(loader, tmp_path):
     loader._set_path(_make_panels(tmp_path))
     loader.set_state({"fr_start": 0})
     assert sorted(loader._selected_siblings()) == [1, 2, 3, 4]
+
+
+# ── the selection has to reach what actually runs ───────────────────────
+
+def test_the_accessor_agrees_with_the_signal(loader, tmp_path):
+    """Reported at the beamline: "I have only 1x GE panels selected in the
+    Hydra Data panel but I see that the four panels are all getting
+    refined."
+
+    The selection filtered ``siblingsChanged`` but not ``siblings()``, and
+    every page reads its panel list back through the accessor -- the
+    calibration run loop builds its queue from ``self._loader.siblings()``.
+    So the toolbar updated, the selection looked applied, and all four
+    panels were still fitted. Two routes to the same question must not give
+    two answers.
+    """
+    seen = _emissions(loader)
+    loader._set_path(_make_panels(tmp_path))
+    for n in (2, 3, 4):
+        loader._status_lbls[n].setChecked(False)
+    assert sorted(loader.siblings()) == [1]
+    assert sorted(loader.siblings()) == seen[-1], \
+        "siblings() and siblingsChanged disagree about the active panels"
+
+
+def test_the_found_set_is_still_reachable_for_reporting(loader, tmp_path):
+    """Narrowing the accessor must not lose the information the info line
+    and any "3 of 4" message need."""
+    loader._set_path(_make_panels(tmp_path))
+    loader._status_lbls[3].setChecked(False)
+    assert sorted(loader.found_siblings()) == [1, 2, 3, 4]
+    assert sorted(loader.siblings()) == [1, 2, 4]
+
+
+def test_a_panel_with_no_file_is_in_neither(loader, tmp_path):
+    loader._set_path(_make_panels(tmp_path, panels=(1, 2, 4)))
+    assert 3 not in loader.siblings()
+    assert 3 not in loader.found_siblings()

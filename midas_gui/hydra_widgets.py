@@ -967,6 +967,22 @@ class HydraLoaderPanel(QtWidgets.QWidget):
 
     # ── Public accessors ─────────────────────────────────────────
     def siblings(self) -> dict:
+        """The panels that make up the array: found on disk AND ticked.
+
+        This is the SELECTED set, matching what ``siblingsChanged`` emits.
+        It returned the full found set until a run with one panel ticked
+        calibrated all four anyway -- the selection filtered the signal (so
+        the toolbar updated and it looked applied) while every page read
+        its panel list back through this accessor and got all four. Both
+        routes have to mean the same thing or the selection is decorative.
+
+        ``found_siblings`` is the unfiltered set, for reporting only.
+        """
+        return self._selected_siblings()
+
+    def found_siblings(self) -> dict:
+        """Every panel discovered beside the anchor path, ticked or not --
+        for saying "3 of 4 selected", never for deciding what to process."""
         return dict(self._siblings)
 
     def n_frames(self) -> int:
