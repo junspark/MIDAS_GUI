@@ -2735,7 +2735,7 @@ do not distinguish them.
 | Control | Meaning |
 |---|---|
 | Output directory | Where the corrected files are written — **Suggest** fills in the convention above |
-| Suffix / ext | The output filename tail. Default `.dark_subtracted` + `.hdf` gives `run_009243.vrx.h5` → `run_009243.dark_subtracted.hdf`. The method is in the *folder*, not the name; it is also recorded inside each file as `midas_gui_combine_op`. A preview under the card shows the real name and frame count for the first input file |
+| Suffix / ext | The output filename tail, default `_cor` + `.h5`. Only the **final** extension is replaced, so a detector tag survives: `AgBeH_10s_000021.h5` → `AgBeH_10s_000021_cor.h5`, and `CeO2_030319.vrx.h5` → `CeO2_030319.vrx_cor.h5`. The method is in the *folder*, not the name; it is also recorded inside each file as `midas_gui_combine_op`. Both fields are **saved with the project**, so an older project keeps the tail it was saved with — clear a field to fall back to the default, which the placeholder shows. A preview under the card shows the real name and frame count for the first input file |
 | Dataset | HDF5 path of the `(M, H, W)` float32 stack. Left at `exchange/data`, the output loads straight back into any tab of this GUI |
 | Compression | `None` (fastest, the right default for a scratch reduction), `gzip` (smallest, slowest) or `lzf` (in between) |
 | level | gzip only — higher is smaller and slower |

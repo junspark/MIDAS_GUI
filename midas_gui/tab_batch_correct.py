@@ -164,10 +164,21 @@ class BatchCorrectionTab(QtWidgets.QWidget):
 
         form = S.Form()
         self._suffix_ed = QtWidgets.QLineEdit(CORRECTION_SUFFIX)
+        # Placeholder, not just a default value: these two fields are saved
+        # into a project, so an old project keeps pinning whatever tail it
+        # was saved with long after the shipped default moves. Showing the
+        # default in an emptied field is what makes that recoverable
+        # without guessing.
+        self._suffix_ed.setPlaceholderText(CORRECTION_SUFFIX)
         self._suffix_ed.setToolTip(
-            "Appended to each source file's name stem, before the extension.\n"
-            "run_009243.vrx.h5  →  run_009243.dark_subtracted.hdf")
+            "Appended to the source name, before the extension. Only the\n"
+            "final extension is replaced, so a detector tag is kept:\n\n"
+            "  AgBeH_10s_000021.h5   →  AgBeH_10s_000021_cor.h5\n"
+            "  CeO2_030319.vrx.h5    →  CeO2_030319.vrx_cor.h5\n\n"
+            "Saved with the project, so an older project keeps its own\n"
+            "tail — clear the field to fall back to the default shown.")
         self._ext_ed = QtWidgets.QLineEdit(CORRECTION_EXT)
+        self._ext_ed.setPlaceholderText(CORRECTION_EXT)
         self._ext_ed.setFixedWidth(64)
         self._ext_ed.setToolTip(
             "Output file extension. .hdf, .h5, .hdf5 and .nxs are all\n"
@@ -407,11 +418,12 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         """Mirror of ``BatchCorrectionWorker._out_path``'s naming, for the
         preview label. Kept trivial on purpose; the worker remains the one
         that actually names the file."""
-        base = src.name.split(".")[0]
+        base = src.stem          # keeps any detector tag — see _out_path
         ext = self._ext_ed.text().strip() or CORRECTION_EXT
         if not ext.startswith("."):
             ext = "." + ext
-        return f"{base}{self._suffix_ed.text().strip()}{ext}"
+        suffix = self._suffix_ed.text().strip() or CORRECTION_SUFFIX
+        return f"{base}{suffix}{ext}"
 
     def _apply_suggested_output_dir(self):
         suggested = self._suggest_output_dir()
@@ -510,7 +522,7 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             dataset=self._loader._dataset(), chunk_size=chunk,
             op=self._selected_ops(),
             out_dataset=self._out_ds_ed.text().strip() or "exchange/data",
-            suffix=self._suffix_ed.text().strip(),
+            suffix=(self._suffix_ed.text().strip() or CORRECTION_SUFFIX),
             out_ext=self._ext_ed.text().strip() or CORRECTION_EXT,
             dark=self._loader.dark(), bright=self._loader.bright(),
             background=self._loader.background(),

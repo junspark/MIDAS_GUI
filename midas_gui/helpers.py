@@ -536,7 +536,7 @@ def correction_subdir(op: str) -> str:
 #: ``.hdf5`` is in ``H5_EXTS``, so the result loads straight back into any tab.
 #: Both are editable per run; these are only the defaults.
 CORRECTION_SUFFIX = "_cor"
-CORRECTION_EXT = ".hdf5"
+CORRECTION_EXT = ".h5"
 
 
 def suggest_correction_output_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:

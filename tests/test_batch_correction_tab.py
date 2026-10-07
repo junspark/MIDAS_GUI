@@ -81,18 +81,50 @@ def test_one_output_file_per_input_file(app, inputs, tmp_path):
     assert len(got["outputs"]) == 2
 
 
-def test_output_name_keeps_the_stem_and_drops_the_detector_tag(app, inputs, tmp_path):
-    """``Path.stem`` strips only the LAST suffix, so a naive stem would give
-    ``scan_000010.vrx.dark_subtracted.hdf`` — carrying a detector tag that no
-    longer describes the file."""
+def test_output_name_keeps_the_detector_tag(app, inputs, tmp_path):
+    """Only the final extension is replaced. A detector tag is part of the
+    source's identity — it is how one froot's VAREX and Eiger reductions
+    stay apart — so it survives into the output name."""
     import pathlib
     from midas_gui.helpers import CORRECTION_SUFFIX, CORRECTION_EXT
     got = _run_worker(inputs, tmp_path / "out", app)
     names = sorted(pathlib.Path(p).name for p in got["outputs"])
     tail = f"{CORRECTION_SUFFIX}{CORRECTION_EXT}"
-    assert names == [f"scan_000010{tail}", f"scan_000011{tail}"]
+    assert names == [f"scan_000010.vrx{tail}", f"scan_000011.vrx{tail}"]
     assert all(pathlib.Path(p).parent.name == "dark_subtracted_mean"
                for p in got["outputs"])
+
+
+def test_an_emptied_suffix_falls_back_to_the_default(tab, inputs):
+    """Both fields are saved into a project, so an old project pins a stale
+    tail after the shipped default moves. Clearing the field has to be a
+    way out, which means empty must mean "the default" and not "no
+    suffix" — otherwise the output would take its source's exact name."""
+    from midas_gui.helpers import CORRECTION_SUFFIX, CORRECTION_EXT
+    tab._loader._set_explicit_paths([str(p) for p in inputs])
+    tab._suffix_ed.clear()
+    tab._ext_ed.clear()
+    assert tab._out_name(inputs[0]).endswith(
+        f"{CORRECTION_SUFFIX}{CORRECTION_EXT}")
+    assert tab._worker_kwargs(inputs)["suffix"] == CORRECTION_SUFFIX
+    assert tab._out_name(inputs[0]) != inputs[0].name
+
+
+def test_the_fields_show_their_default_as_a_placeholder(tab):
+    from midas_gui.helpers import CORRECTION_SUFFIX, CORRECTION_EXT
+    assert tab._suffix_ed.placeholderText() == CORRECTION_SUFFIX
+    assert tab._ext_ed.placeholderText() == CORRECTION_EXT
+
+
+def test_a_source_with_no_detector_tag_gains_nothing(app, tmp_path):
+    """Not every source carries one — AgBeH_10s_000021.h5 has none — so the
+    rule must preserve whatever is there rather than assume a shape."""
+    import pathlib
+    from midas_gui.helpers import CORRECTION_SUFFIX, CORRECTION_EXT
+    src = _make_file(tmp_path / "scan" / "AgBeH_10s_000021.h5")
+    got = _run_worker([src], tmp_path / "out", app)
+    assert pathlib.Path(got["outputs"][0]).name == \
+        f"AgBeH_10s_000021{CORRECTION_SUFFIX}{CORRECTION_EXT}"
 
 
 def test_custom_suffix_and_extension_are_honoured(app, inputs, tmp_path):

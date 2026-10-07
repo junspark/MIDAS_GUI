@@ -971,21 +971,30 @@ class BatchCorrectionWorker(QtCore.QThread):
 
     def _out_path(self, src: Path, op: str) -> Path:
         """``<out_dir>/dark_subtracted_<op>/<source stem><suffix><ext>`` —
-        ``dark_subtracted_mean/run_009243.dark_subtracted.hdf`` by default.
+        ``dark_subtracted_mean/AgBeH_10s_000021_cor.h5`` by default.
 
         The op is in the FOLDER rather than the filename so a mean and a max
         of the same scan can't land on top of each other, while each file's
         own name still matches its source. Which op produced a given file is
         also recorded inside it, as the ``midas_gui_combine_op`` attribute.
 
-        ``Path.stem`` only strips the LAST suffix, so ``run_009243.vrx.h5``
-        would stem to ``run_009243.vrx`` and the output would read
-        ``run_009243.vrx.dark_subtracted.hdf``, carrying a detector tag that
-        no longer describes the file. Split the whole dotted tail off
-        instead, the same way ``frame_correct.split_scan_name`` does.
+        The stem keeps EVERYTHING before the final extension — the detector
+        tag included::
+
+            AgBeH_10s_000021.h5        ->  AgBeH_10s_000021_cor.h5
+            CeO2_030319.vrx.h5         ->  CeO2_030319.vrx_cor.h5
+            testing100_000009.eiger2.h5 -> testing100_000009.eiger2_cor.h5
+
+        An earlier rule split the whole dotted tail off, on the reasoning
+        that a detector tag no longer describes a derived file. That was
+        wrong in practice: the tag is how one froot's VAREX and Eiger
+        reductions stay apart, and a beamline reading the output folder
+        expects the source name back. Not every source carries a tag
+        (``AgBeH_10s_000021.h5`` has none), which is exactly why the rule
+        has to preserve whatever is there rather than assume a shape.
         """
         from midas_gui.helpers import correction_subdir
-        base = src.name.split(".")[0]
+        base = src.stem
         return (self._out_dir / correction_subdir(op)
                 / f"{base}{self._suffix}{self._out_ext}")
 
