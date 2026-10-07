@@ -254,3 +254,157 @@ def create_live_source(backend, parent=None):
     if (backend or "pva").strip().lower() == "ca":
         return CaLiveSource(parent)
     return PvaLiveSource(parent)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Hydra: several panels streaming at once
+# ─────────────────────────────────────────────────────────────────────────────
+
+def hydra_pv_for_panel(pattern: str, n: int) -> str:
+    """``pattern`` with every ``geN`` token rewritten to ``ge<n>``.
+
+    The same substitution :func:`helpers.hydra_siblings` does on file paths,
+    applied to PV names -- these detectors are named the same way in both
+    places, so one pattern describes all four channels and the user types
+    it once. A pattern with no ``geN`` token comes back unchanged, which is
+    the "every panel is on one PV" case and is handled by the caller.
+    """
+    from midas_gui.helpers import _HYDRA_PANEL_RE
+    return _HYDRA_PANEL_RE.sub(f"ge{int(n)}", pattern)
+
+
+class HydraLiveMux(QtCore.QObject):
+    """Several :class:`PvaLiveSource`/:class:`CaLiveSource` as one stream.
+
+    Hydra needs 2-4 detectors live at once, and its consumers want a
+    ``{panel: image}`` set per frame rather than one image. This owns one
+    ordinary single-panel source per panel -- ``create_live_source``
+    unchanged -- and does three things on top, all of which exist to keep
+    the GUI responsive with four detectors running:
+
+    1. **Arrival rate is decoupled from paint rate.** A frame arriving only
+       updates a latest-frame map; a single repaint timer emits
+       ``framesReady``. N panels therefore cost ONE repaint per tick, not
+       N, and a detector running faster than the display cannot drive the
+       event loop.
+    2. **Never queue, always replace.** Only the newest frame per panel is
+       kept. A GUI that falls behind drops frames instead of accumulating a
+       backlog it can never clear -- for a live view, the newest frame is
+       the only one anybody wants.
+    3. **Emit a matched set when one exists, but never stall.** Panels are
+       not in step, so a set is held back until every live panel reports
+       the same ``image_id``. If that has not happened within
+       ``sync_timeout_ms``, whatever is held goes out anyway and
+       ``framesReady`` reports which panels were missing -- one dead panel
+       must not freeze the other three.
+
+    Sources are deliberately UNPARENTED and stopped in :meth:`stop`: a
+    QObject child is destroyed by Qt's parent-owns-children cascade the
+    moment its parent is, and for a live source mid-callback that is a
+    crash rather than an exception. See ``DataLoaderPanel._start_preview_worker``.
+    """
+
+    #: ``{panel: image}``, the frame id they share (or ``None`` when the set
+    #: went out on the staleness timeout), and the panels that were missing.
+    framesReady = QtCore.pyqtSignal(dict, object, list)
+    #: panel, connected
+    connectionChanged = QtCore.pyqtSignal(int, bool)
+    #: panel, message
+    error = QtCore.pyqtSignal(int, str)
+
+    def __init__(self, parent=None, *, max_fps: float = 10.0,
+                 sync_timeout_ms: int = 2000):
+        super().__init__(parent)
+        self._sources: dict = {}        # panel -> live source
+        self._latest: dict = {}         # panel -> (image, image_id)
+        self._dirty = False
+        self._sync_timeout_ms = int(sync_timeout_ms)
+        self._waiting_since = None      # monotonic ms when the set went partial
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(max(20, int(1000.0 / max(0.5, float(max_fps)))))
+        self._timer.timeout.connect(self._tick)
+
+    # ── lifecycle ───────────────────────────────────────────────────────
+    def start(self, pv_by_panel: dict, backend: str = "pva") -> dict:
+        """Open one channel per panel. Returns ``{panel: started?}``."""
+        self.stop()
+        results = {}
+        for n, pv in sorted(pv_by_panel.items()):
+            src = create_live_source(backend)        # unparented, on purpose
+            src.frameReady.connect(
+                lambda img, fid, n=n: self._on_frame(n, img, fid))
+            src.connectionChanged.connect(
+                lambda ok, n=n: self.connectionChanged.emit(n, bool(ok)))
+            src.error.connect(lambda msg, n=n: self.error.emit(n, str(msg)))
+            try:
+                ok = bool(src.start(pv))
+            except Exception as exc:                 # a bad PV must not take
+                self.error.emit(n, str(exc))         # the other panels down
+                ok = False
+            results[n] = ok
+            if ok:
+                self._sources[n] = src
+        if self._sources:
+            self._timer.start()
+        return results
+
+    def stop(self):
+        self._timer.stop()
+        for src in self._sources.values():
+            try:
+                src.stop()
+            except Exception:
+                pass
+        self._sources.clear()
+        self._latest.clear()
+        self._dirty = False
+        self._waiting_since = None
+
+    def is_active(self) -> bool:
+        return bool(self._sources)
+
+    def panels(self) -> list:
+        """The panels currently streaming."""
+        return sorted(self._sources)
+
+    def latest(self) -> dict:
+        """``{panel: image}`` as last received -- whatever is held right
+        now, matched or not."""
+        return {n: img for n, (img, _fid) in self._latest.items()}
+
+    # ── arrival / emission ──────────────────────────────────────────────
+    def _on_frame(self, n: int, image, image_id: int):
+        """Runs per arrival, so it stays cheap: store and mark dirty. All
+        the work happens on the timer."""
+        self._latest[n] = (image, int(image_id))
+        self._dirty = True
+
+    def _matched_id(self):
+        """The frame id every streaming panel has reported, or ``None``."""
+        live = set(self._sources)
+        if not live or set(self._latest) != live:
+            return None
+        ids = {fid for _img, fid in self._latest.values()}
+        return ids.pop() if len(ids) == 1 else None
+
+    def _tick(self):
+        if not self._dirty or not self._sources:
+            return
+        now = QtCore.QDateTime.currentMSecsSinceEpoch()
+        fid = self._matched_id()
+        if fid is not None:
+            self._waiting_since = None
+            self._emit(fid, [])
+            return
+        # Partial set. Give the stragglers until the timeout, then go
+        # without them rather than freezing the view on one dead panel.
+        if self._waiting_since is None:
+            self._waiting_since = now
+        elif now - self._waiting_since >= self._sync_timeout_ms:
+            missing = sorted(set(self._sources) - set(self._latest))
+            self._waiting_since = None
+            self._emit(None, missing)
+
+    def _emit(self, frame_id, missing: list):
+        self._dirty = False
+        self.framesReady.emit(self.latest(), frame_id, missing)
