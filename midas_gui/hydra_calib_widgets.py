@@ -30,7 +30,7 @@ from midas_gui.helpers import (
     _fspin, im_trans_codes_from_checkboxes, geometry_fields_from_file,
     _predict_ring_radii, ring_xy_corrected, distortion_rho_d_um, paramstest_pairs,
     write_standalone_paramstest, apply_dict_to_widgets, rmax_corner_px,
-    _PARAMSTEST_DISTORTION)
+    result_refined_tx, _PARAMSTEST_DISTORTION)
 from midas_gui.widgets import ResidualBarChart, _mono_font
 from midas_gui.dialogs import _SaveParamstestDialog, ManualSeedDialog, show_error
 from midas_gui import style as S
@@ -388,15 +388,30 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             self._transp.setChecked(3 in im_trans)
 
     def seed_from_result(self, result):
-        """A completed fit is a full geometry — every parameter is enabled."""
-        self._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)
+        """A completed fit is a full geometry — every parameter it refined is
+        enabled and written back.
+
+        ``tx`` is left alone unless the fit genuinely refined it (see
+        :func:`helpers.result_refined_tx`; no Hydra pipeline does today). It is
+        an input the fit never touches, so ``result.tx`` can only repeat the
+        seed or — where the pipeline does not carry it, as ``first_time``
+        does not — report 0 for a panel that is physically at 296.885°.
+        Writing that back silently replaced the measured azimuth with 0 on
+        every Run, and because the tx tick then reads as "not set" the next
+        fit ran at the wrong azimuth without saying so."""
+        self._enable_seed(BC=True, Lsd=True, ty=True, tz=True)
         self._seed_bcy.setValue(float(result.BC_y))
         self._seed_bcz.setValue(float(result.BC_z))
         self._seed_lsd.setValue(float(result.Lsd) / 1000.0)
-        self._seed_tx.setValue(float(getattr(result, "tx", 0.0) or 0.0))
+        if result_refined_tx(result):
+            self._enable_seed(tx=True)
+            self._seed_tx.setValue(float(getattr(result, "tx", 0.0) or 0.0))
         self._seed_ty.setValue(float(getattr(result, "ty", 0.0) or 0.0))
         self._seed_tz.setValue(float(getattr(result, "tz", 0.0) or 0.0))
-        self._seed_note.setText("Seed updated from the last calibration result.")
+        self._seed_note.setText("Seed updated from the last calibration result."
+                                if result_refined_tx(result) else
+                                "Seed updated from the last calibration result "
+                                "(tx kept — the fit does not refine it).")
 
     def _load_calib_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(

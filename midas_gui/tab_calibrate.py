@@ -29,6 +29,7 @@ from midas_gui.helpers import (
     ring_on_image_mask, refresh_combo_items, rmax_corner_px, pixel_readout_text,
     widgets_to_dict, apply_dict_to_widgets, im_trans_codes_from_checkboxes,
     paramstest_pairs, parse_dspacing_text, browse_start_dir, warn_if_path_missing,
+    result_refined_tx,
     suggest_working_dir, check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME)
 from midas_gui.widgets import (
     PickableImageViewer, ProfileViewer, LogPanel, DataLoaderPanel, CakeViewer,
@@ -1880,12 +1881,22 @@ class CalibrationTab(QtWidgets.QWidget):
 
     def _seed_from_result(self, result):
         """Copy optimized geometry from a result into the seed fields — a
-        completed fit is a full geometry, so every parameter is enabled."""
-        self._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)
+        completed fit is a full geometry, so every parameter it refined is
+        enabled and written back.
+
+        ``tx`` is the exception: it is an input no crystalline pipeline
+        refines, so feeding ``result.tx`` back can only repeat the seed or
+        overwrite it with 0, and the second is what happened on a panel
+        fitted out of a Hydra array. Only the manual d-spacing fit refines
+        it, and only when asked — :func:`helpers.result_refined_tx` is the
+        single place that distinction is made."""
+        self._enable_seed(BC=True, Lsd=True, ty=True, tz=True)
         self._seed_bcy.setValue(float(result.BC_y))
         self._seed_bcz.setValue(float(result.BC_z))
         self._seed_lsd.setValue(float(result.Lsd) / 1000.0)   # µm → mm
-        self._seed_tx.setValue(float(getattr(result, "tx", 0.0) or 0.0))
+        if result_refined_tx(result):
+            self._enable_seed(tx=True)
+            self._seed_tx.setValue(float(getattr(result, "tx", 0.0) or 0.0))
         self._seed_ty.setValue(float(getattr(result, "ty", 0.0) or 0.0))
         self._seed_tz.setValue(float(getattr(result, "tz", 0.0) or 0.0))
         if getattr(result, "wavelength_A", None):

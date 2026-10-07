@@ -4,6 +4,38 @@ Written 2026-10-07 from a beamline session. Not started; nothing in this
 file is implemented. Agreed scope, references and findings, recorded so it
 can be executed without reconstructing the reasoning.
 
+## Resolved first: feedback was erasing tx (fixed, not yet pushed)
+
+Found while chasing the degrading calibrations of 2026-10-07 and fixed
+ahead of this plan, because it was actively corrupting runs. "Feed result
+back to seed" is on by default and wrote `result.tx` into the seed spin
+after every Run. No powder pipeline refines tx -- it is frozen at
+`midas_calibrate_v2/compat/from_v1.py` -- and `first_time` does not even
+carry the seed, so `result.tx` came back 0 for a panel physically at
+296.885 deg. Each Run therefore replaced the measured azimuth with 0, and
+the tx tick then read as "not set", so the next fit ran at the wrong
+azimuth without saying so. Observed across attempt_0003 -> attempt_0005:
+Lsd 2768.895 -> 2384.979 mm, post-refine strain 364 -> ~1400 microstrain.
+
+Fix: `helpers.result_refined_tx(result)` -- one predicate, used by both
+surfaces, that asks whether the fit reported a 1-sigma for tx (only the
+manual d-spacing fit ever does). Feedback writes tx only then.
+
+Worth noting for this plan's purposes: the bug existed identically in
+`tab_calibrate._seed_from_result` and
+`hydra_calib_widgets.seed_from_result`, two copies of the same six lines,
+and had to be fixed in both. That is a fourth divergence-by-duplication in
+one day, and the argument for the shared per-detector row below.
+
+Separately ruled out, so it is not re-chased: the ring overlay does NOT
+mishandle tx. Measured through `helpers.ring_xy_corrected`, the drawn ring
+is the same curve for tx = 0 / 90 / 296.885 -- 0.000 px difference at
+matched azimuth, with and without ty/tz tilts. `DetectorGeometryCard`
+hardcoding `"tx": 0.0` is therefore harmless for ring rendering. A
+green/white ring mismatch is a poor fit, not a rendering bug; the backend
+reports `azimuth_coverage 80 deg (22 %)` for a single GE panel, which is
+the real cause and needs a joint four-panel fit via `panel_layout`.
+
 ## The invariant
 
 In the user's words: *"a lot of things we do per detector we might want to

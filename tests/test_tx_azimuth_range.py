@@ -88,3 +88,81 @@ def test_the_single_detector_card_takes_them_too(app):
         tab._seed_tx.setValue(tx)
         assert tab._seed_tx.value() == pytest.approx(tx, abs=5e-3), \
             f"ge{n}: tx {tx} was clamped to {tab._seed_tx.value()}"
+
+
+# -- feeding a result back must not erase the azimuth --------------------
+#
+# The second half of the same bug, and the one that actually degraded
+# calibrations at the beamline: the range fix let 296.885 be typed in, and
+# then "Feed result back to seed" -- on by default -- wrote it straight back
+# out again as 0. No pipeline refines tx (it is frozen in
+# midas_calibrate_v2/compat/from_v1.py), and first_time never even carries
+# the seed, so result.tx is 0 for a panel that is physically at 296.885.
+# Each Run moved the panel another step away from where it is: observed as
+# Lsd drifting 2768.895 -> 2384.979 mm and post-refine strain 364 -> ~1400
+# microstrain across three attempts, with the overview line quietly reading
+# "ge1 tx 0 deg (tx not set)".
+
+from types import SimpleNamespace
+
+
+def _crystalline_result(**kw):
+    """What a powder pipeline hands back: no fit_sigma, tx echoed as 0."""
+    base = dict(Lsd=2_768_895.0, BC_y=1024.0, BC_z=1024.0,
+                tx=0.0, ty=0.1, tz=-0.2, distortion={},
+                pxY=200.0, pxZ=200.0, NrPixelsY=2048, NrPixelsZ=2048,
+                wavelength_A=0.1729, post_residual_strain_uE=364.0)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_a_fit_round_trip_leaves_the_seeded_azimuth_alone(hydra_card):
+    """Set the real ge1 azimuth, run, feed the result back: tx must still be
+    the azimuth the panel is installed at."""
+    hydra_card._seed_tx.setValue(296.885)
+    hydra_card._seed_en_tx.setChecked(True)
+    hydra_card.seed_from_result(_crystalline_result())
+    assert hydra_card._seed_tx.value() == pytest.approx(296.885), \
+        "feeding a result back erased the panel's installation azimuth"
+    assert hydra_card._seed_en_tx.isChecked(), \
+        "tx went unticked, so the next fit would silently run at tx=0"
+
+
+def test_the_repeated_run_does_not_walk_the_azimuth_away(hydra_card):
+    """Three Runs in a row, as at the beamline. The damage was cumulative."""
+    hydra_card._seed_tx.setValue(296.885)
+    hydra_card._seed_en_tx.setChecked(True)
+    for _ in range(3):
+        hydra_card.seed_from_result(_crystalline_result())
+    assert hydra_card.seed_tx_value() == pytest.approx(296.885)
+
+
+def test_the_parameters_the_fit_does_refine_still_come_back(hydra_card):
+    """The fix must not turn feedback off wholesale -- Lsd/BC/ty/tz are
+    refined, and feeding them back is the point of the checkbox."""
+    hydra_card.seed_from_result(_crystalline_result(Lsd=2_700_000.0, BC_y=1030.0))
+    assert hydra_card._seed_lsd.value() == pytest.approx(2700.0)
+    assert hydra_card._seed_bcy.value() == pytest.approx(1030.0)
+    assert hydra_card._seed_ty.value() == pytest.approx(0.1)
+
+
+def test_the_one_fit_that_does_refine_tx_still_feeds_it_back(app):
+    """The manual d-spacing fit refines tx as an ordinary free parameter when
+    asked (helpers.fit_geometry_from_ring_picks), and reports a sigma for it
+    only then. That result's tx is real and must reach the seed."""
+    from midas_gui.tab_calibrate import CalibrationTab
+    tab = CalibrationTab()
+    tab._seed_tx.setValue(12.0)
+    refined = _crystalline_result(tx=31.25)
+    refined.fit_sigma = {"Lsd": 120.0, "tx": 0.04}
+    tab._seed_from_result(refined)
+    assert tab._seed_tx.value() == pytest.approx(31.25, abs=5e-3)
+
+
+def test_a_crystalline_result_does_not_touch_the_single_detector_tx(app):
+    """Same tab, same field, no sigma for tx -- so the fit did not refine it."""
+    from midas_gui.tab_calibrate import CalibrationTab
+    tab = CalibrationTab()
+    tab._seed_tx.setValue(207.5)
+    tab._seed_from_result(_crystalline_result())
+    assert tab._seed_tx.value() == pytest.approx(207.5, abs=5e-3)

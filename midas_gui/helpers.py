@@ -1431,6 +1431,32 @@ def fit_geometry_from_ring_picks(picks, wavelength_A: float, pxY_um: float,
     }
 
 
+def result_refined_tx(result) -> bool:
+    """Whether this fit actually refined ``tx``, and so whether ``result.tx``
+    carries information worth feeding back into the seed.
+
+    Almost always ``False``. ``tx`` is a panel's installation azimuth about
+    the beam, not an alignment tilt, and every powder pipeline freezes it on
+    purpose: it reaches a ring radius only through the azimuthal distortion
+    harmonics, so ``(tx, phi_k) -> (tx + d, phi_k + k*d)`` is an exact gauge
+    orbit and refining it corrupts all six phases with no residual signature
+    (``midas_calibrate_v2.forward.geometry``; enforced at
+    ``compat/from_v1.py``, ``_add(s, "tx", v1.tx, refined=False)``).
+
+    The one exception is the manual d-spacing fit, which refines ``tx`` as an
+    ordinary free parameter when its Refine box is ticked
+    (:func:`fit_geometry_from_ring_picks`). That fit reports a 1-sigma for
+    each free parameter and only for those, so the presence of a ``tx`` sigma
+    is the fit's own statement that it refined ``tx`` -- which beats asking
+    the UI what was ticked, since a ticked box the solver dropped would lie.
+
+    Written as a question about the result rather than about the pipeline so
+    that a surface which later grows a d-spacing route gets the right answer
+    without a second copy of this reasoning.
+    """
+    return "tx" in (getattr(result, "fit_sigma", None) or {})
+
+
 def _fit_parameter_sigma(jac, resid_vec, free_names) -> dict:
     """1-sigma estimates for the free parameters of a ``least_squares`` solve,
     from the usual linearised covariance ``inv(J.T @ J) * s^2`` with
