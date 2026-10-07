@@ -495,14 +495,28 @@ Corrections and variance are **mutually exclusive**: if both are requested the G
 disables variance and logs a note (`σ = √I`), because the corrections path does
 not carry an error model.
 
-### 5.4 Q-uniform binning
+### 5.4 Q- and 2θ-uniform output binning
 
-The kernels bin uniformly in **R (px)**, not Q. When "Q-uniform" is requested the
-worker integrates R-uniform as usual, then **rebins onto a uniform-Q grid** by
-interpolation (`rebin_R_to_Q`): `Q = 4π sin(θ)/λ` with `θ = ½·atan(R·px/Lsd)`,
-sort by Q, `np.interp` the profile and σ onto the requested `[Qmin, Qmax, ΔQ]`
-grid. Done this way (rather than native Q-binning) because the kernels lack a
-Q-mode; interpolating after R-integration puts rings at the correct Q.
+The kernels bin uniformly in **R (px)** — there is no 2θ mode at all, and the
+native Q mode `IntegrationSpec` exposes is deliberately unused (see
+`workers.apply_q_uniform`). So when Bin type is **Q** or **2θ** the worker
+integrates R-uniform as usual, then **rebins the finished 1-D profile** onto a
+grid uniform in the requested unit (`rebin_grid_and_r` / `rebin_R_to_grid`):
+convert this run's R axis into that unit — `Q = 4π sin(θ)/λ` or `2θ` directly,
+with `θ = ½·atan(R·px/Lsd)` — sort, then `np.interp` the profile and σ onto the
+requested `[min, max, Δ]` grid. Interpolating after R-integration is what puts
+rings at the correct Q / 2θ.
+
+The axis that travels onward with a rebinned profile is `rebin_grid_and_r`'s
+**second** return value: the **R in pixels** of each output bin, not the grid
+itself. Every downstream consumer — the writers, the waterfall, the stacked and
+cake views — expects pixels. Declaring otherwise is what produced the
+2θ = 180° plots fixed in `4cb7aaa`; see `.context/DECISIONS.md` (2026-10-06).
+
+The config both units share is `{"unit": "Q"|"2th", "min", "max", "step"}`,
+normalised by `workers.rebin_cfg_parts`, which also reads the legacy Q-only
+spelling (`QMin`/`QMax`/`QBinSize`) so older projects keep loading. It reaches
+a background job through `batch_cli`'s `--rebin-unit/-min/-max/-step`.
 
 ---
 

@@ -3,6 +3,64 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-06 (latest) — One output rebin, two units; Q and 2θ are not backend modes
+
+Two asks: "Q-uniform bins aren't wired into background jobs yet" (a guard in
+``_run_as_job``) and "I think we also want even 2theta case."
+
+**Q-uniform was never a backend binning mode in this GUI.**
+``IntegrationSpec`` genuinely carries ``QMin``/``QMax``/``QBinSize`` and a
+``q_mode_active`` property that redefines ``n_r_bins``, and
+``workers.apply_q_uniform`` is the hook for it — but nothing has ever called
+it. Every Q run integrates R-uniform and resamples the finished 1-D profile.
+The backend has no 2θ equivalent at all, so 2θ could only ever be a rebin
+too. That makes the two units *the same operation with different grid math*,
+which is why this is one generalised pair (``rebin_grid_and_r`` /
+``rebin_R_to_grid``) rather than a second parallel path beside the Q one.
+The four worker call sites kept their shape; only the grid construction and
+the forward/inverse unit conversion differ.
+
+``apply_q_uniform`` is kept, not deleted — the native mode is real and may
+be worth revisiting — but it now raises on a non-Q config and carries a
+warning. The two routes **disagree about what the axis travelling with a
+profile is**: the rebin route carries R in pixels, the native route would
+carry Q, and every downstream consumer (writers, waterfall, stack view, the
+GSAS-II guard) assumes pixels. Confusing those is exactly what produced the
+2θ = 180° plots fixed in 4cb7aaa. Anyone wiring up the native mode has to
+fix all of them at once.
+
+**The config dict gained a unit; the transport keyword did not get renamed.**
+Canonical form is ``{"unit": "Q"|"2th", "min", "max", "step"}``, with the
+legacy Q-only spelling (``QMin``/``QMax``/``QBinSize``, no ``unit``) still
+read as Q so saved projects keep loading. ``rebin_cfg_parts`` is the only
+place that knows either shape. The *keyword* is still ``q_cfg=`` in the
+worker signatures and ``inputs["q_cfg"]`` in saved projects: renaming it
+reaches a ``queue_runner`` dataclass field, ~15 keyword call sites across 8
+modules and the on-disk project schema, all for naming alone, with a missed
+site surfacing as a ``TypeError`` in a path as rarely exercised as
+Pump-probe. The dict is what gets logged and inspected, and it now says
+``'unit': '2th'`` plainly.
+
+**``hydra_batch_page`` carried the same axis bug as ``tab_batch``** and was
+fixed with it — same ``BatchRunCoordinator``, same rebin, same R-px axis.
+4cb7aaa only caught one of the two. The source guard in
+``tests/test_batch_cake_stack.py`` now scans both files, because the thing
+that let this sit was that the expression was greppable but nobody grepped
+past the first hit.
+
+**Scope.** Batch Integrate gets the three-way Bin type dropdown; Hydra and
+Pump-probe keep their Q-only checkbox. The shared helpers are unit-generic,
+so adding 2θ there later is a combo swap, not plumbing. Multi-azimuth is
+still refused with either unit (the rebin handles a 1-D profile only), and
+GSAS-II export still refuses a rebinned attempt — both messages now name
+whichever unit is selected.
+
+One deliberate numerical change: the old ``rebin_R_to_Q`` computed
+``radians(degrees(arctan(...)))``, a round-trip that cancels mathematically
+but not in floating point. The generalised form stays in radians. Q results
+move by ~1 ulp (rel. 2.6e-16 across a full axis) and are, if anything,
+slightly more accurate; ``test_radial_rebin`` pins the agreement.
+
 ## 2026-10-06 (later) — A CSV row is identified by file + raw frame range
 
 Follow-up to the entry below: "instead of chunk, let's do file name,

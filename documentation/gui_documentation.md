@@ -2253,8 +2253,8 @@ one-row layout mpe_wf's tools read, so it is interchangeable with one written
 there.
 
 Immediately below the button, a muted one-line summary shows the cake
-parameters currently in force (R range/bin, η range/bin, Q output range when
-Q-uniform bins are on, the sub-frame sum when it's greater than 1, and the
+parameters currently in force (R range/bin, η range/bin, the Q or 2θ output
+range when Bin type is not Radial, the sub-frame sum when it's greater than 1, and the
 omega source when it isn't the default zero),
 wherever they came from — CSV, typed by hand, restored with a project, or
 auto-filled.
@@ -2267,8 +2267,8 @@ auto-filled.
 | **Rmin / Rmax (px)** | Exclude an inner (e.g. beamstop shadow) or outer radial region from integration. Rmin defaults to 0. Rmax defaults to 0, meaning **auto** — left at 0 it's passed through unset so the backend picks the farthest-detector-corner radius itself (same value the **Corner** button below fills in); once a calibration is resolved, Rmax auto-fills to that corner value the first time (a manual edit or preset click after that always wins). **Corner** sets Rmax to the farthest detector corner from the beam centre; **Edge** sets it to the farthest straight detector edge (smaller than Corner — excludes the corner regions beyond it). |
 | **Azim. mean** | How the (η, R) cake becomes a 1-D profile: **Pixel-weighted** (default) `Σ(mean·count)/Σ(count)` — independent of η-bin size and robust to partial azimuthal coverage / **off-detector beam centres**; or **η-bin mean (legacy)** — the unweighted mean of per-η-bin means, which can distort with a coarse η bin when the beam centre is off the detector. |
 | Per-bin variance (σ) | Error model poisson / azimuthal / hybrid (ignored when corrections are on → σ = √I). |
-| Q-uniform bins | Integrate in R then rebin onto a uniform-Q grid (Qmin, Qmax, ΔQ). |
-| **Multi-azimuth output (cake)** | Off by default. Keeps every azimuthal (η) sector from the η bin/range above as a **separate** output profile per frame (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle mean profile — needed for per-azimuth GSAS-II/texture work. Off, η bin still exists (default 5° over the full 360°, i.e. 72 internal bins) but is used only to control the collapse's weighting resolution, so turning this on repurposes that same field rather than changing any existing run's output. Text-format Save/live writes become one file per `(frame, η bin)`, named `<id>_etaNNN.<fmt>`; HDF5 output switches to the cake layout below (`midas_gui/cake_hdf5.py`) rather than being skipped, since `midas_integrate_v2.write_h5` only accepts a 1-D profile per frame. Not yet combinable with Q-uniform bins. |
+| **Bin type** | What the OUTPUT radial axis is uniform in. **Radial** (default) keeps the profile on the R-uniform grid the kernels integrated onto. **Q** and **2θ** additionally rebin that finished 1-D profile onto a grid uniform in Q (Å⁻¹) or 2θ (degrees), so rings land at equal spacing in those units; the adjacent **R bins… / Q bins… / 2θ bins…** button opens min/max/Δ for whichever is selected. In all three the *underlying integration grid is R-uniform* — the R bins still define it, and Q/2θ only resample the result (`workers.rebin_R_to_grid`); neither is a backend binning mode. The radial axis stored alongside a profile is therefore always **R in pixels**, which is what the writers and the plot views expect. Works both in-process and in background jobs. Not yet combinable with Multi-azimuth output (the rebin handles a 1-D profile only), and an attempt run in Q or 2θ can't be exported to GSAS-II. |
+| **Multi-azimuth output (cake)** | Off by default. Keeps every azimuthal (η) sector from the η bin/range above as a **separate** output profile per frame (`profiles`/`sigmas` become `(n_frames, n_eta, n_r)`) instead of collapsing to one full-circle mean profile — needed for per-azimuth GSAS-II/texture work. Off, η bin still exists (default 5° over the full 360°, i.e. 72 internal bins) but is used only to control the collapse's weighting resolution, so turning this on repurposes that same field rather than changing any existing run's output. Text-format Save/live writes become one file per `(frame, η bin)`, named `<id>_etaNNN.<fmt>`; HDF5 output switches to the cake layout below (`midas_gui/cake_hdf5.py`) rather than being skipped, since `midas_integrate_v2.write_h5` only accepts a 1-D profile per frame. Not yet combinable with a Q or 2θ Bin type. |
 | **Show bin grid** | Off by default. Overlays the full (R, η) integration bin grid — concentric circles at each R-bin edge, spokes at each η-bin edge — on the **Detector view** tab, thinned to at most ~50 rings / ~72 spokes so a fine bin size stays legible. |
 
 A new **Detector view** tab (alongside Waterfall/Stacked profiles — one page-level
@@ -2383,7 +2383,7 @@ reuses the already-built
 Integration* run when the calibration, kernel, bins, mask and folder are unchanged, or
 built once on first use) and integrates **only the new files** (tracked by frame id, so
 frames already shown are skipped). New frames honour the current kernel, corrections,
-Dark/Bright/Background, mask and Q-uniform settings, and are saved to the output folder
+Dark/Bright/Background, mask and Bin type settings, and are saved to the output folder
 when a 1-D format is selected. Click MONITOR again to stop; starting a fresh *Start
 Integration* also stops it. (Distinct from **Monitor normalisation** above, which divides
 profiles by a scalar file.)
@@ -3196,7 +3196,8 @@ The tab uses the same three-panel layout as Batch Integrate: **data loader** (le
 - **Data pooling (TRR)** — the pooling **prefix** + **Scan folder** (the folder itself
   comes from the loader on the left).
 - **Integration** — kernel, R/η bins, the plot axis (Q / 2θ / R), and optional
-  Q-uniform binning. Identical engine and options to Batch Integrate.
+  Q-uniform binning (Hydra keeps the Q-only checkbox; 2θ is Batch
+  Integrate only for now). Identical engine and options to Batch Integrate.
 - **Physics corrections** — polarization / solid-angle.
 - **Pump-probe options** — the reference-delay set (defaults to all negative delays;
   multi-select to override), optional per-pattern normalization over a q-window, the ΔI
@@ -3289,8 +3290,9 @@ copied forward by MIDAS's `integrator.py`. See `.context/DECISIONS.md`
 (2026-09-28) for the full comparison.
 
 Single-detector only for v1 (Hydra composite is a possible fast-follow). Not
-yet supported: an attempt run with Q-uniform bins (its stored radial axis is
-Q-rebinned, not a plain function of the calibration geometry) or a
+yet supported: an attempt run with a Q or 2θ Bin type (its stored radial
+axis is rebinned, not the backend's own grid, so the per-bin areas can't be
+reconstructed) or a
 file-backed (not embedded) mask — both raise a clear error naming the
 attempt and what to change, rather than exporting something silently wrong.
 

@@ -535,7 +535,14 @@ class HydraBatchPage(QtWidgets.QWidget):
         pair = self._viewer_pairs[n]
         lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
         self._last_axis_ctx[n] = (lsd, px, wl)
-        _axctx = (lsd, px, wl, "Q" if q_cfg else "R")
+        # "R" even in Q mode: Q-uniform is a REBIN of an R-uniform
+        # integration (workers.rebin_R_to_grid) and the axis travelling with
+        # the rebinned profile is the R in pixels of each Q bin, not the Q
+        # grid. Saying "Q" here makes _convert_radial read pixels as A^-1,
+        # which clips every bin to 2theta = 180 deg. Same bug, same fix as
+        # tab_batch.py -- see 4cb7aaa and
+        # tests/test_batch_cake_stack.py::test_q_uniform_profiles_carry_an_R_axis_not_a_Q_one
+        _axctx = (lsd, px, wl, "R")
         pair.waterfall.set_axis_context(*_axctx)
         pair.stack_view.set_axis_context(*_axctx)
         pair.wf_started = False

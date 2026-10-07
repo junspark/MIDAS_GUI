@@ -287,3 +287,81 @@ def test_the_omega_channel_popup_is_wide_enough_for_full_paths(dialog):
                   for i in range(combo.count()))
     assert combo.view().minimumWidth() >= longest, \
         "the popup is narrower than its longest entry"
+
+
+# ── Bin type: Radial / Q / 2θ ───────────────────────────────────────────
+
+def test_bin_type_offers_all_three_radial_output_units(tab):
+    from midas_gui.workers import REBIN_UNITS
+    data = [tab._bin_type.itemData(i) for i in range(tab._bin_type.count())]
+    assert data == ["R", *REBIN_UNITS]
+
+
+@pytest.mark.parametrize("unit,label,title", [
+    ("R", "R bins…", "Radial (R) bins"),
+    ("Q", "Q bins…", "Q bins"),
+    ("2th", "2θ bins…", "2θ bins"),
+])
+def test_the_button_and_dialog_follow_the_selected_bin_type(tab, unit, label, title):
+    tab._bin_type.setCurrentIndex(tab._bin_type.findData(unit))
+    assert tab._radial_bins_btn.text() == label
+    assert tab._rebin_bins_dialog().windowTitle() == title
+
+
+def test_radial_means_no_rebin_at_all(tab):
+    """"Radial" is not a third rebin unit — it is the absence of one. The
+    profile stays on the R-uniform grid the kernels integrated onto."""
+    tab._bin_type.setCurrentIndex(tab._bin_type.findData("R"))
+    assert tab._rebin_unit() is None
+    assert tab._rebin_cfg() is None
+
+
+@pytest.mark.parametrize("unit,lo,hi,step", [("Q", 0.75, 6.5, 0.004),
+                                             ("2th", 1.25, 7.5, 0.005)])
+def test_the_cfg_reads_the_trio_belonging_to_the_selected_unit(tab, unit, lo, hi, step):
+    from midas_gui.workers import rebin_cfg_parts
+    tab._bin_type.setCurrentIndex(tab._bin_type.findData(unit))
+    lo_spin, hi_spin, step_spin = tab._REBIN_SPINS[unit](tab)
+    lo_spin.setValue(lo); hi_spin.setValue(hi); step_spin.setValue(step)
+    assert rebin_cfg_parts(tab._rebin_cfg()) == (unit, lo, hi, step)
+
+
+def test_the_two_unit_trios_are_independent(tab):
+    """Switching Bin type must not drag Q's Å⁻¹ values into 2θ's degrees."""
+    tab._q_min.setValue(0.5); tab._q_max.setValue(8.0)
+    tab._tth_min.setValue(2.0); tab._tth_max.setValue(6.0)
+    tab._bin_type.setCurrentIndex(tab._bin_type.findData("Q"))
+    assert (tab._rebin_cfg()["min"], tab._rebin_cfg()["max"]) == (0.5, 8.0)
+    tab._bin_type.setCurrentIndex(tab._bin_type.findData("2th"))
+    assert (tab._rebin_cfg()["min"], tab._rebin_cfg()["max"]) == (2.0, 6.0)
+
+
+def test_the_2theta_spins_stop_short_of_90_degrees(tab):
+    """R = Lsd·tan(2θ)/px diverges at 90° and is meaningless beyond it."""
+    tab._tth_max.setValue(179.0)
+    assert tab._tth_max.value() < 90.0
+
+
+def test_the_summary_line_names_the_selected_unit(tab):
+    tab._bin_type.setCurrentIndex(tab._bin_type.findData("2th"))
+    tab._tth_min.setValue(1.0); tab._tth_max.setValue(7.0); tab._tth_bin.setValue(0.01)
+    text = tab._cake_summary_text()
+    assert "2θ out 1–7" in text and "Δ2θ 0.01 °" in text
+
+
+def test_gui_state_round_trips_the_2theta_trio(tab, qapp):
+    from midas_gui.tab_batch import BatchTab
+    tab._bin_type.setCurrentIndex(tab._bin_type.findData("2th"))
+    tab._tth_min.setValue(1.25); tab._tth_max.setValue(7.5); tab._tth_bin.setValue(0.005)
+    other = BatchTab()
+    other.set_state(tab.get_state())
+    assert other._bin_type.currentData() == "2th"
+    assert other._rebin_cfg() == tab._rebin_cfg()
+
+
+def test_a_project_saved_before_bin_type_existed_still_restores_as_Q(tab):
+    """Older attempts carry the boolean "q_check" the dropdown replaced."""
+    tab.set_state({"fields": {"q_check": True, "q_min": 0.6, "q_max": 7.0,
+                              "q_bin": 0.02}})
+    assert tab._bin_type.currentData() == "Q"
+    assert tab._rebin_cfg() == {"unit": "Q", "min": 0.6, "max": 7.0, "step": 0.02}

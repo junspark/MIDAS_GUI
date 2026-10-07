@@ -39,7 +39,7 @@ from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, DataLoaderPanel, OutputFormatSelector,
                                ImageViewer, OriginToolButton, build_lab_frame_axes_items,
                                CakeStackViewer)
-from midas_gui.workers import (BatchWorker, BatchRunCoordinator, apply_q_uniform,
+from midas_gui.workers import (BatchWorker, BatchRunCoordinator, REBIN_UNITS,
                                DriftWorker, FolderMonitorWorker, write_all_profiles)
 from midas_gui.dialogs import show_error
 from midas_gui.hydra_widgets import HydraModeRibbon
@@ -54,27 +54,40 @@ from midas_gui import style as S
 
 
 class _RadialBinsDialog(QtWidgets.QDialog):
-    """Δ/min/max for one radial-axis mode (R in px, or Q in Å⁻¹), opened
-    from Batch Integrate's mode-dependent "R bins…"/"Q bins…" button next to
-    the Bin type dropdown. Hosts the tab's own spinboxes directly (not
-    copies) — this is a relocated view of the same widgets ``_build_spec``
-    and GUI-state save/restore already use, not a separate value store.
-    Only the R variant takes Corner/Edge presets; Q has no detector-geometry
+    """Δ/min/max for one radial-axis mode (R in px, Q in Å⁻¹, or 2θ in
+    degrees), opened from Batch Integrate's mode-dependent
+    "R bins…"/"Q bins…"/"2θ bins…" button next to the Bin type dropdown.
+    Hosts the tab's own spinboxes directly (not copies) — this is a
+    relocated view of the same widgets ``_build_spec`` and GUI-state
+    save/restore already use, not a separate value store. Only the R variant
+    takes Corner/Edge presets; Q and 2θ have no detector-geometry
     equivalent."""
+
+    #: Window title, axis label prefix and explanatory note, per mode.
+    _MODES = {
+        "R": ("Radial (R) bins", "R",
+              "R bin/Rmin/Rmax define the underlying integration grid, in "
+              "detector pixels. Rmax 0 = auto (farthest detector corner from "
+              "the beam centre)."),
+        "Q": ("Q bins", "Q",
+              "Bin uniformly in Q (Å⁻¹) instead of R, for OUTPUT only — the "
+              "same radial axis, alternate units. The Radial (R) bins still "
+              "set the underlying integration grid; this rebins that result "
+              "into Q."),
+        "2th": ("2θ bins", "2θ",
+                "Bin uniformly in 2θ (degrees) instead of R, for OUTPUT only "
+                "— the same radial axis, alternate units. The Radial (R) bins "
+                "still set the underlying integration grid; this rebins that "
+                "result into 2θ. Unlike Q, this needs no wavelength."),
+    }
 
     def __init__(self, mode: str, bin_spin, min_spin, max_spin,
                  corner_btn=None, edge_btn=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Radial (R) bins" if mode == "R" else "Q bins")
+        title, label, note_text = self._MODES[mode]
+        self.setWindowTitle(title)
         v = QtWidgets.QVBoxLayout(self)
-        note = QtWidgets.QLabel(
-            "R bin/Rmin/Rmax define the underlying integration grid, in "
-            "detector pixels. Rmax 0 = auto (farthest detector corner from "
-            "the beam centre)." if mode == "R" else
-            "Bin uniformly in Q (Å⁻¹) instead of R, for OUTPUT only — the "
-            "same radial axis, alternate units. The Radial (R) bins still "
-            "set the underlying integration grid; this rebins that result "
-            "into Q.")
+        note = QtWidgets.QLabel(note_text)
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:4px")
         v.addWidget(note)
@@ -85,9 +98,9 @@ class _RadialBinsDialog(QtWidgets.QDialog):
             preset_row.addWidget(corner_btn); preset_row.addWidget(edge_btn)
             preset_row.addStretch(1)
             form.full(preset_row)
-        form.row((f"{mode} bin:", bin_spin))
-        form.row((f"{mode}min:", min_spin))
-        form.row((f"{mode}max:", max_spin))
+        form.row((f"{label} bin:", bin_spin))
+        form.row((f"{label} min:", min_spin))
+        form.row((f"{label} max:", max_spin))
         v.addLayout(form)
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         btns.rejected.connect(self.accept); btns.accepted.connect(self.accept)
@@ -491,16 +504,51 @@ class BatchTab(QtWidgets.QWidget):
         value = formula(fields["BC_y"], fields["BC_z"], fields["NrPixelsY"], fields["NrPixelsZ"])
         self._r_max.setValue(value)
 
-    def _q_mode_active(self) -> bool:
-        """True when the Bin type dropdown selects Q (rebin the OUTPUT
-        uniformly in Q, not the underlying R-uniform integration grid)."""
-        return self._bin_type.currentData() == "Q"
+    #: Which (min, max, step) spin trio belongs to each output rebin unit.
+    #: Keeps _rebin_cfg/_refresh_cake_summary from re-deciding it separately.
+    _REBIN_SPINS = {
+        "Q":   lambda s: (s._q_min, s._q_max, s._q_bin),
+        "2th": lambda s: (s._tth_min, s._tth_max, s._tth_bin),
+    }
+
+    def _rebin_unit(self):
+        """The OUTPUT rebin unit the Bin type dropdown selects — ``"Q"``,
+        ``"2th"``, or ``None`` for plain Radial.
+
+        "Radial" means no rebin at all: the profile is kept on the
+        R-uniform grid the kernels integrated onto. The other two rebin that
+        result (see ``workers.rebin_R_to_grid``); neither changes the
+        underlying integration grid, which is always R-uniform."""
+        unit = self._bin_type.currentData()
+        return unit if unit in REBIN_UNITS else None
+
+    def _rebin_cfg(self):
+        """This tab's output-rebin config for the workers, or ``None``.
+
+        The spin trio is chosen by the selected unit; the dict is the
+        self-describing form ``workers.rebin_cfg_parts`` reads."""
+        unit = self._rebin_unit()
+        if unit is None:
+            return None
+        lo, hi, step = self._REBIN_SPINS[unit](self)
+        return {"unit": unit, "min": lo.value(), "max": hi.value(),
+                "step": step.value()}
+
+    def _rebin_label(self) -> str:
+        """Display name of the selected rebin unit, for user-facing text."""
+        return {None: "Radial", "Q": "Q", "2th": "2θ"}[self._rebin_unit()]
+
+    def _rebin_bins_dialog(self):
+        """The bins dialog the "… bins…" button should open right now."""
+        return {None: self._r_bins_dialog, "Q": self._q_bins_dialog,
+                "2th": self._tth_bins_dialog}[self._rebin_unit()]
 
     def _on_bin_type_changed(self, *_args) -> None:
-        self._radial_bins_btn.setText("Q bins…" if self._q_mode_active() else "R bins…")
+        label = {None: "R", "Q": "Q", "2th": "2θ"}[self._rebin_unit()]
+        self._radial_bins_btn.setText(f"{label} bins…")
 
     def _open_radial_bins_dialog(self) -> None:
-        (self._q_bins_dialog if self._q_mode_active() else self._r_bins_dialog).exec_()
+        self._rebin_bins_dialog().exec_()
 
     def _load_cake_csv(self) -> None:
         """"Load cake parameters CSV…" button — applies R_MIN/R_MAX/R_STEP/
@@ -625,9 +673,12 @@ class BatchTab(QtWidgets.QWidget):
             f"η {self._eta_min.value():g}…{self._eta_max.value():g}°"
             f"  Δη {self._e_bin.value():g}°",
         ]
-        if self._q_mode_active():
-            parts.append(f"Q out {self._q_min.value():g}–{self._q_max.value():g}"
-                         f"  ΔQ {self._q_bin.value():g} Å⁻¹")
+        _unit = self._rebin_unit()
+        if _unit is not None:
+            _lo, _hi, _step = self._REBIN_SPINS[_unit](self)
+            _name, _u = {"Q": ("Q", "Å⁻¹"), "2th": ("2θ", "°")}[_unit]
+            parts.append(f"{_name} out {_lo.value():g}–{_hi.value():g}"
+                         f"  Δ{_name} {_step.value():g} {_u}")
         chunk = getattr(self._loader, "_combine_chunk", None)
         n_sum = int(chunk.value()) if chunk is not None else 1
         if n_sum > 1:
@@ -1071,6 +1122,9 @@ class BatchTab(QtWidgets.QWidget):
             "q_min": self._q_min,
             "q_max": self._q_max,
             "q_bin": self._q_bin,
+            "tth_min": self._tth_min,
+            "tth_max": self._tth_max,
+            "tth_bin": self._tth_bin,
             "mon_ed": self._mon_ed,
             "drift_chk": self._drift_chk,
             "drift_anchor_ed": self._drift_anchor_ed,
@@ -1462,20 +1516,32 @@ class BatchTab(QtWidgets.QWidget):
         self._q_min = _fspin(0.0, 100.0, 3, 0.5, "Å⁻¹")
         self._q_max = _fspin(0.0, 100.0, 3, 8.0, "Å⁻¹")
         self._q_bin = _fspin(0.0001, 1.0, 4, 0.01, "Å⁻¹")
+        # 2theta's counterpart. Capped just under 90 deg: R = Lsd*tan(2th)/px
+        # diverges at 90 and is meaningless beyond it, so the spin box is
+        # where that limit is stated rather than a runtime error.
+        self._tth_min = _fspin(0.0, 89.999, 4, 0.0, "°")
+        self._tth_max = _fspin(0.0, 89.999, 4, 10.0, "°")
+        self._tth_bin = _fspin(0.0001, 10.0, 4, 0.01, "°")
         self._r_bins_dialog = _RadialBinsDialog(
             "R", self._r_bin, self._r_min, self._r_max,
             self._rmax_corner_btn, self._rmax_edge_btn, parent=self)
         self._q_bins_dialog = _RadialBinsDialog(
             "Q", self._q_bin, self._q_min, self._q_max, parent=self)
+        self._tth_bins_dialog = _RadialBinsDialog(
+            "2th", self._tth_bin, self._tth_min, self._tth_max, parent=self)
 
         pf.full(_section_label("RADIAL"))
         self._bin_type = _NoScrollComboBox()
         self._bin_type.addItem("Radial", "R")
         self._bin_type.addItem("Q", "Q")
+        self._bin_type.addItem("2θ", "2th")
         self._bin_type.setToolTip(
             "Radial — bin uniformly in R (detector pixels).\n"
-            "Q — additionally rebin the OUTPUT uniformly in Q (Å⁻¹); the "
-            "underlying integration grid is still R-uniform.")
+            "Q — additionally rebin the OUTPUT uniformly in Q (Å⁻¹).\n"
+            "2θ — additionally rebin the OUTPUT uniformly in 2θ (degrees).\n"
+            "In all three the underlying integration grid is R-uniform; Q "
+            "and 2θ resample that result, and the axis stored alongside a "
+            "profile stays R in pixels.")
         self._bin_type.currentIndexChanged.connect(self._on_bin_type_changed)
         self._radial_bins_btn = QtWidgets.QPushButton("R bins…")
         self._radial_bins_btn.clicked.connect(self._open_radial_bins_dialog)
@@ -1507,7 +1573,8 @@ class BatchTab(QtWidgets.QWidget):
         self._ome_collapse = QtWidgets.QCheckBox()
         for _w in (self._r_min, self._r_max, self._r_bin, self._eta_min,
                    self._eta_max, self._e_bin, self._q_min, self._q_max,
-                   self._q_bin, self._ome_start, self._ome_step):
+                   self._q_bin, self._tth_min, self._tth_max, self._tth_bin,
+                   self._ome_start, self._ome_step):
             _w.valueChanged.connect(self._refresh_cake_summary)
         self._ome_channel.currentTextChanged.connect(self._refresh_cake_summary)
         self._ome_collapse.toggled.connect(self._refresh_cake_summary)
@@ -1980,22 +2047,22 @@ class BatchTab(QtWidgets.QWidget):
                 return
         self._last_run_out_dir = out_dir
         fmts = self._fmt.checked_keys()
-        q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
-                  "QBinSize": self._q_bin.value()} if self._q_mode_active() else None)
+        q_cfg = self._rebin_cfg()
         omega_cfg = self._omega_cfg()
         multi_azimuth = self._multi_azimuth_chk.isChecked()
         if multi_azimuth and q_cfg:
             QtWidgets.QMessageBox.warning(
                 self, "Incompatible options",
-                "Multi-azimuth output isn't supported together with "
-                "Q-uniform bins yet. Uncheck Multi-azimuth output, or set "
-                "Bin type back to Radial."); return
+                f"Multi-azimuth output isn't supported together with "
+                f"{self._rebin_label()}-uniform bins yet. Uncheck "
+                f"Multi-azimuth output, or set Bin type back to Radial."); return
         lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
-        # Native unit is R px in BOTH modes. Q-uniform is a rebin of an
-        # R-uniform integration (workers.rebin_R_to_Q), and the axis that
-        # travels with the rebinned profile is workers.q_grid_and_r's
-        # SECOND return value — r_of_q, the R in pixels of each Q bin — not
-        # the Q grid itself. Declaring "Q" here told _convert_radial to read
+        # Native unit is R px in ALL THREE modes. Q- and 2θ-uniform are
+        # rebins of an R-uniform integration (workers.rebin_R_to_grid), and
+        # the axis that travels with a rebinned profile is
+        # workers.rebin_grid_and_r's SECOND return value — the R in pixels
+        # of each output bin — not the Q/2θ grid itself. Declaring "Q"
+        # here told _convert_radial to read
         # those pixel values as Å⁻¹: x·λ/4π then exceeds 1 for any real
         # radius, clips, and every bin comes out at 2θ = 180° exactly, which
         # converts back to R = Lsd·tan(180°)/px ≈ -2.26e-11. That is the
@@ -2158,18 +2225,13 @@ class BatchTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(
                 self, "No format", "Check at least one output format first."); return
         multi_azimuth = self._multi_azimuth_chk.isChecked()
-        if multi_azimuth and self._q_mode_active():
+        rebin_cfg = self._rebin_cfg()
+        if multi_azimuth and rebin_cfg:
             QtWidgets.QMessageBox.warning(
                 self, "Incompatible options",
-                "Multi-azimuth output isn't supported together with "
-                "Q-uniform bins yet. Uncheck Multi-azimuth output, or set "
-                "Bin type back to Radial."); return
-        if self._q_mode_active():
-            QtWidgets.QMessageBox.warning(
-                self, "Not supported in background jobs yet",
-                "Q-uniform bins aren't wired into background jobs yet.\n"
-                "Set Bin type back to Radial, or use 'Start Integration' "
-                "for an in-process run."); return
+                f"Multi-azimuth output isn't supported together with "
+                f"{self._rebin_label()}-uniform bins yet. Uncheck "
+                f"Multi-azimuth output, or set Bin type back to Radial."); return
 
         import tifffile
         from midas_gui.helpers import write_standalone_paramstest
@@ -2209,6 +2271,14 @@ class BatchTab(QtWidgets.QWidget):
 
         argv += ["--out-dir", str(out_path), "--fmts", ",".join(fmts),
                  "--kernel", self._kernel.currentData()]
+        # Output rebin (Bin type = Q or 2theta). The underlying integration
+        # grid is still R-uniform in every case -- these only resample the
+        # finished profile, exactly as the in-process run does.
+        if rebin_cfg:
+            argv += ["--rebin-unit", rebin_cfg["unit"],
+                     "--rebin-min", str(rebin_cfg["min"]),
+                     "--rebin-max", str(rebin_cfg["max"]),
+                     "--rebin-step", str(rebin_cfg["step"])]
 
         # start/end are FILE/SCAN NUMBERS (batch_cli.py's --frame-start/
         # --frame-end match this meaning now); chunk_size/combine_op are
@@ -2664,8 +2734,7 @@ class BatchTab(QtWidgets.QWidget):
                         if self._var_check.isChecked() else None)
         if variance_cfg and self._corr_widget.any_enabled():
             variance_cfg = None
-        q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
-                  "QBinSize": self._q_bin.value()} if self._q_mode_active() else None)
+        q_cfg = self._rebin_cfg()
         # "R" in both modes — see the note at the other set_axis_context site.
         _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength), "R")
         self._stack_view.set_axis_context(*_axctx)

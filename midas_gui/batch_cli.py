@@ -46,6 +46,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--r-min", type=float, default=None, help="Rmin (px); default backend auto")
     p.add_argument("--r-max", type=float, default=None, help="Rmax (px); default backend auto")
 
+    # Output rebin (Batch Integrate's "Bin type"). The integration grid is
+    # always R-uniform -- these resample the finished 1-D profile onto a
+    # grid uniform in Q or 2theta. Omit --rebin-unit for plain Radial.
+    p.add_argument("--rebin-unit", default=None, choices=["Q", "2th"],
+                   help="Rebin the OUTPUT uniformly in Q (1/A) or 2theta (deg)")
+    p.add_argument("--rebin-min", type=float, default=None,
+                   help="Low edge of the output rebin grid, in --rebin-unit")
+    p.add_argument("--rebin-max", type=float, default=None,
+                   help="High edge of the output rebin grid, in --rebin-unit")
+    p.add_argument("--rebin-step", type=float, default=None,
+                   help="Output rebin bin size, in --rebin-unit")
+
     p.add_argument("--source-type", required=True,
                    choices=["tiff_glob", "hdf5", "tiff_list", "hdf5_stack_glob"])
     p.add_argument("--source-path", help="Folder/glob (tiff_glob) or file path (hdf5)")
@@ -157,6 +169,26 @@ def _source_cfg(args) -> dict:
     raise SystemExit(f"Unknown --source-type: {args.source_type}")
 
 
+def _rebin_cfg(args):
+    """``workers.rebin_cfg_parts``-shaped output rebin config, or ``None``.
+
+    Mirrors what ``BatchTab._rebin_cfg`` hands an in-process run, so a
+    background job and a Start Integration run of the same settings produce
+    the same profile."""
+    if args.rebin_unit is None:
+        return None
+    missing = [f"--rebin-{n}" for n in ("min", "max", "step")
+               if getattr(args, f"rebin_{n}") is None]
+    if missing:
+        raise SystemExit(
+            f"[batch] ERROR: --rebin-unit needs {', '.join(missing)}")
+    if args.rebin_step <= 0 or args.rebin_max <= args.rebin_min:
+        raise SystemExit(
+            "[batch] ERROR: --rebin-step must be > 0 and --rebin-max > --rebin-min")
+    return {"unit": args.rebin_unit, "min": args.rebin_min,
+            "max": args.rebin_max, "step": args.rebin_step}
+
+
 def _omega_cfg(args) -> dict:
     """The rotation half of the run configuration, in the shape
     ``BatchWorker`` takes it. Mirrors ``BatchTab._omega_cfg`` exactly — the two
@@ -258,7 +290,7 @@ def main(argv=None) -> int:
         monitor_file=args.monitor_file,
         dark=dark, bright=bright, background=background, bright_mode=args.bright_mode,
         weighted=args.weighted, multi_azimuth=args.multi_azimuth,
-        omega_cfg=_omega_cfg(args),
+        q_cfg=_rebin_cfg(args), omega_cfg=_omega_cfg(args),
         zarr_grouping=args.zarr_grouping,
         ion_csv_extras=[g for g in args.ion_csv_extras.split(",") if g],
         im_trans=tuple(spec.TransOpt or ()), calibration_snapshot=calib_snapshot)

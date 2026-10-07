@@ -168,12 +168,15 @@ def export_gsas_zarr(project_path, panel_key: str, attempt_ref: str, out_path) -
 
     inputs = meta.get("inputs") or {}
     if inputs.get("q_cfg"):
+        from midas_gui.workers import rebin_cfg_parts
+        unit = rebin_cfg_parts(inputs["q_cfg"])[0]
+        label = {"Q": "Q", "2th": "2θ"}[unit]
         raise ValueError(
-            f"Attempt {attempt_ref} was run with Q-uniform binning — its "
-            "stored r_axis_px is Q-rebinned, not a simple function of the "
-            "calibration geometry, so the 2θ/bin-area GSAS-II needs can't "
-            "be reconstructed from it. Re-run this attempt with Q-uniform "
-            "bins unchecked to make it exportable.")
+            f"Attempt {attempt_ref} was run with {label}-uniform binning — "
+            f"its stored r_axis_px is {label}-rebinned, not the backend's "
+            "own grid, so the per-bin areas GSAS-II needs can't be "
+            "reconstructed from it. Re-run this attempt with Bin type set "
+            "to Radial to make it exportable.")
 
     if meta.get("mask_present") and not meta.get("mask_embedded"):
         raise ValueError(

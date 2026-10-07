@@ -83,7 +83,11 @@ def test_multi_azimuth_on_keeps_full_cake(app, tmp_path):
 
 def test_multi_azimuth_rejects_q_uniform_combo(app, tmp_path):
     """The UI blocks this combination; BatchWorker itself also refuses it as
-    defense-in-depth (rebin_R_to_Q only handles a 1-D profile)."""
+    defense-in-depth (rebin_R_to_grid only handles a 1-D profile).
+
+    Deliberately built with the LEGACY Q-only cfg spelling, which is also
+    what every project saved before 2θ existed carries — so this doubles as
+    coverage that rebin_cfg_parts still reads it."""
     pytest.importorskip("torch")
     pytest.importorskip("midas_integrate_v2")
     import midas_gui.workers as wk

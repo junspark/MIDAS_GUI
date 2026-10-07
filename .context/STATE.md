@@ -1,14 +1,16 @@
 # STATE — current snapshot
 
 _Keep this under ~1 page. Permanent history lives in DECISIONS.md, not here._
-_Last updated: 2026-10-05 (new Batch Correction tab — all local, nothing pushed)_
+_Last updated: 2026-10-06 (three-way Bin type — all local, nothing pushed)_
 
 ## Now working on
 
-**Batch Correction landed (2026-10-05); AgBeh calibration still open.**
-New optional tab: chunked frame reduction (mean/median/sum/max over N
-sub-frames per file) with field correction, HDF5 out. See "Recently
-completed" and DECISIONS 2026-10-05.
+**Batch Correction landed (2026-10-05); Bin type went three-way
+(2026-10-06); AgBeh calibration still open.** Batch Correction is a new
+optional tab: chunked frame reduction (mean/median/sum/max over N sub-frames
+per file) with field correction, HDF5 out. Batch Integrate's Bin type now
+offers Radial / Q / 2θ, in background jobs as well as in-process. See
+"Recently completed" and DECISIONS 2026-10-05 / 2026-10-06.
 
 **Clearing the decks before the next push.** PR #11 is behind us — upstream
 merged all 48 of our commits on 2026-09-30 as eight staged checkpoints ending
@@ -17,7 +19,7 @@ then `1c5c9af` for their ring-coverage commit). Since then: three Calibrate
 fixes reported from the beamline, and a housekeeping pass (ROADMAP reconciled,
 the PR#7 pyflakes nit fixed, scratch dirs pruned).
 
-`main` is **24 commits ahead of `origin/main` and nothing is pushed.** That is
+`main` is **43 commits ahead of `origin/main` and nothing is pushed.** That is
 the next action and it needs your word, since it is also the next PR upstream.
 
 Needing you, in the order it matters:
@@ -91,6 +93,38 @@ Open follow-ups, none blocking:
   `git fetch origin 'refs/pull/*/head:refs/remotes/origin/pr/*'`.
 
 ## Recently completed
+
+**2026-10-06 — Bin type: Radial / Q / 2θ, everywhere.** Two asks closed
+together, because they turned out to be one thing. "Q-uniform bins aren't
+wired into background jobs yet" was a guard in ``_run_as_job``; "we also want
+even 2theta case" was a missing unit. Both resolve to the same observation:
+**Q-uniform was never a backend binning mode here.** ``IntegrationSpec`` does
+carry ``QMin``/``QMax``/``QBinSize``, but ``workers.apply_q_uniform`` has
+never been called — every Q run integrates R-uniform and resamples the
+finished 1-D profile. There is no 2θ equivalent in the backend at all, so
+2θ could only be a rebin too, which makes the two units the same operation
+with different grid math.
+
+So: one generalised pair (``rebin_grid_and_r`` / ``rebin_R_to_grid``) in
+place of the Q-only pair, a self-describing config
+(``{"unit", "min", "max", "step"}``, legacy ``QMin``/... still read as Q), a
+three-way **Bin type** dropdown in Batch Integrate, and four ``--rebin-*``
+flags on ``batch_cli`` so a background job and a Start Integration run of
+the same settings produce the same profile. The four worker call sites kept
+their shape. Hydra and Pump-probe keep their Q-only checkbox; the helpers
+are unit-generic, so adding 2θ there later is a combo swap.
+
+Caught along the way: **``hydra_batch_page`` carried the same axis bug as
+``tab_batch``** — ``_axctx = (..., "Q" if q_cfg else "R")``, the thing that
+produced 2θ = 180° plots. 4cb7aaa fixed one of the two occurrences; the
+source guard now scans both files. Still refused, with either unit:
+multi-azimuth (the rebin handles 1-D only) and GSAS-II export of a rebinned
+attempt — both messages now name the selected unit.
+
+One deliberate numerical change: the old ``rebin_R_to_Q`` did
+``radians(degrees(arctan(...)))``, a round-trip that cancels in algebra but
+not in floating point. Q results move by ~1 ulp and are slightly more
+accurate. See DECISIONS 2026-10-06 (latest).
 
 **2026-10-05 — Batch Correction.** Asked for at the beamline: average /
 median / sum / max over a designated number of frames per file, with

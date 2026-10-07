@@ -838,15 +838,21 @@ def integrate_attempt_gui_fields(meta: dict) -> dict:
         fields["ion_motors_chk"] = "motors" in ion_extras
     if inputs.get("monitor_file"):
         fields["mon_ed"] = inputs["monitor_file"]
-    q_cfg = inputs.get("q_cfg")
-    if q_cfg:
-        fields["q_check"] = True
-        if q_cfg.get("QMin") is not None:
-            fields["q_min"] = q_cfg["QMin"]
-        if q_cfg.get("QMax") is not None:
-            fields["q_max"] = q_cfg["QMax"]
-        if q_cfg.get("QBinSize") is not None:
-            fields["q_bin"] = q_cfg["QBinSize"]
+    # Output rebin. Saved as "q_cfg" in every project -- the key predates
+    # 2theta -- so rebin_cfg_parts is what decides which unit it actually
+    # was: a dict with no "unit" is the legacy Q-only spelling.
+    # "q_check" is still emitted for HydraBatchPage, which has a checkbox
+    # where Batch Integrate now has a three-way Bin type dropdown (whose
+    # set_state translates a bare q_check back into bin_type="Q").
+    if inputs.get("q_cfg"):
+        from midas_gui.workers import rebin_cfg_parts
+        unit, lo, hi, step = rebin_cfg_parts(inputs["q_cfg"])
+        prefix = {"Q": "q", "2th": "tth"}[unit]
+        fields["bin_type"] = unit
+        fields["q_check"] = unit == "Q"
+        for name, value in (("min", lo), ("max", hi), ("bin", step)):
+            if value is not None:
+                fields[f"{prefix}_{name}"] = value
     return fields
 
 

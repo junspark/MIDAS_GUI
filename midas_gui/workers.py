@@ -32,11 +32,27 @@ from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_
 # ═════════════════════════════════════════════════════════════════════════════
 
 def apply_q_uniform(spec, q_cfg: Optional[dict]):
-    """Activate native Q-uniform binning on a spec when requested."""
+    """Activate the backend's NATIVE Q-uniform binning on a spec.
+
+    Deliberately unused. ``IntegrationSpec`` really does carry
+    QMin/QMax/QBinSize and a ``q_mode_active`` property that redefines
+    ``n_r_bins``, but this GUI does not take that route: every Q (and 2θ)
+    run integrates R-uniform and rebins the finished 1-D profile — see
+    :func:`rebin_grid_and_r` / :func:`rebin_R_to_grid`.
+
+    Kept because the native mode exists and may be worth revisiting, but do
+    not wire it up casually: the two routes disagree about what the axis
+    travelling with a profile *is*. The rebin route carries R in pixels
+    (the native mode would carry Q), and every downstream consumer —
+    writers, waterfall, stack view, the GSAS-II export guard — assumes
+    pixels. Getting that wrong is what produced the 2θ = 180° plots fixed
+    in 4cb7aaa."""
     if q_cfg:
-        spec.QMin     = float(q_cfg["QMin"])
-        spec.QMax     = float(q_cfg["QMax"])
-        spec.QBinSize = float(q_cfg["QBinSize"])
+        unit, lo, hi, step = rebin_cfg_parts(q_cfg)
+        if unit != "Q":
+            raise ValueError(
+                f"native spec binning exists for Q only, not {unit!r}")
+        spec.QMin, spec.QMax, spec.QBinSize = float(lo), float(hi), float(step)
     return spec
 
 
@@ -219,26 +235,94 @@ def count_cake(geom, kernel: str, NrPixelsZ: int, NrPixelsY: int) -> np.ndarray:
     return fn(ones, geom, normalize=False).detach().cpu().numpy()
 
 
-def q_grid_and_r(q_cfg, lsd, px, wl):
-    """Uniform-Q bin centres + the matching R(px) for each Q (for axis/writers)."""
-    n = max(1, int(round((q_cfg["QMax"] - q_cfg["QMin"]) / q_cfg["QBinSize"])))
-    qgrid = q_cfg["QMin"] + q_cfg["QBinSize"] * (np.arange(n) + 0.5)
-    two_theta = 2.0 * np.arcsin(np.clip(qgrid * wl / (4 * math.pi), -1, 1))
-    r_of_q = lsd * np.tan(two_theta) / px
-    return qgrid, r_of_q
+#: Output radial units this app can rebin an R-uniform profile onto.
+REBIN_UNITS = ("Q", "2th")
+
+#: Display names for those units, for log lines and user-facing messages.
+#: ``None`` (no rebin configured) reads as "off" so callers can index this
+#: unconditionally.
+_REBIN_LABEL = {None: "off", "Q": "Q", "2th": "2θ"}
 
 
-def rebin_R_to_Q(r_ax, prof, sigma, qgrid, lsd, px, wl):
-    """Rebin an R-uniform profile/σ onto a uniform-Q grid (the kernels don't do Q-mode).
+def rebin_cfg_parts(cfg) -> tuple:
+    """``(unit, lo, hi, step)`` from an output-rebin config.
 
-    See analyze_workflows/workflow_analysis.md (P0-2): integrate R-uniform then interpolate
-    onto uniform Q so rings land at the correct Q.
+    The canonical form is self-describing::
+
+        {"unit": "Q" | "2th", "min": float, "max": float, "step": float}
+
+    with ``min``/``max``/``step`` in that unit's own terms (Å⁻¹ for Q,
+    degrees for 2θ). The legacy Q-only spelling — ``QMin``/``QMax``/
+    ``QBinSize`` and no ``unit`` — is still accepted and read as Q, so
+    projects saved before 2θ existed keep loading.
+
+    This is the only place that knows the dict's shape; everything else goes
+    through here.
+
+    (The transport keyword is still named ``q_cfg`` throughout the workers
+    and in saved projects' ``inputs``. It predates 2θ and renaming it would
+    reach the on-disk project schema for naming alone — the dict itself says
+    which unit it is.)"""
+    if not cfg:
+        return None, None, None, None
+    unit = cfg.get("unit", "Q")
+    if "min" in cfg:
+        lo, hi, step = cfg["min"], cfg["max"], cfg["step"]
+    else:                                   # legacy Q-only spelling
+        lo, hi, step = cfg["QMin"], cfg["QMax"], cfg["QBinSize"]
+    if unit not in REBIN_UNITS:
+        raise ValueError(f"unknown output rebin unit {unit!r}; "
+                         f"expected one of {REBIN_UNITS}")
+    return unit, float(lo), float(hi), float(step)
+
+
+def _r_px_of(values, unit, lsd, px, wl) -> np.ndarray:
+    """R in detector pixels for an array of radial positions in ``unit``."""
+    values = np.asarray(values, dtype=float)
+    if unit == "Q":
+        two_theta = 2.0 * np.arcsin(np.clip(values * wl / (4 * math.pi), -1, 1))
+    else:                                   # "2th", already an angle
+        two_theta = np.radians(values)
+    return lsd * np.tan(two_theta) / px
+
+
+def _unit_of_r_px(r_px, unit, lsd, px, wl) -> np.ndarray:
+    """The inverse of :func:`_r_px_of`: pixels → ``unit``."""
+    two_theta = np.arctan(np.asarray(r_px, dtype=float) * px / lsd)   # radians
+    if unit == "Q":
+        return 4 * math.pi * np.sin(two_theta / 2) / wl
+    return np.degrees(two_theta)
+
+
+def rebin_grid_and_r(cfg, lsd, px, wl):
+    """Output bin centres + the matching R(px) for each — ``(grid, r_of_grid)``.
+
+    ``grid`` is uniform in the config's unit (Q in Å⁻¹, or 2θ in degrees);
+    ``r_of_grid`` is where each of those bins sits on the detector, in
+    pixels. The second value is the axis that travels onward with the
+    rebinned profile — writers, the waterfall and the stack view all expect
+    pixels, so this is R, *not* the grid. See :func:`apply_q_uniform`.
     """
-    q_of_r = 4 * math.pi * np.sin(np.radians(np.degrees(np.arctan(r_ax * px / lsd))) / 2) / wl
-    order = np.argsort(q_of_r)
-    prof_q = np.interp(qgrid, q_of_r[order], prof[order])
-    sig_q = np.interp(qgrid, q_of_r[order], sigma[order]) if sigma is not None else None
-    return prof_q, sig_q
+    unit, lo, hi, step = rebin_cfg_parts(cfg)
+    n = max(1, int(round((hi - lo) / step)))
+    grid = lo + step * (np.arange(n) + 0.5)
+    return grid, _r_px_of(grid, unit, lsd, px, wl)
+
+
+def rebin_R_to_grid(r_ax, prof, sigma, grid, lsd, px, wl, unit="Q"):
+    """Rebin an R-uniform profile/σ onto a grid uniform in ``unit``.
+
+    The integration kernels only bin uniformly in R (there is no 2θ mode at
+    all, and the native Q mode is unused — see :func:`apply_q_uniform`), so
+    uniform-Q and uniform-2θ output are produced here: integrate R-uniform,
+    convert this run's R axis into the target unit, and interpolate onto the
+    requested grid so rings land at the correct Q / 2θ.
+    """
+    x_of_r = _unit_of_r_px(r_ax, unit, lsd, px, wl)
+    order = np.argsort(x_of_r)
+    prof_x = np.interp(grid, x_of_r[order], prof[order])
+    sig_x = np.interp(grid, x_of_r[order], sigma[order]) if sigma is not None else None
+    return prof_x, sig_x
 
 
 def corrections_counts(spec):
@@ -1994,16 +2078,18 @@ class BatchWorker(QtCore.QThread):
             want_h5_cake = (self._multi_azimuth and "h5" in self._fmts
                             and self._out_dir is not None)
             need_sigma = True   # xye/fxye require σ; always provide it
+            rebin_unit = rebin_cfg_parts(self._q_cfg)[0]
             if self._multi_azimuth and self._q_cfg:
-                # Q-rebinning (rebin_R_to_Q) only handles a 1-D profile; combining
-                # it with per-azimuth cake output isn't supported yet — the UI
-                # already blocks this combination before starting the worker.
+                # The rebin (rebin_R_to_grid) only handles a 1-D profile;
+                # combining it with per-azimuth cake output isn't supported
+                # yet — the UI already blocks this before starting the worker.
                 raise RuntimeError(
                     "Multi-azimuth output isn't supported together with "
-                    "Q-uniform bins yet.")
-            # Q-uniform handled by rebinning the R-uniform profile (kernels lack Q-mode)
+                    f"{_REBIN_LABEL[rebin_unit]}-uniform bins yet.")
+            # Uniform Q / 2theta come from rebinning the R-uniform profile
+            # (the kernels only bin in R) -- see rebin_R_to_grid.
             if self._q_cfg:
-                qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
+                out_grid, r_ax = rebin_grid_and_r(self._q_cfg, lsd, px, wl)
 
             # Monitor normalisation: load per-frame scalars if a file was provided
             monitor_vals = None
@@ -2026,7 +2112,7 @@ class BatchWorker(QtCore.QThread):
                 f"[batch] {total} frames | kernel={self._kernel} | "
                 f"corrections={'on' if corr_on else 'off'} | "
                 f"variance={'on' if self._variance_cfg else 'off'} | "
-                f"q_uniform={'on (rebinned)' if self._q_cfg else 'off'} | "
+                f"rebin={_REBIN_LABEL[rebin_unit] + ' (uniform)' if self._q_cfg else 'off'} | "
                 f"{range_desc} | "
                 f"monitor={'yes' if monitor_vals else 'no'} | "
                 f"drift={'on' if self._drift_traj else 'off'}")
@@ -2219,9 +2305,9 @@ class BatchWorker(QtCore.QThread):
                             cake_2d = cake_2d / mon
                             cake_sigma = cake_sigma / abs(mon)
 
-                if self._q_cfg:   # rebin R-uniform → uniform Q (not combined with cake mode)
-                    prof, sigma = rebin_R_to_Q(compute_r_axis(spec), prof, sigma,
-                                               qgrid, lsd, px, wl)
+                if self._q_cfg:   # R-uniform → uniform Q/2θ (not combined with cake mode)
+                    prof, sigma = rebin_R_to_grid(compute_r_axis(spec), prof, sigma,
+                                                  out_grid, lsd, px, wl, rebin_unit)
                 # The live waterfall/stacked view always gets the η-collapsed profile,
                 # in both modes — only the accumulated/stored result differs.
                 if self._multi_azimuth and cake_2d is not None:
@@ -2565,8 +2651,9 @@ class PumpProbeWorker(QtCore.QThread):
             geom = ctx["geom"]; corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
             r_ax = ctx["r_ax"]
 
+            rebin_unit = rebin_cfg_parts(self._q_cfg)[0]
             if self._q_cfg:
-                qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
+                out_grid, r_ax = rebin_grid_and_r(self._q_cfg, lsd, px, wl)
             two_theta, _, q_ax = axis_conversions(r_ax, lsd, px, wl)
 
             fields_on = (self._dark is not None or self._bright is not None
@@ -2575,7 +2662,7 @@ class PumpProbeWorker(QtCore.QThread):
             self.log_line.emit(
                 f"[pump] {total} frames | kernel={self._kernel} | "
                 f"corrections={'on' if ctx['corr_on'] else 'off'} | "
-                f"q_uniform={'on' if self._q_cfg else 'off'} | "
+                f"rebin={_REBIN_LABEL[rebin_unit] if self._q_cfg else 'off'} | "
                 f"fields={'on' if fields_on else 'off'}")
 
             profiles, delays = [], []
@@ -2594,8 +2681,8 @@ class PumpProbeWorker(QtCore.QThread):
                     None, False, corr_counts=corr_counts,
                     weighted=self._weighted, cnt_cake=cnt)
                 if self._q_cfg:
-                    prof, _ = rebin_R_to_Q(compute_r_axis(spec), prof, None,
-                                           qgrid, lsd, px, wl)
+                    prof, _ = rebin_R_to_grid(compute_r_axis(spec), prof, None,
+                                              out_grid, lsd, px, wl, rebin_unit)
                 if self._norm_range is not None:
                     prof = self._normalize(prof, q_ax, self._norm_range)
                 profiles.append(prof); delays.append(float(delay))
@@ -3289,9 +3376,10 @@ class FolderMonitorWorker(QtCore.QThread):
             geom = ctx["geom"]; corr_counts = ctx["corr_counts"]; cnt = ctx["cnt"]
             lsd, px, wl = ctx["lsd"], ctx["px"], ctx["wl"]
             r_ax = ctx["r_ax"]
-            qgrid = None
+            out_grid = None
+            rebin_unit = rebin_cfg_parts(self._q_cfg)[0]
             if self._q_cfg:
-                qgrid, r_ax = q_grid_and_r(self._q_cfg, lsd, px, wl)
+                out_grid, r_ax = rebin_grid_and_r(self._q_cfg, lsd, px, wl)
             fields_on = (dark is not None or bright is not None
                          or background is not None)
             save_fmts = [f for f in self._fmts if f in ("csv", "xye", "fxye", "dat")]
@@ -3335,8 +3423,8 @@ class FolderMonitorWorker(QtCore.QThread):
                     if sigma is None:
                         sigma = np.sqrt(np.maximum(prof, 0.0))
                     if self._q_cfg:
-                        prof, sigma = rebin_R_to_Q(compute_r_axis(spec), prof, sigma,
-                                                   qgrid, lsd, px, wl)
+                        prof, sigma = rebin_R_to_grid(compute_r_axis(spec), prof, sigma,
+                                                      out_grid, lsd, px, wl, rebin_unit)
                     self._seen.add(fid)
                     count += 1
                     self.frame_done.emit(fid, r_ax, prof, sigma)
