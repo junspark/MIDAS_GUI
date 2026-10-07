@@ -261,16 +261,22 @@ def create_live_source(backend, parent=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def hydra_pv_for_panel(pattern: str, n: int) -> str:
-    """``pattern`` with every ``geN`` token rewritten to ``ge<n>``.
+    """``pattern`` with every ``geN`` token repointed at panel ``n``.
 
-    The same substitution :func:`helpers.hydra_siblings` does on file paths,
-    applied to PV names -- these detectors are named the same way in both
-    places, so one pattern describes all four channels and the user types
-    it once. A pattern with no ``geN`` token comes back unchanged, which is
-    the "every panel is on one PV" case and is handled by the caller.
+    The same token :func:`helpers.hydra_siblings` substitutes in file
+    paths, applied to PV names -- the detectors are named the same way in
+    both places, so one pattern describes all four channels and is typed
+    once. A pattern with no ``geN`` token comes back unchanged, which is
+    the "one PV for everything" case and is the caller's to handle.
+
+    **Only the digit changes; the case of the letters is kept exactly as
+    typed.** PV names are case-sensitive and the real ones are upper case
+    (``GE2:Pva1:Image``), while the files are lower case (``.ge2.h5``) --
+    lower-casing the substitution here would silently produce a PV that
+    does not exist, which looks identical to a detector being off.
     """
     from midas_gui.helpers import _HYDRA_PANEL_RE
-    return _HYDRA_PANEL_RE.sub(f"ge{int(n)}", pattern)
+    return _HYDRA_PANEL_RE.sub(lambda m: m.group(0)[:-1] + str(int(n)), pattern)
 
 
 class HydraLiveMux(QtCore.QObject):

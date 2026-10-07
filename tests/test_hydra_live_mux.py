@@ -68,7 +68,8 @@ def _img(v):
 
 def _start(mux, panels=(1, 2, 3, 4)):
     from midas_gui.live_sources import hydra_pv_for_panel
-    pattern = "20iddE:ge1:Pva1:Image"
+    # The spelling the beamline actually publishes.
+    pattern = "GE1:Pva1:Image"
     return mux.start({n: hydra_pv_for_panel(pattern, n) for n in panels})
 
 
@@ -79,7 +80,19 @@ def test_the_pv_pattern_substitutes_the_panel_token():
     describes all four channels."""
     from midas_gui.live_sources import hydra_pv_for_panel
     assert hydra_pv_for_panel("20iddE:ge1:Pva1:Image", 3) == "20iddE:ge3:Pva1:Image"
-    assert hydra_pv_for_panel("det:GE4:img", 2) == "det:ge2:img"
+    assert hydra_pv_for_panel("GE2:Pva1:Image", 4) == "GE4:Pva1:Image"
+
+
+def test_the_pv_keeps_the_case_it_was_typed_in():
+    """The real PVs are upper case (GE2:Pva1:Image) while the files are
+    lower case (.ge2.h5), and PV names are case-sensitive -- lower-casing
+    the substitution would produce a PV that does not exist, which looks
+    exactly like a detector being switched off."""
+    from midas_gui.live_sources import hydra_pv_for_panel
+    assert hydra_pv_for_panel("GE2:Pva1:Image", 3) == "GE3:Pva1:Image"
+    assert hydra_pv_for_panel("20iddE:GE1:Pva1:Image", 2) == "20iddE:GE2:Pva1:Image"
+    assert hydra_pv_for_panel("det:ge4:img", 2) == "det:ge2:img"
+    assert hydra_pv_for_panel("Ge1:img", 4) == "Ge4:img"
 
 
 def test_a_pattern_with_no_token_is_left_alone():
@@ -94,7 +107,7 @@ def test_one_source_per_panel_each_on_its_own_pv(app, fake_sources):
     assert _start(mux) == {1: True, 2: True, 3: True, 4: True}
     assert mux.panels() == [1, 2, 3, 4]
     assert sorted(s.pv for s in fake_sources) == [
-        f"20iddE:ge{n}:Pva1:Image" for n in (1, 2, 3, 4)]
+        f"GE{n}:Pva1:Image" for n in (1, 2, 3, 4)]
 
 
 def test_only_the_panels_asked_for_are_started(app, fake_sources):
