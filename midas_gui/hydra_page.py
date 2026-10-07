@@ -39,6 +39,24 @@ from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
 from midas_gui.widgets import _convert_radial, OriginToolButton
 from midas_gui import style as S
 
+#: Decimation factor for the composite built for the Data Viewer.
+#:
+#: The windmill canvas for a real four-panel GE array is 6656x6656 -- 44.3
+#: megapixels, several times any screen, rebuilt synchronously on the GUI
+#: thread. Building it every second pixel costs a quarter of the work
+#: (remap 2.09 s -> ~0.5 s, composite max 1.61 s -> ~0.4 s, autolevel
+#: 0.49 s -> ~0.12 s) for an image still larger than the widget showing it.
+#:
+#: This is display resolution only, and it is NOT a shortcut taken behind a
+#: measurement's back: the "Composite" radial curve sums the per-panel
+#: profiles rather than integrating this image (see _refresh_composite_curve),
+#: and Calibrate imports per-panel geometries, not this canvas (see
+#: export_for_calibration). What does read it -- the composite card's own
+#: overlays and radial integration -- is kept correct by scaling that card's
+#: pixel size, beam centre and NrPixels to match, in
+#: _reseed_composite_card_if_needed. Set to 1 for a full-resolution canvas.
+COMPOSITE_DISPLAY_STEP = 2
+
 
 class _ProfileSinkAdapter:
     """Adapts a DetectorGeometryCard's ProfileViewer-shaped calls
@@ -271,7 +289,7 @@ class HydraViewerPage(QtWidgets.QWidget):
         try:
             comp, big_det_size = hydra.build_windmill_composite(
                 active, self._loader.frame_index(), self._loader.dataset(),
-                self._states, op="max")
+                self._states, op="max", step=COMPOSITE_DISPLAY_STEP)
         except Exception:
             self._composite_img = None
             return
@@ -282,30 +300,42 @@ class HydraViewerPage(QtWidgets.QWidget):
     def _reseed_composite_card_if_needed(self, big_det_size: int, active_panels: dict):
         """Seed the composite card's beam centre at the canvas centre (the
         composite is registered so its own geometric centre IS BigDetSize/2)
-        the first time this canvas size is seen. Lsd is the mean across the
+        the first time this canvas size is seen.
+
+        ``big_det_size`` is the canvas's FULL-RESOLUTION extent; the image
+        actually built is decimated by ``COMPOSITE_DISPLAY_STEP``. The
+        geometry seeded here describes the image, not the full canvas, so
+        beam centre and NrPixels are in built pixels and the pixel size is
+        scaled by the same factor -- the field of view is identical, which
+        is what keeps this card's rings and radial integration correct at
+        any step.
+
+        Lsd is the mean across the
         contributing panels (they're all roughly the same sample-to-detector
         distance on a real Hydra rig); wavelength comes from whichever ge
         card was loaded first, since DetectorState itself has no wavelength
         (it's a ring-simulation-only parameter, not part of the compositing
         math). A user can still hand-edit the composite card afterward —
         this only fires once per distinct canvas size."""
-        if self._composite_seeded_size == big_det_size or not active_panels:
+        step = max(1, int(COMPOSITE_DISPLAY_STEP))
+        n_out = (int(big_det_size) + step - 1) // step
+        if self._composite_seeded_size == n_out or not active_panels:
             return
-        self._composite_seeded_size = big_det_size
+        self._composite_seeded_size = n_out
         states = [self._states[n] for n in active_panels]
         lsd = sum(s.lsd for s in states) / len(states)
-        px = states[0].px
+        px = states[0].px * step          # a built pixel spans `step` detector pixels
         wl = 0.172973
         for n in active_panels:
             g = self._cards[f"ge{n}"].get_geometry()
             if g.get("wavelength_A"):
                 wl = g["wavelength_A"]
                 break
-        half = big_det_size / 2.0
+        half = n_out / 2.0
         self._cards["composite"].set_geometry({
             "wavelength_A": wl, "pxY": px, "Lsd": lsd,
             "BC_y": half, "BC_z": half, "tx": 0.0, "ty": 0.0, "tz": 0.0,
-            "NrPixelsY": big_det_size, "NrPixelsZ": big_det_size,
+            "NrPixelsY": n_out, "NrPixelsZ": n_out,
             "distortion": {}, "im_trans": [],
         })
 

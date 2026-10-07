@@ -79,9 +79,16 @@ def compute_inv_coords(bc_y: float, bc_z: float, tx_deg: float,
     return z_pix.astype(np.float32), y_pix.astype(np.float32)
 
 
-def inv_coord_base(tx_deg: float, big_det_size: int, px: float):
+def inv_coord_base(tx_deg: float, big_det_size: int, px: float, step: int = 1):
     """The beam-centre-INDEPENDENT half of :func:`compute_inv_coords`, as
     ``(Z_det/px, Y_det/px)``.
+
+    ``step`` builds the canvas decimated by that factor -- sampling every
+    ``step``-th output pixel, so the result is exactly the full grid's
+    ``[::step, ::step]`` and the field of view is unchanged. A canvas pixel
+    then spans ``step`` detector pixels, which is why a caller that keeps
+    geometry alongside the image must also scale its pixel size, beam
+    centre and NrPixels (see ``hydra_page._reseed_composite_card_if_needed``).
 
     Look at the last two lines above: ``bc_y``/``bc_z`` are a plain additive
     offset, and everything expensive -- two 6656x6656 meshgrids and the
@@ -94,12 +101,17 @@ def inv_coord_base(tx_deg: float, big_det_size: int, px: float):
     ``remap_to_composite``.
     """
     bds = int(big_det_size)
+    step = max(1, int(step))
     half = bds * 0.5
     tx_rad = math.radians(tx_deg)
     c, s = math.cos(tx_rad), math.sin(tx_rad)
 
-    yo = np.arange(bds, dtype=np.float32)
-    zo = np.arange(bds, dtype=np.float32)
+    # arange(bds)[::step], written directly so the grid is never materialised
+    # at full size -- the whole point is not to allocate 44 Mpx to throw
+    # three quarters of it away.
+    n_out = (bds + step - 1) // step
+    yo = (np.arange(n_out, dtype=np.float32) * step)
+    zo = (np.arange(n_out, dtype=np.float32) * step)
     Yo, Zo = np.meshgrid(yo, zo)
 
     Y_lab = (half - Yo) * px
@@ -222,7 +234,7 @@ class DetectorState:
     def load_default(self, panel: int) -> None:
         self.load_from_geometry_dict(geometry_fields_from_file(str(default_param_file(panel))))
 
-    def get_inv_coords(self, big_det_size: int) -> tuple:
+    def get_inv_coords(self, big_det_size: int, step: int = 1) -> tuple:
         """Sampling grids for this panel's place in the composite.
 
         What is cached is the BC-independent grid, not the finished one. The
@@ -238,9 +250,10 @@ class DetectorState:
         grids either way, and the add's result is transient -- consumed by
         ``remap_to_composite`` and dropped.
         """
-        key = (round(float(self.tx), 6), int(big_det_size), round(float(self.px), 6))
+        key = (round(float(self.tx), 6), int(big_det_size),
+               round(float(self.px), 6), max(1, int(step)))
         if self._inv_cache_key != key or self._base_coords is None:
-            self._base_coords = inv_coord_base(self.tx, big_det_size, self.px)
+            self._base_coords = inv_coord_base(self.tx, big_det_size, self.px, step)
             self._inv_cache_key = key
         z_base, y_base = self._base_coords
         # Same arithmetic, same order, same dtype as compute_inv_coords'
@@ -248,7 +261,7 @@ class DetectorState:
         return self.bc_z + z_base, self.bc_y - y_base
 
     def get_remapped_frame(self, frame_idx: int, dataset: str,
-                           big_det_size: int) -> np.ndarray:
+                           big_det_size: int, step: int = 1) -> np.ndarray:
         if self.proj_raw is not None:
             # Already corrected + projected by ProjectionWorker — same
             # precedent as the single-detector tab's _on_projection_done.
@@ -262,7 +275,7 @@ class DetectorState:
                                               bright_mode=self.bright_mode,
                                               background=self.background)
         img = _apply_im_trans(img, tuple(self.im_trans_opts))
-        rows, cols = self.get_inv_coords(big_det_size)
+        rows, cols = self.get_inv_coords(big_det_size, step)
         return remap_to_composite(img, rows, cols)
 
 
@@ -270,7 +283,7 @@ _big_det_size_cache: dict = {}
 
 
 def build_windmill_composite(siblings: dict, frame_idx: int, dataset: str,
-                             states: dict, op: str = "max"):
+                             states: dict, op: str = "max", step: int = 1):
     """Composite `frame_idx` from every panel in `siblings` (panel number ->
     file path) into one BC/tilt-registered BigDet frame, using `states` as a
     persistent cache of DetectorState per panel (geometry + inverse-
@@ -299,8 +312,12 @@ def build_windmill_composite(siblings: dict, frame_idx: int, dataset: str,
         big_det_size = autopick_big_det_size(active)
         _big_det_size_cache[key] = big_det_size
 
-    remapped = [st.get_remapped_frame(frame_idx, dataset, big_det_size)
+    remapped = [st.get_remapped_frame(frame_idx, dataset, big_det_size, step)
                for st in active]
+    # big_det_size is the canvas's FULL-RESOLUTION extent, which is what
+    # describes the field of view; at step > 1 the returned image is
+    # correspondingly smaller. Callers that pass step must scale any geometry
+    # they keep beside the image.
     return composite(remapped, op=op), big_det_size
 
 

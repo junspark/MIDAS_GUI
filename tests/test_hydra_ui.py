@@ -269,10 +269,16 @@ def test_hydra_composite_builds_with_matched_calibration(app, fixture_available)
     hp._toolbar.set_current("composite")
     app.processEvents()
     assert hp._composite_img is not None
-    assert hp._composite_img.shape == (512, 512)
-    # composite card auto-seeded at the canvas centre
-    assert hp._cards["composite"]._bcy.value() == pytest.approx(256.0)
-    assert hp._cards["composite"]._bcz.value() == pytest.approx(256.0)
+    # The canvas is 512 px across; the image is built every
+    # COMPOSITE_DISPLAY_STEP-th pixel of it, so assert the relationship
+    # rather than a literal that silently stops meaning anything if the
+    # display step changes.
+    from midas_gui.hydra_page import COMPOSITE_DISPLAY_STEP as STEP
+    built = (512 + STEP - 1) // STEP
+    assert hp._composite_img.shape == (built, built)
+    # composite card auto-seeded at the centre of the image actually built
+    assert hp._cards["composite"]._bcy.value() == pytest.approx(built / 2.0)
+    assert hp._cards["composite"]._bcz.value() == pytest.approx(built / 2.0)
 
     # (1) beam-centre edit -> radial profile
     card = hp._cards["ge1"]

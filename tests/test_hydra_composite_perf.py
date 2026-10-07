@@ -139,3 +139,79 @@ def test_the_spins_still_work_on_their_own(card):
     card._bcy.setValue(640.0)
     card._bcz.setValue(660.0)
     assert len(seen) == 3
+
+
+# -- building the display canvas decimated ------------------------------
+
+@pytest.mark.parametrize("step", [1, 2, 3, 4])
+@pytest.mark.parametrize("bds", [512, 513, 300])
+def test_the_decimated_grid_is_exactly_the_full_grid_sampled(step, bds):
+    """Decimation must mean "every step-th pixel of the same canvas", not a
+    resize: same field of view, same registration, fewer samples. Comparing
+    against the untouched reference sliced [::step, ::step] states that
+    exactly, and would catch an off-by-one in the output extent -- which
+    would show up as a composite subtly mis-registered against its rings.
+    """
+    from midas_gui import hydra
+    st = hydra.DetectorState()
+    st.load_default(1)
+    st.px, st.bc_y, st.bc_z = 200.0, 811.5, 902.25
+    got_z, got_y = st.get_inv_coords(bds, step)
+    full_z, full_y = hydra.compute_inv_coords(st.bc_y, st.bc_z, st.tx, bds, st.px)
+    assert np.array_equal(got_z, full_z[::step, ::step])
+    assert np.array_equal(got_y, full_y[::step, ::step])
+
+
+def test_the_default_is_still_a_full_canvas():
+    """Only the Data Viewer opts into decimation; every other caller, and
+    every pipeline that writes data, must be unaffected by default."""
+    from midas_gui import hydra
+    st = hydra.DetectorState(); st.load_default(1)
+    z, _ = st.get_inv_coords(128)
+    assert z.shape == (128, 128)
+
+
+def test_changing_the_step_rebuilds_the_grid(monkeypatch):
+    """step changes the grid, so it has to be part of the cache key."""
+    from midas_gui import hydra
+    st = hydra.DetectorState(); st.load_default(1)
+    st.get_inv_coords(256, 1)
+    calls = _count_rebuilds(monkeypatch)
+    st.get_inv_coords(256, 2)
+    assert len(calls) == 1, "the step was not part of the cache key"
+
+
+# -- the part that keeps it honest --------------------------------------
+
+@pytest.mark.forked
+def test_the_composite_card_geometry_describes_the_image_it_was_built_at(tmp_path, app):
+    """A decimated canvas is only safe because the geometry seeded beside it
+    is scaled to match: a built pixel spans `step` detector pixels, so the
+    pixel size scales up while beam centre and NrPixels scale down, leaving
+    the field of view -- and therefore the ring positions and the radial
+    integration -- unchanged. Getting this wrong would not crash; it would
+    quietly put the rings in the wrong place.
+    """
+    h5py = pytest.importorskip("h5py")
+    from midas_gui.hydra_page import HydraViewerPage, COMPOSITE_DISPLAY_STEP as STEP
+
+    for n in (1, 2, 3, 4):
+        with h5py.File(str(tmp_path / f"s_00001.ge{n}.h5"), "w") as f:
+            f.create_dataset("exchange/data",
+                             data=np.zeros((2, 64, 64), np.float32))
+
+    page = HydraViewerPage()
+    page._loader._set_path(str(tmp_path / "s_00001.ge1.h5"))
+    page._toolbar.set_current("composite")
+    page._build_composite_if_needed()
+    if page._composite_img is None:
+        pytest.skip("composite did not build in this environment")
+
+    built = page._composite_img.shape[0]
+    card = page._cards["composite"]
+    assert card._bcy.value() == pytest.approx(built / 2.0)
+    assert card._bcz.value() == pytest.approx(built / 2.0)
+    # px scaled up by exactly the factor the image was scaled down by, so
+    # (NrPixels * px) -- the physical extent -- is step-invariant.
+    panel_px = page._states[1].px
+    assert card._px.value() == pytest.approx(panel_px * STEP)
