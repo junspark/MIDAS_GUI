@@ -5359,6 +5359,50 @@ class DataLoaderPanel(QtWidgets.QWidget):
         except Exception:
             return None
 
+    def _uneven_subframe_warning(self, cfg) -> str:
+        """``""`` or a warning that the selected files hold different
+        numbers of raw sub-frames.
+
+        "Combine sub-frames: N" is applied per file, so when the files
+        disagree about how many sub-frames they have, one N covers a
+        different fraction of each — 12 of 12 in one file and 12 of 20 in
+        the next, with the remainder becoming a short final chunk whose
+        exposure is not comparable to the rest. That is invisible from the
+        file list and silently produces output frames of unequal weight, so
+        it is worth saying before a run rather than after.
+        """
+        if not cfg or cfg.get("type") != "hdf5_stack_glob":
+            return ""
+        paths = cfg.get("paths") or []
+        if len(paths) < 2:
+            return ""
+        counts = self._hdf5_multi_file_raw_counts(paths, cfg.get("dataset"))
+        if not counts or len(set(counts)) < 2:
+            return ""
+        lo, hi = min(counts), max(counts)
+        return (f"  ⚠ sub-frame count differs between files ({lo}–{hi}); "
+                f"'Combine sub-frames' covers a different fraction of each.")
+
+    @staticmethod
+    def _hdf5_multi_file_raw_counts(paths, dataset):
+        """Per-file RAW sub-frame count for a multi-file HDF5 pick — header
+        reads only, same single pass ``_hdf5_multi_file_counts`` makes.
+
+        Separate from that helper because the two answer different
+        questions: it reports how many COMBINED frames each file yields
+        (which "Combine sub-frames" makes uniform by construction), while
+        this reports how many raw sub-frames each file HAS, which is what
+        tells you whether one chunk size means the same thing across the
+        selection. Returns ``None`` when the source can't be inspected.
+        """
+        try:
+            from midas_gui.workers import _HDF5StackGlobSource
+            src = _HDF5StackGlobSource(paths, dataset)
+            src._ensure_stats()
+            return list(src._raw_ns or [])
+        except Exception:
+            return None
+
     @staticmethod
     def _single_hdf5_raw_count(path, dataset) -> int:
         """True raw sub-frame count of one HDF5 file's dataset — header read
@@ -5428,6 +5472,7 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 missing = (max(nums) - min(nums) + 1) - len(nums)
                 if missing > 0:
                     extra += f"  ⚠ {missing} number(s) missing in this range (gaps)."
+                extra += self._uneven_subframe_warning(cfg)
                 if self._unify_combine and (self._combine_chunk.value() != 1):
                     n = 0
                     try:

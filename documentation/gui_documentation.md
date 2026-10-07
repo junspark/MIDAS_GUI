@@ -2680,6 +2680,33 @@ defined.
 > file" has no meaning there. Selecting TIFF/GE says so rather than
 > silently applying a different rule.
 
+> **`start` / `end` change meaning with the selection.** For a **single
+> HDF5 file** they are raw sub-frame indices within it. For a **folder or
+> multi-file pick** they are file (scan) **numbers**, and narrow which
+> files are processed — each selected file is then chunked over its whole
+> stack. The hint under the Data card says which is in force.
+
+If the selected files hold **different numbers of sub-frames**, the hint
+warns: `⚠ sub-frame count differs between files (12–20)`. One *N* then
+covers a different fraction of each file, and the remainder becomes a short
+final chunk whose exposure is not comparable to the rest — worth knowing
+before a run rather than after.
+
+**"Files sharing a name stem"** fills the stem from the clicked file's
+*froot* — `Cu_tensile_cracked_001382.h5` gives `Cu_tensile_cracked`, which
+reaches all its siblings. **"Multiple files"** needs Ctrl-click to add and
+Shift-click for a run.
+
+### What Dark / Bright / Background do across several files
+
+The three fields on the left do **not** behave alike over a multi-file run:
+
+| field | scope |
+|---|---|
+| **Bright** | applied unchanged to every file in the run |
+| **Background** | applied unchanged to every file in the run |
+| **Dark** | per file when *Find each file's own dark* is ticked — the field on the left is then only the **fallback** for a file the search turns up nothing for. Untick it and that one Dark is used for every file |
+
 ### Finding each file's dark
 
 With **Find each file's own dark** ticked (the default), a dark is resolved

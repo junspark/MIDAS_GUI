@@ -946,6 +946,27 @@ def _count_frame_files(folder: str) -> int:
     return n
 
 
+def _froot_of(path) -> str:
+    """The scan root of a detector filename — ``Cu_tensile_cracked`` from
+    ``Cu_tensile_cracked_001382.h5``.
+
+    What "Files sharing a name stem" is actually for. Auto-filling the
+    field with ``Path(...).stem`` instead put the file NUMBER in the stem,
+    so the pattern matched exactly the one file that was clicked and the
+    mode quietly degenerated into "Single file" — the froot is the part the
+    siblings share. Uses ``workers.froot_and_frame_num``, the same parse the
+    output-naming convention is read with, so a detector tag and a mid-stem
+    number are handled identically here and there. Falls back to the plain
+    stem for a name with no trailing number.
+    """
+    from midas_gui.workers import froot_and_frame_num   # dialogs<-workers cycle
+    stem = Path(str(path)).stem
+    try:
+        return froot_and_frame_num(stem, -1)[0] or stem
+    except Exception:
+        return stem
+
+
 class BrowseFilesDialog(QtWidgets.QDialog):
     """Unified file-browsing popup for a Data/Dark/Bright/Background field.
 
@@ -1138,7 +1159,7 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         if self._mode == "stem":
             files = self._selected_files()
             if len(files) == 1 and not self._stem_ed.text().strip():
-                self._stem_ed.setText(Path(files[0]).stem)
+                self._stem_ed.setText(_froot_of(files[0]))
         self._update_info()
         self._update_ok_enabled()
 
@@ -1150,9 +1171,10 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             n = len(self._selected_files())
             self._info.setText(
                 f"{n} file(s) selected." if n else
-                "Select one or more files (TIFF-family or HDF5 — an HDF5 file "
-                "here is treated as one detector-frame source, not unpacked "
-                "into all its own internal frames).")
+                "Select one or more files — Ctrl-click to add, Shift-click "
+                "for a run. (TIFF-family or HDF5; an HDF5 file here is "
+                "treated as one detector-frame source, not unpacked into "
+                "all its own internal frames.)")
         elif self._mode == "folder":
             n = _count_frame_files(self._current_dir)
             self._info.setText(f"{n} frame file(s) found in this folder.")

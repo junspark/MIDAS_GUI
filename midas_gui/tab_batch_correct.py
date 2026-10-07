@@ -341,6 +341,21 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             "centred rather than over-subtracting.")
         card.body.addWidget(self._clip_chk)
 
+        # The three fields on the left do NOT behave alike across a
+        # multi-file run, and nothing on screen said so — asked directly:
+        # "it is unclear the role of these dark / bright / background in the
+        # case when we are doing multiple files."
+        scope = QtWidgets.QLabel(
+            "Across several files: <b>Bright</b> and <b>Background</b> are "
+            "applied unchanged to every file. <b>Dark</b> is resolved per "
+            "file when the box above is ticked — the Dark field on the left "
+            "is then only the fallback for a file with none of its own. "
+            "Untick it and that one Dark is used for every file.")
+        scope.setWordWrap(True)
+        scope.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        card.body.addWidget(scope)
+        card.body.addWidget(S.hline())
+
         note = QtWidgets.QLabel(
             "Each sub-frame is corrected before the frames are combined, so a "
             "Sum of N frames loses N darks rather than one. Set N in "
@@ -480,30 +495,55 @@ class BatchCorrectionTab(QtWidgets.QWidget):
 
     # ── source resolution ───────────────────────────────────────────────
     def _h5_paths(self) -> list:
-        """The selected HDF5 files, or ``[]``.
+        """The selected HDF5 files, already start/end filtered, or ``[]``.
 
         Only HDF5 sources are accepted. "Chunks restart at every file" has
         no meaning for TIFF/GE, where a file holds exactly one frame and
         there is no sub-frame stack to group — see :meth:`_run`, which says
         so rather than silently applying a different rule.
+
+        For a MULTI-file pick, ``frame_start``/``frame_end`` are FILE (scan)
+        NUMBERS and belong here, narrowing the list — the same filter
+        ``workers._open_source_cfg`` applies for Batch Integrate. They are
+        emphatically not sub-frame bounds; see :meth:`_chunk_settings`.
         """
         cfg = self._loader.source_cfg()
         if cfg.get("type") == "hdf5":
             return [cfg["path"]]
         if cfg.get("type") == "hdf5_stack_glob":
-            return list(cfg.get("paths") or [])
+            from midas_gui.workers import _filter_paths_by_frame_number
+            return list(_filter_paths_by_frame_number(
+                cfg.get("paths") or [], cfg.get("frame_start"),
+                cfg.get("frame_end")))
         return []
 
     def _chunk_settings(self) -> tuple:
-        """``(chunk_size, frame_start, frame_end)`` from the loader.
+        """``(chunk_size, raw_start, raw_end)`` — bounds in RAW SUB-FRAME
+        space, which is the only thing the chunker can use.
+
+        ``source_cfg()``'s ``frame_start``/``frame_end`` carry two different
+        meanings under one pair of keys, and getting them mixed up is not a
+        small error:
+
+        * single ``"hdf5"`` file → 0-based inclusive RAW SUB-FRAME bounds
+          within that file. Pass them through.
+        * multi-file ``"hdf5_stack_glob"`` → FILE (scan) NUMBERS. They have
+          already narrowed the list in :meth:`_h5_paths`, and feeding them
+          on as sub-frame bounds is nonsense: a start of 1382 against a
+          12-sub-frame file leaves an empty window, so every file produces
+          zero chunks and the run dies with "the selected frame range
+          leaves no sub-frames". Return None here instead — each file is
+          chunked over its whole stack.
 
         Deliberately does NOT return the panel's ``combine_op``: the method
         is this tab's own (the Correction card's checkboxes), and returning
         a value nobody uses is how the dropdown came to look meaningful.
         """
         cfg = self._loader.source_cfg()
-        return (cfg.get("chunk_size"), cfg.get("frame_start"),
-                cfg.get("frame_end"))
+        if cfg.get("type") == "hdf5":
+            return (cfg.get("chunk_size"), cfg.get("frame_start"),
+                    cfg.get("frame_end"))
+        return cfg.get("chunk_size"), None, None
 
     def _on_data_changed(self):
         self._maybe_autofill_output_dir()

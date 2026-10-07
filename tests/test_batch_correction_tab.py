@@ -9,6 +9,8 @@ choice actually reaching h5py.
 Builds Qt widgets, hence forked, with every Qt / midas_gui GUI import
 deferred into the fixtures — STATE.md's rule for new Qt test files.
 """
+import pathlib
+
 import numpy as np
 import pytest
 
@@ -539,6 +541,60 @@ def test_chunk_settings_does_not_hand_back_an_unused_op(tab):
     assert len(tab._chunk_settings()) == 3
 
 
+def test_a_multi_file_pick_does_not_treat_file_numbers_as_sub_frames(tab,
+                                                                    tmp_path):
+    """Reported from the beamline as "Nothing to do: the selected frame
+    range leaves no sub-frames".
+
+    `source_cfg()` carries two different meanings under frame_start/
+    frame_end: raw SUB-FRAME bounds for a single file, FILE NUMBERS for a
+    multi-file pick. Feeding the latter to the chunker put lo=1382 against
+    a 12-sub-frame file, so every file yielded zero chunks and the run
+    died. The numbers must narrow the FILE LIST instead.
+    """
+    folder = tmp_path / "Cu_tensile_cracked"
+    for n in range(1382, 1395):                      # 13 files, 12 frames each
+        _make_file(folder / f"Cu_tensile_cracked_{n:06d}.h5", n=12)
+    tab._loader._set_explicit_paths(
+        [str(p) for p in sorted(folder.glob("*.h5"))])
+    tab._loader._fr_start.setValue(1382)
+    tab._loader._fr_end.setValue(1394)
+
+    chunk, raw_start, raw_end = tab._chunk_settings()
+    assert (raw_start, raw_end) == (None, None), \
+        "file numbers leaked into the sub-frame window"
+    assert len(tab._h5_paths()) == 13
+
+    monkey = tab._plan_for(pathlib.Path(tab._h5_paths()[0]))
+    assert monkey is not None
+    n_raw, n_out = monkey
+    assert n_raw == 12 and n_out >= 1, "the file produced no output frames"
+
+
+def test_a_multi_file_range_narrows_the_file_list(tab, tmp_path):
+    folder = tmp_path / "scan"
+    for n in range(1382, 1395):
+        _make_file(folder / f"scan_{n:06d}.h5", n=4)
+    tab._loader._set_explicit_paths(
+        [str(p) for p in sorted(folder.glob("*.h5"))])
+    tab._loader._fr_start.setValue(1385)
+    tab._loader._fr_end.setValue(1387)
+    names = sorted(pathlib.Path(p).name for p in tab._h5_paths())
+    assert names == ["scan_001385.h5", "scan_001386.h5", "scan_001387.h5"]
+
+
+def test_a_single_file_still_uses_sub_frame_bounds(tab, inputs):
+    """The other half of the same pair of keys must keep working."""
+    tab._loader._path_ed.setText(str(inputs[0]))
+    tab._loader._set_explicit_paths(None)
+    cfg = tab._loader.source_cfg()
+    if cfg.get("type") != "hdf5":
+        pytest.skip("loader did not resolve a single-file hdf5 source")
+    tab._loader._fr_start.setValue(2)
+    tab._loader._fr_end.setValue(7)
+    assert tab._chunk_settings()[1:] == (2, 7)
+
+
 def test_methods_are_checkboxes_and_default_to_mean(tab):
     assert tab._selected_ops() == ["mean"]
     assert set(tab._op_chks) == set(("mean", "median", "sum", "max"))
@@ -608,3 +664,52 @@ def test_preview_reduces_only_the_first_chunk(tab, inputs):
     assert tab._preview_raw.shape == SHAPE
     # Sub-frames 0..3 → mean 1.5, internal dark 10.
     assert np.allclose(tab._preview_raw, 1.5 - DARK_LEVEL)
+
+
+# ── folder mode: uneven sub-frame counts ────────────────────────────────
+
+def test_a_folder_of_uneven_files_is_flagged_in_the_hint(app, tmp_path):
+    """"Combine sub-frames: N" is applied per file, so when the files
+    disagree about how many sub-frames they hold, one N covers a different
+    fraction of each — 12 of 12 in one and 12 of 20 in the next, with the
+    remainder a short chunk whose exposure is not comparable. That is
+    invisible from the file list."""
+    from midas_gui.widgets import DataLoaderPanel
+    folder = tmp_path / "scan"
+    for i, (num, n) in enumerate(((1, 12), (2, 12), (3, 20))):
+        _make_file(folder / f"scan_{num:06d}.h5", n=n)
+    panel = DataLoaderPanel(mode="stream", unify_combine=True)
+    cfg = {"type": "hdf5_stack_glob", "dataset": "exchange/data",
+           "paths": [str(p) for p in sorted(folder.glob("*.h5"))]}
+    warning = panel._uneven_subframe_warning(cfg)
+    assert "differs between files" in warning and "12" in warning and "20" in warning
+
+
+def test_a_folder_of_even_files_is_not_flagged(app, tmp_path):
+    from midas_gui.widgets import DataLoaderPanel
+    folder = tmp_path / "scan"
+    for num in (1, 2, 3):
+        _make_file(folder / f"scan_{num:06d}.h5", n=12)
+    panel = DataLoaderPanel(mode="stream", unify_combine=True)
+    cfg = {"type": "hdf5_stack_glob", "dataset": "exchange/data",
+           "paths": [str(p) for p in sorted(folder.glob("*.h5"))]}
+    assert panel._uneven_subframe_warning(cfg) == ""
+
+
+def test_a_single_file_source_is_never_flagged(app, tmp_path):
+    """Nothing to be inconsistent with."""
+    from midas_gui.widgets import DataLoaderPanel
+    src = _make_file(tmp_path / "scan" / "scan_000001.h5", n=12)
+    panel = DataLoaderPanel(mode="stream", unify_combine=True)
+    assert panel._uneven_subframe_warning(
+        {"type": "hdf5", "path": str(src), "dataset": "exchange/data"}) == ""
+
+
+def test_the_card_states_how_each_field_behaves_across_files(tab):
+    """Dark, Bright and Background do NOT behave alike over a multi-file
+    run — only Dark is resolved per file — and nothing on screen said so."""
+    from PyQt5 import QtWidgets
+    texts = " ".join(w.text() for w in tab.findChildren(QtWidgets.QLabel))
+    assert "Bright" in texts and "Background" in texts
+    assert "applied unchanged to every file" in texts
+    assert "fallback" in texts
