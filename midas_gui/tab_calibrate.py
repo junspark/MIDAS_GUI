@@ -677,8 +677,11 @@ class CalibrationTab(QtWidgets.QWidget):
                         "tz": (self._ref_tz, ""), "tx": (self._ref_tx, ""),
                         "wavelength_A": (self._ref_wl, ""),
                         "distortion": (None, "Distortion")}
-        order = ("Lsd", "BC_y", "BC_z", "ty", "tz", "tx", "wavelength_A",
-                 "distortion")
+        # Taken from PARAMETER_LIMIT_ROWS rather than restated, so this card,
+        # the Manual seed dialog and _REFINE_BOXES cannot drift into three
+        # different orders again (they had: this card ran ty, tz, tx and the
+        # seed dialog led with BC).
+        order = tuple(row[0] for row in PARAMETER_LIMIT_ROWS)
         #: slot -> (unit0, win0, abs_unit, decimals), dropping the label and
         #: fallback columns the dialog form of this block used.
         rows = {r[0]: (r[2], r[3], r[4], r[5]) for r in PARAMETER_LIMIT_ROWS}
@@ -1387,7 +1390,7 @@ class CalibrationTab(QtWidgets.QWidget):
     #: tilts (``tolTilts``) and one for all fifteen distortion slots
     #: (``tolDistortion``), and never refines tx at all — so the surplus rows
     #: are hidden rather than left as controls that would do nothing.
-    _LIMIT_ROWS_DSP  = ("Lsd", "BC_y", "BC_z", "ty", "tz", "tx", "wavelength_A")
+    _LIMIT_ROWS_DSP  = ("Lsd", "BC_y", "BC_z", "tx", "ty", "tz", "wavelength_A")
     _LIMIT_ROWS_XTAL = ("Lsd", "BC_y", "ty", "wavelength_A", "distortion")
     #: Crystalline row -> the ``CalibrationParams`` window it drives.
     _XTAL_TOL_FIELD = {"Lsd": "tolLsd", "BC_y": "tolBC", "ty": "tolTilts",

@@ -208,3 +208,69 @@ def test_the_labels_follow_the_refine_card_live(tab):
     assert _status(tab)["ty"] == "refined, from this value"
     tab._ref_ty.setChecked(False)
     assert _status(tab)["ty"] == "held at this value"
+
+
+# ── the two parameter lists read in the same order ──────────────────────
+#
+# Reported from the beamline: "we should also make the two list of
+# parameters appear in the same order." The Refine card ran Lsd, BC, ty, tz,
+# tx while the Manual seed dialog led with BC — so the same parameter sat at
+# a different height in each. The two panels are deliberately independent
+# choices (seeding says where the fit starts, refining whether it may move),
+# which is exactly why they have to be read side by side.
+
+def _grid_order(layout, QtWidgets):
+    """Row labels of a QGridLayout, top to bottom — the checkbox text in
+    column 0 where there is one, else the "name:" label in column 1."""
+    rows = {}
+    for i in range(layout.count()):
+        r, c, *_ = layout.getItemPosition(i)
+        w = layout.itemAt(i).widget()
+        if w is None:
+            continue
+        if c == 0 and isinstance(w, QtWidgets.QCheckBox) and w.text():
+            rows[r] = w.text()
+        elif c == 1 and r not in rows and isinstance(w, QtWidgets.QLabel) \
+                and w.text().endswith(":"):
+            rows[r] = w.text().rstrip(":")
+    return [rows[k] for k in sorted(rows)]
+
+
+def test_the_refine_card_follows_the_canonical_parameter_order(tab):
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    assert _grid_order(tab._refine_grid, QtWidgets) == \
+        ["Lsd", "BC", "tx", "ty", "tz", "Wavelength"]
+
+
+def test_the_seed_dialog_follows_the_same_order(tab):
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    grid = tab._seed_dialog.findChild(QtWidgets.QGridLayout)
+    # "Beam centre" is the seed dialog's label for the BC pair (the backend
+    # takes BC_y/BC_z together), and Distortion is seedable but has no
+    # Wavelength counterpart — the shared parameters must still line up.
+    assert _grid_order(grid, QtWidgets) == \
+        ["Lsd", "Beam centre", "tx", "ty", "tz", "Distortion"]
+
+
+def test_both_panels_order_their_shared_parameters_identically(tab):
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    refine = _grid_order(tab._refine_grid, QtWidgets)
+    seed = [("BC" if n == "Beam centre" else n)
+            for n in _grid_order(tab._seed_dialog.findChild(QtWidgets.QGridLayout),
+                                 QtWidgets)]
+    shared = set(refine) & set(seed)
+    assert len(shared) >= 5
+    assert [n for n in refine if n in shared] == [n for n in seed if n in shared]
+
+
+def test_the_order_comes_from_one_place(tab):
+    """Three hand-written sequences is how they drifted apart; the Refine
+    card now derives its order from PARAMETER_LIMIT_ROWS."""
+    from midas_gui.dialogs import PARAMETER_LIMIT_ROWS
+    canonical = [r[0] for r in PARAMETER_LIMIT_ROWS]
+    assert canonical.index("Lsd") < canonical.index("BC_y") \
+        < canonical.index("tx") < canonical.index("ty") < canonical.index("tz")
+    # ...and the refine flags' own logical order already agreed with it.
+    from midas_gui.tab_calibrate import CalibrationTab
+    assert CalibrationTab._REFINE_BOXES == ("Lsd", "BC", "tx", "ty", "tz",
+                                            "Wavelength")

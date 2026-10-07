@@ -899,8 +899,14 @@ def test_refine_card_interleaves_each_flag_with_its_window(app):
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
     rows = _grid_rows(tab._refine_grid)
-    order = ("Lsd", "BC_y", "BC_z", "ty", "tz", "tx", "wavelength_A",
-             "distortion")
+    # Derived, not restated: this card builds its rows from
+    # PARAMETER_LIMIT_ROWS so that it, the Manual seed dialog and
+    # _REFINE_BOXES cannot drift into different orders (they had). A fourth
+    # hand-written copy here would just be the same trap one level out --
+    # what this test is about is the INTERLEAVING, not the order, which
+    # test_calibrate_seed_summary pins directly.
+    from midas_gui.dialogs import PARAMETER_LIMIT_ROWS
+    order = tuple(row[0] for row in PARAMETER_LIMIT_ROWS)
     # Header, one row per parameter, then the trailing note.
     assert sorted(rows) == list(range(len(order) + 2)), f"got {sorted(rows)}"
     assert rows[0] == [tab._limits_hdr]

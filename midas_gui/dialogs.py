@@ -297,15 +297,20 @@ class ManualSeedDialog(QtWidgets.QDialog):
             self._seed_boxes[key] = en
             en.toggled.connect(self._sync_status)
 
+        # Row order is PARAMETER_LIMIT_ROWS' order, which is also the Refine
+        # card's and _REFINE_BOXES'. Reading the same parameter at a
+        # different height in the two panels is what made them look like
+        # they disagreed; they are independent choices (see _refine_hint),
+        # which is exactly why they have to line up.
         r = 0
+        grid.addWidget(en_lsd, r, 0)
+        grid.addWidget(QtWidgets.QLabel("Lsd:"), r, 1); grid.addWidget(lsd, r, 2)
+        status("Lsd", en_lsd, r)
+        r += 1
         grid.addWidget(en_bc, r, 0)
         grid.addWidget(QtWidgets.QLabel("BC_y:"), r, 1); grid.addWidget(bcy, r, 2)
         grid.addWidget(QtWidgets.QLabel("BC_z:"), r, 3); grid.addWidget(bcz, r, 4)
         status("BC", en_bc, r)
-        r += 1
-        grid.addWidget(en_lsd, r, 0)
-        grid.addWidget(QtWidgets.QLabel("Lsd:"), r, 1); grid.addWidget(lsd, r, 2)
-        status("Lsd", en_lsd, r)
         r += 1
         for en, w, label in ((en_tx, tx, "tx:"), (en_ty, ty, "ty:"), (en_tz, tz, "tz:")):
             grid.addWidget(en, r, 0)
