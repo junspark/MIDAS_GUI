@@ -93,6 +93,9 @@ MOTOR_PREFIX = "motor:"
 #: Suffix on a dark-block column. The dark images themselves are not written
 #: out, but their monitor readings are a real measurement of the shutter-
 #: closed baseline and are the thing you subtract before taking any ratio.
+#: Retired. The dark is a ROW now (``kind="dark"``), not a companion column
+#: per channel — see :func:`rows_from_tree`. Kept only so an external caller
+#: importing the name still resolves; nothing in this module uses it.
 DARK_SUFFIX = "_dark"
 
 _SCALERS_PREFIX = "instrument/Scalers/"
@@ -302,9 +305,17 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
     exactly as recorded. No ratio is computed: a transmission needs an
     air/empty-beam I/I0 reference that this file does not carry, so a column
     called "transmission" here would be a raw ratio wearing a name it has
-    not earned. Each channel also gets a ``_dark`` companion — the dark
-    images are not written out, but their monitor readings are a real
-    measurement of the shutter-closed baseline.
+    not earned.
+
+    **The dark is a ROW, not a set of columns.** The dark images are not
+    written out, but their monitor readings are a real measurement of the
+    shutter-closed baseline, so they belong in the file. They used to ride
+    along as a ``<channel>_dark`` companion column on every chunk row, which
+    doubled the width and repeated one measurement on each line as though it
+    varied per chunk. It does not: the dark block is acquired once. So it
+    gets one row, ``kind="dark"``, carrying the mean over the whole dark
+    block under the SAME column names the lights use — directly comparable,
+    and the table stays half as wide.
     """
     light_off, dark_off, note = split_light_dark(
         tree, n_light=n_light, n_dark=n_dark, hutch=hutch)
@@ -323,15 +334,29 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
         block = arr[offset:offset + n_light]
         return h5_metadata._chunk_mean(block, ranges)
 
-    series: dict = {}
+    def block_mean(h5_path, offset, count):
+        """One value over a whole acquisition block — what the dark row
+        carries. The dark is acquired once, so it is averaged once rather
+        than split along the light frames' chunk boundaries, which have no
+        meaning on the other side of the split."""
+        arr = tree.get(h5_path)
+        if arr is None or offset is None or not count:
+            return None
+        arr = np.atleast_1d(np.asarray(arr))
+        if arr.ndim != 1 or arr.size < offset + count:
+            return None
+        return h5_metadata._chunk_mean(arr[offset:offset + count],
+                                       [(0, count - 1)])[0]
+
+    series: dict = {}        # per-chunk light values
+    dark_values: dict = {}   # one value per column, over the whole dark block
     for path in scaler_channels(tree, hutch):
         name = path.rsplit("/", 1)[-1]
         series[name] = chunked(path, light_off)
-        dark = chunked(path, dark_off)
-        if dark is not None:
-            series[name + DARK_SUFFIX] = dark
+        dark_values[name] = block_mean(path, dark_off, n_dark)
     for key, _header in _ENV_COLUMNS:
         series[key] = chunked(METADATA_H5_PATHS[key], light_off)
+        dark_values[key] = block_mean(METADATA_H5_PATHS[key], dark_off, n_dark)
     for group in SAMPLE_MOTOR_H5_GROUPS.get(hutch, []):
         for path in tree:
             if path.startswith(group + "/"):
@@ -339,10 +364,19 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
                 arr = chunked(path, light_off)
                 if arr is not None:
                     series[MOTOR_PREFIX + leaf] = arr
+                    dark_values[MOTOR_PREFIX + leaf] = block_mean(
+                        path, dark_off, n_dark)
 
     rows = []
+    # The dark leads, so the shutter-closed baseline is the first thing read
+    # rather than something to scroll right for.
+    if dark_off is not None and n_dark and any(
+            v is not None for v in dark_values.values()):
+        row = {"kind": "dark", "frame": None, "source_file": source}
+        row.update({key: dark_values.get(key) for key in series})
+        rows.append(row)
     for n in range(n_rows):
-        row = {"frame": n, "source_file": source}
+        row = {"kind": "chunk", "frame": n, "source_file": source}
         for key, arr in series.items():
             row[key] = None if arr is None else arr[n]
         rows.append(row)
@@ -351,9 +385,13 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
 
 # ── writer ───────────────────────────────────────────────────────────────────
 
-#: Columns that identify a row rather than measure anything. Always present,
-#: and never counted when deciding whether the file is worth writing.
+#: Columns that identify a row rather than measure anything. Never counted
+#: when deciding whether the file is worth writing. ``kind`` appears only
+#: when some row carries one — a Batch Integrate CSV (see
+#: :func:`rows_from_metas`) has no dark row to distinguish, and a column of
+#: blanks there would read as a missing value rather than an absent concept.
 _INDEX_COLUMNS = (("frame", "frame"), ("source_file", "source_file"))
+_KIND_COLUMN = ("kind", "kind")
 
 
 def _columns(rows, extras) -> list:
@@ -367,14 +405,14 @@ def _columns(rows, extras) -> list:
     setup-dependent.
     """
     extras = set(extras or ())
-    cols = list(_INDEX_COLUMNS)
-    measured = {k for _k, _h in _INDEX_COLUMNS for k in ()}   # none
+    cols = ([_KIND_COLUMN] if any("kind" in r for r in rows) else [])
+    cols += list(_INDEX_COLUMNS)
+    measured = set()
     env_keys = {k for k, _h in _ENV_COLUMNS}
     chan_keys = sorted({k for r in rows for k in r
                         if k not in env_keys
                         and not k.startswith(MOTOR_PREFIX)
-                        and k not in ("frame", "source_file")},
-                       key=lambda k: (k.endswith(DARK_SUFFIX), k))
+                        and k not in ("kind", "frame", "source_file")})
     for key in chan_keys:
         if any(_is_real(r.get(key)) for r in rows):
             cols.append((key, key))

@@ -3,6 +3,45 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-06 — The beam-monitor CSV puts the dark on its own row
+
+Asked for directly: "let's have the dark on one row and other chunk
+separated to separate rows."
+
+``ion_csv.rows_from_tree`` already emitted one row per output chunk. What it
+also did was give every scaler channel a ``<channel>_dark`` companion
+COLUMN, so a 12-channel source produced 24 measurement columns and each
+chunk row repeated the same shutter-closed reading. That reads as though
+the dark varied per chunk. It does not: the dark block is one acquisition.
+
+So the dark is now one row, ``kind="dark"``, carrying the mean over the
+WHOLE dark block under the same column names the lights use — directly
+comparable down a column instead of across a row, and the table halves in
+width (27 columns to 15 on a real E-hutch file). It leads the file, so the
+baseline is the first thing read rather than something to scroll right for.
+
+Two details worth keeping:
+
+* The dark is averaged over its whole block, not chunk-averaged. Chunk
+  boundaries are a property of the light frames; splitting the dark along
+  them would invent structure the acquisition does not have.
+* ``kind`` appears only when some row has one. ``rows_from_metas`` (the
+  Batch Integrate path) has no dark row, and a column of blanks there would
+  read as a missing value rather than an absent concept.
+
+``DARK_SUFFIX`` is retained as a module constant but is no longer used by
+anything, so an external importer still resolves.
+
+**Not done, and worth knowing.** The CSV's dark row is the dark block
+*inside the same file*. Batch Correction's SUBTRACTED dark may be a
+different acquisition entirely — the ladder prefers the nearest
+``_dark_before`` sibling (DECISIONS 2026-10-05). When those differ, the CSV
+is describing the file's own dark, not the one that was subtracted. The
+subtracted one is named in the Log and in the output's ``midas_gui_dark``
+attribute. Reconciling the two is a real follow-up, not an oversight.
+
+---
+
 ## 2026-10-05 (later) — Batch Correction: per-op folders, and the MATLAB cross-check
 
 Three follow-ups the same day, all from beamline feedback.

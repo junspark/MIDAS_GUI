@@ -133,20 +133,62 @@ def test_every_hutch_channel_is_written_under_its_own_name():
             "instrument/Scalers/E/D2PD": np.array([70.0, 72.0, 2.0, 2.0])}
     rows, _note = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 1)],
                                     n_light=2, n_dark=2)
-    assert rows[0]["US_IC"] == pytest.approx(11.0)
-    assert rows[0]["DS_IC"] == pytest.approx(8.5)
-    assert rows[0]["D2PD"] == pytest.approx(71.0)
-    assert "transmission" not in rows[0] and "I0" not in rows[0]
+    chunk = next(r for r in rows if r["kind"] == "chunk")
+    assert chunk["US_IC"] == pytest.approx(11.0)
+    assert chunk["DS_IC"] == pytest.approx(8.5)
+    assert chunk["D2PD"] == pytest.approx(71.0)
+    assert "transmission" not in chunk and "I0" not in chunk
 
 
-def test_each_channel_gets_a_dark_companion():
+def test_the_dark_gets_one_row_not_a_column_on_every_chunk():
     """The dark IMAGES are not written out, but their monitor readings are a
-    real measurement of the shutter-closed baseline."""
+    real measurement of the shutter-closed baseline — one measurement, so
+    one row, under the same column names the lights use."""
     tree = {"instrument/Scalers/E/US_IC": np.array([10.0, 12.0, 1.0, 3.0])}
     rows, _ = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 1)],
                                 n_light=2, n_dark=2)
-    assert rows[0]["US_IC"] == pytest.approx(11.0)
-    assert rows[0]["US_IC" + IC.DARK_SUFFIX] == pytest.approx(2.0)
+    assert [r["kind"] for r in rows] == ["dark", "chunk"]
+    assert rows[0]["US_IC"] == pytest.approx(2.0)     # mean of 1.0, 3.0
+    assert rows[0]["frame"] is None
+    assert rows[1]["US_IC"] == pytest.approx(11.0)    # mean of 10.0, 12.0
+    # The companion column is gone: one reading must not be repeated per
+    # chunk as though it varied.
+    assert not any(k.endswith("_dark") for r in rows for k in r)
+
+
+def test_the_dark_is_averaged_over_its_whole_block_not_the_light_chunks():
+    """Chunk boundaries are a property of the light frames; the dark block
+    is acquired once and has no meaningful split along them."""
+    tree = {"instrument/Scalers/E/US_IC":
+            np.array([10.0, 20.0, 30.0, 40.0, 1.0, 2.0, 3.0, 4.0])}
+    rows, _ = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 1), (2, 3)],
+                                n_light=4, n_dark=4)
+    assert rows[0]["kind"] == "dark"
+    assert rows[0]["US_IC"] == pytest.approx(2.5)     # mean of all four
+    assert [r["US_IC"] for r in rows[1:]] == [pytest.approx(15.0),
+                                              pytest.approx(35.0)]
+
+
+def test_no_dark_block_means_no_dark_row(tmp_path):
+    """A source whose metadata holds only light frames must not grow an
+    empty dark row, nor a kind column that distinguishes nothing."""
+    tree = {"instrument/Scalers/E/US_IC": np.array([10.0, 20.0])}
+    rows, _ = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 1)],
+                                n_light=2, n_dark=0)
+    assert [r.get("kind") for r in rows] == ["chunk"]
+    out = IC.write_ion_csv(tmp_path / "m.csv", rows)
+    assert open(out).readline().strip() == "kind,frame,source_file,US_IC"
+
+
+def test_the_dark_row_leads_the_file(tmp_path):
+    tree = {"instrument/Scalers/E/US_IC": np.array([10.0, 12.0, 1.0, 3.0])}
+    rows, _ = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 1)],
+                                n_light=2, n_dark=2, source="s.h5")
+    out = IC.write_ion_csv(tmp_path / "m.csv", rows)
+    lines = [ln.strip() for ln in open(out)]
+    assert lines[0] == "kind,frame,source_file,US_IC"
+    assert lines[1].startswith("dark,,s.h5,")
+    assert lines[2].startswith("chunk,0,s.h5,")
 
 
 def test_values_are_averaged_over_the_same_chunks_as_the_images():
@@ -180,4 +222,15 @@ def test_header_leads_with_the_index_columns(tmp_path):
     rows, _ = IC.rows_from_tree({"instrument/Scalers/E/US_IC": np.array([1.0, 2.0])},
                                 "E", frame_ranges=[(0, 1)], n_light=2, source="s.h5")
     out = IC.write_ion_csv(tmp_path / "m.csv", rows)
-    assert open(out).readline().strip() == "frame,source_file,US_IC"
+    assert open(out).readline().strip() == "kind,frame,source_file,US_IC"
+
+
+def test_batch_integrates_csv_has_no_kind_column(tmp_path):
+    """`kind` distinguishes a dark row from chunk rows, and the Batch
+    Integrate path (rows_from_metas) has no dark row. A column of blanks
+    there would read as a missing value rather than an absent concept."""
+    rows = IC.rows_from_metas([{"ion_chamber_i0": 5.0}, {"ion_chamber_i0": 6.0}])
+    out = IC.write_ion_csv(tmp_path / "bi.csv", rows)
+    header = open(out).readline().strip()
+    assert not header.startswith("kind")
+    assert header.startswith("frame,source_file")
