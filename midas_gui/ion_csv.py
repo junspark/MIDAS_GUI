@@ -369,14 +369,22 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
 
     rows = []
     # The dark leads, so the shutter-closed baseline is the first thing read
-    # rather than something to scroll right for.
+    # rather than something to scroll right for. Its range is over the dark
+    # acquisition block's own sub-frames: the dark images are not written
+    # out, so there is no output frame for it to index against.
     if dark_off is not None and n_dark and any(
             v is not None for v in dark_values.values()):
-        row = {"kind": "dark", "frame": None, "source_file": source}
+        row = {"kind": "dark", "source_file": source,
+               "frame_start": 0, "frame_end": n_dark - 1}
         row.update({key: dark_values.get(key) for key in series})
         rows.append(row)
-    for n in range(n_rows):
-        row = {"kind": "chunk", "frame": n, "source_file": source}
+    # A row is identified by its file and the raw sub-frame range it was
+    # built from — the same range the output HDF5 records in `frame_ranges`
+    # — rather than by an ordinal. One CSV can hold rows from several source
+    # files (they are accumulated per froot), where an ordinal repeats.
+    for n, (lo, hi) in enumerate(ranges):
+        row = {"kind": "chunk", "source_file": source,
+               "frame_start": lo, "frame_end": hi}
         for key, arr in series.items():
             row[key] = None if arr is None else arr[n]
         rows.append(row)
@@ -385,13 +393,20 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
 
 # ── writer ───────────────────────────────────────────────────────────────────
 
-#: Columns that identify a row rather than measure anything. Never counted
-#: when deciding whether the file is worth writing. ``kind`` appears only
-#: when some row carries one — a Batch Integrate CSV (see
-#: :func:`rows_from_metas`) has no dark row to distinguish, and a column of
-#: blanks there would read as a missing value rather than an absent concept.
-_INDEX_COLUMNS = (("frame", "frame"), ("source_file", "source_file"))
-_KIND_COLUMN = ("kind", "kind")
+#: Columns that identify a row rather than measure anything, in header
+#: order. Never counted when deciding whether the file is worth writing, and
+#: each appears ONLY when some row carries it — the two producers identify a
+#: row differently and neither should grow the other's blank columns:
+#:
+#: * :func:`rows_from_tree` (Batch Correction) → ``kind``, ``source_file``,
+#:   ``frame_start``, ``frame_end``. One CSV can hold rows from several
+#:   source files, so the file name plus the raw sub-frame range IS the
+#:   identity; a bare ordinal would not be unique across files.
+#: * :func:`rows_from_metas` (Batch Integrate) → ``frame``, ``source_file``.
+#:   It has one row per output frame and no raw range to report.
+_INDEX_COLUMNS = (("kind", "kind"), ("frame", "frame"),
+                  ("source_file", "source_file"),
+                  ("frame_start", "frame_start"), ("frame_end", "frame_end"))
 
 
 def _columns(rows, extras) -> list:
@@ -405,14 +420,14 @@ def _columns(rows, extras) -> list:
     setup-dependent.
     """
     extras = set(extras or ())
-    cols = ([_KIND_COLUMN] if any("kind" in r for r in rows) else [])
-    cols += list(_INDEX_COLUMNS)
+    index_keys = {k for k, _h in _INDEX_COLUMNS}
+    cols = [(k, h) for k, h in _INDEX_COLUMNS if any(k in r for r in rows)]
     measured = set()
     env_keys = {k for k, _h in _ENV_COLUMNS}
     chan_keys = sorted({k for r in rows for k in r
                         if k not in env_keys
                         and not k.startswith(MOTOR_PREFIX)
-                        and k not in ("kind", "frame", "source_file")})
+                        and k not in index_keys})
     for key in chan_keys:
         if any(_is_real(r.get(key)) for r in rows):
             cols.append((key, key))

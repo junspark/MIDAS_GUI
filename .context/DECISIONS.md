@@ -3,6 +3,36 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-10-06 (later) — A CSV row is identified by file + raw frame range
+
+Follow-up to the entry below: "instead of chunk, let's do file name,
+frame#start, frame#end in the csv file output."
+
+``rows_from_tree`` identified a row by a bare ordinal (``frame``). That is
+not unique: ``workers`` accumulates rows per FROOT, so one CSV holds rows
+from several source files and ``frame 0`` appears once per file. The row's
+real identity is its file plus the raw sub-frame range it was built from —
+which is also exactly what the output HDF5 records in ``frame_ranges``, so
+the CSV and the image stack now say the same thing in the same terms.
+
+So Batch Correction's index columns are ``kind, source_file, frame_start,
+frame_end``.
+
+``kind`` is kept rather than folded away, for a correctness reason rather
+than a cosmetic one: the dark row's range and a light chunk's range can
+coincide (a whole-file chunk of a 10-light/10-dark file is 0–9 for both),
+so without ``kind`` the two rows would be indistinguishable. The dark row's
+range is over the dark acquisition block's own sub-frames — the dark images
+are not written out, so there is no output frame for it to index against.
+
+Batch Integrate is deliberately untouched: ``rows_from_metas`` still emits
+``frame, source_file`` and has no raw range to report. ``_INDEX_COLUMNS``
+is now a fixed header order from which each column is included only when
+some row actually carries it, so neither producer grows the other's blank
+columns. Both headers are pinned by tests.
+
+---
+
 ## 2026-10-06 — The beam-monitor CSV puts the dark on its own row
 
 Asked for directly: "let's have the dark on one row and other chunk

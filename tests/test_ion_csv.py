@@ -149,7 +149,6 @@ def test_the_dark_gets_one_row_not_a_column_on_every_chunk():
                                 n_light=2, n_dark=2)
     assert [r["kind"] for r in rows] == ["dark", "chunk"]
     assert rows[0]["US_IC"] == pytest.approx(2.0)     # mean of 1.0, 3.0
-    assert rows[0]["frame"] is None
     assert rows[1]["US_IC"] == pytest.approx(11.0)    # mean of 10.0, 12.0
     # The companion column is gone: one reading must not be repeated per
     # chunk as though it varied.
@@ -177,7 +176,8 @@ def test_no_dark_block_means_no_dark_row(tmp_path):
                                 n_light=2, n_dark=0)
     assert [r.get("kind") for r in rows] == ["chunk"]
     out = IC.write_ion_csv(tmp_path / "m.csv", rows)
-    assert open(out).readline().strip() == "kind,frame,source_file,US_IC"
+    assert open(out).readline().strip() == \
+        "kind,source_file,frame_start,frame_end,US_IC"
 
 
 def test_the_dark_row_leads_the_file(tmp_path):
@@ -186,9 +186,9 @@ def test_the_dark_row_leads_the_file(tmp_path):
                                 n_light=2, n_dark=2, source="s.h5")
     out = IC.write_ion_csv(tmp_path / "m.csv", rows)
     lines = [ln.strip() for ln in open(out)]
-    assert lines[0] == "kind,frame,source_file,US_IC"
-    assert lines[1].startswith("dark,,s.h5,")
-    assert lines[2].startswith("chunk,0,s.h5,")
+    assert lines[0] == "kind,source_file,frame_start,frame_end,US_IC"
+    assert lines[1].startswith("dark,s.h5,0,1,")
+    assert lines[2].startswith("chunk,s.h5,0,1,")
 
 
 def test_values_are_averaged_over_the_same_chunks_as_the_images():
@@ -222,7 +222,32 @@ def test_header_leads_with_the_index_columns(tmp_path):
     rows, _ = IC.rows_from_tree({"instrument/Scalers/E/US_IC": np.array([1.0, 2.0])},
                                 "E", frame_ranges=[(0, 1)], n_light=2, source="s.h5")
     out = IC.write_ion_csv(tmp_path / "m.csv", rows)
-    assert open(out).readline().strip() == "kind,frame,source_file,US_IC"
+    assert open(out).readline().strip() == \
+        "kind,source_file,frame_start,frame_end,US_IC"
+
+
+def test_a_row_is_identified_by_its_file_and_raw_frame_range():
+    """One CSV holds rows from several source files (they accumulate per
+    froot), so an ordinal would repeat across files. The range is also the
+    same one the output HDF5 records in `frame_ranges`."""
+    tree = {"instrument/Scalers/E/US_IC": np.arange(8.0)}
+    rows, _ = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 3), (4, 7)],
+                                n_light=8, n_dark=0, source="scan_000021.h5")
+    assert [(r["source_file"], r["frame_start"], r["frame_end"]) for r in rows] \
+        == [("scan_000021.h5", 0, 3), ("scan_000021.h5", 4, 7)]
+    assert not any("frame" in r for r in rows)   # the bare ordinal is gone
+
+
+def test_the_dark_rows_range_is_its_own_block():
+    """The dark images are not written out, so there is no output frame for
+    the dark row to index against — its range is over the dark acquisition
+    block's own sub-frames."""
+    tree = {"instrument/Scalers/E/US_IC":
+            np.array([10.0, 12.0, 14.0, 1.0, 2.0])}
+    rows, _ = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 2)],
+                                n_light=3, n_dark=2)
+    assert (rows[0]["kind"], rows[0]["frame_start"], rows[0]["frame_end"]) \
+        == ("dark", 0, 1)
 
 
 def test_batch_integrates_csv_has_no_kind_column(tmp_path):
