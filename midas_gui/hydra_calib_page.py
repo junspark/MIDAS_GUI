@@ -245,7 +245,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         lv.addWidget(banner)
 
         # Pipeline
-        pipe = S.make_card("Pipeline  (same for all 4 fits)")
+        pipe = S.make_card("Pipeline  (all 4 panels)")
         self._pipeline = _NoScrollComboBox()
         for label, key, enabled in PIPELINES:
             self._pipeline.addItem(label, key)
@@ -258,7 +258,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         lv.addWidget(pipe)
 
         # Detector & Calibrant (shared — same beam/detector model for all 4 panels)
-        det = S.make_card("Detector & Calibrant  (same for all 4 fits)")
+        det = S.make_card("Detector & Calibrant  (all 4 panels)")
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
         self._cal = _NoScrollComboBox(); self._cal.addItems(CALIBRANTS); self._cal.setMaximumWidth(150)
         det.body.addLayout(S.Form().row(
@@ -316,7 +316,17 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         lv.addWidget(avgc)
 
         # Refine parameters (shared)
-        refc = S.make_card("Refine parameters  (same for all 4 fits)")
+        refc = S.make_card("Refine parameters  (all 4 panels)")
+        # "(shared)" read as one value for all four detectors; "(same for
+        # all 4 fits)" was asked about too ("What does this mean?"). The
+        # distinction is which-knobs-are-free versus what-they-settle-at,
+        # and a card title cannot carry it -- so spell it out once, here.
+        ref_note = QtWidgets.QLabel(
+            "Which parameters are free to move. The same choice is used for "
+            "every panel — each panel still fits its <b>own</b> values.")
+        ref_note.setWordWrap(True)
+        ref_note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:3px;")
+        refc.body.addWidget(ref_note)
         rfl = QtWidgets.QGridLayout(); rfl.setSpacing(4)
         self._ref_lsd = QtWidgets.QCheckBox("Lsd"); self._ref_lsd.setChecked(True)
         self._ref_bc = QtWidgets.QCheckBox("BC"); self._ref_bc.setChecked(True)
