@@ -143,6 +143,17 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         # setValue clamps silently, so loading such a file turned 296.885 into
         # 180 with nothing said.  ty/tz stay at +/-180; they are sub-degree.
         self._seed_tx = _fspin(-360, 360, 4, 0.0, "°")
+        self._seed_tx.setToolTip(
+            "This panel's installation angle about the beam (0-360°).\n\n"
+            "Unlike BC/Lsd/ty/tz this is an INPUT, not a fitted value: a "
+            "powder ring pattern is unchanged by rotating a panel about the "
+            "beam, so no calibrant can determine it. Every pipeline holds it "
+            "at whatever you seed here.\n\n"
+            "Take it from the installation geometry or an existing "
+            "paramstest (a 1-ID-E windmill runs ~90° apart, e.g. 27.3 / "
+            "117.8 / 207.5 / 296.885). It sets each panel's η and where "
+            "the panel lands in the composite — leaving all four at 0 "
+            "piles every panel onto one wedge.")
         self._seed_ty = _fspin(-180, 180, 4, 0.0, "°")
         self._seed_tz = _fspin(-180, 180, 4, 0.0, "°")
         self._seed_tilts = (self._seed_tx, self._seed_ty, self._seed_tz)
@@ -189,7 +200,10 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._seed_btn.setToolTip(
             "Choose which of BC / Lsd / tx / ty / tz to seed this panel's fit "
             "from. Use Pick BC / Pick Ring on the image to populate BC while "
-            "this is open.")
+            "this is open.\n\n"
+            "Which parameters are ticked is shared by all four panels; the "
+            "VALUES are this panel's own — that is how four panels get "
+            "seeded the same way with their own distinct geometry.")
         self._seed_btn.clicked.connect(self._open_seed_dialog)
         seed.body.addWidget(self._seed_btn)
         self._seed_summary_lbl = QtWidgets.QLabel("")

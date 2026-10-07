@@ -226,8 +226,26 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         lv = QtWidgets.QVBoxLayout(inner); lv.setContentsMargins(2, 2, 2, 2); lv.setSpacing(8)
         scroll.setWidget(inner)
 
+        # The model, stated rather than implied. Asked for at the beamline:
+        # "what does it mean shared parameters? Are ge1 - GE4 in hydra
+        # sharing one set of parameters?" -- the cards below were already
+        # marked "(shared)", and that was exactly what misled: "shared"
+        # reads as one value for all four detectors, i.e. a joint fit, when
+        # it means one recipe driving four independent fits.
+        banner = QtWidgets.QLabel(
+            "<b>Four independent fits — one per panel.</b> The panels are "
+            "NOT treated as a single detector. Cards marked <i>same for all "
+            "4 fits</i> set the inputs each fit uses; the fitted geometry "
+            "(BC, Lsd, ty, tz, distortion) is per-panel and lives on the "
+            "ge1–ge4 card below, as does each panel's result.")
+        banner.setWordWrap(True)
+        banner.setStyleSheet(
+            f"color:{S.MUTED};font-size:10px;border:1px solid {S.ACCENT};"
+            "border-radius:3px;padding:5px;")
+        lv.addWidget(banner)
+
         # Pipeline
-        pipe = S.make_card("Pipeline")
+        pipe = S.make_card("Pipeline  (same for all 4 fits)")
         self._pipeline = _NoScrollComboBox()
         for label, key, enabled in PIPELINES:
             self._pipeline.addItem(label, key)
@@ -240,7 +258,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         lv.addWidget(pipe)
 
         # Detector & Calibrant (shared — same beam/detector model for all 4 panels)
-        det = S.make_card("Detector & Calibrant  (shared across ge1–ge4)")
+        det = S.make_card("Detector & Calibrant  (same for all 4 fits)")
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
         self._cal = _NoScrollComboBox(); self._cal.addItems(CALIBRANTS); self._cal.setMaximumWidth(150)
         det.body.addLayout(S.Form().row(
@@ -298,13 +316,33 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         lv.addWidget(avgc)
 
         # Refine parameters (shared)
-        refc = S.make_card("Refine parameters  (shared)")
+        refc = S.make_card("Refine parameters  (same for all 4 fits)")
         rfl = QtWidgets.QGridLayout(); rfl.setSpacing(4)
         self._ref_lsd = QtWidgets.QCheckBox("Lsd"); self._ref_lsd.setChecked(True)
         self._ref_bc = QtWidgets.QCheckBox("BC"); self._ref_bc.setChecked(True)
         self._ref_ty = QtWidgets.QCheckBox("ty"); self._ref_ty.setChecked(True)
         self._ref_tz = QtWidgets.QCheckBox("tz"); self._ref_tz.setChecked(True)
         self._ref_tx = QtWidgets.QCheckBox("tx")
+        # Not refinable from a powder calibrant, and not by any Hydra route:
+        # a Debye-Scherrer pattern is azimuthally symmetric about the beam,
+        # so rotating a panel about it maps the rings onto themselves. The
+        # backend states the same thing in the gauge language -- with the
+        # azimuthal harmonics free, (tx, phi_k) -> (tx + d, phi_k + k*d) is
+        # an exact gauge orbit -- and freezes tx in compat/from_v1.py for
+        # EVERY powder pipeline. Hydra has no manual d-spacing route (the
+        # single-detector tab does, which is why its own tx tick stays
+        # live), so here the box could never do anything. Left visible and
+        # disabled rather than removed: the parameter is real and seeded
+        # per panel, and a silently-missing row invites the question of
+        # whether tx is being refined behind your back.
+        self._ref_tx.setEnabled(False)
+        self._ref_tx.setToolTip(
+            "tx cannot be refined from a powder calibrant — the ring pattern "
+            "is unchanged by rotating a panel about the beam, so there is "
+            "nothing in the data to fit. Supply it per panel in Manual seed "
+            "from the installation geometry; it is held at that value. "
+            "(Determine it from grain spots or Friedel-pair omega splitting "
+            "if you need to measure it.)")
         self._ref_wl = QtWidgets.QCheckBox("Wavelength")
         self._ref_dist = QtWidgets.QCheckBox("Distortion"); self._ref_dist.setChecked(True)
         self._build_rc = QtWidgets.QCheckBox("Residual map"); self._build_rc.setChecked(True)
