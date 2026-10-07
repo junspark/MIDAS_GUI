@@ -602,6 +602,23 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             return
         self._set_working_dir(d)
 
+    def _strain_bit(self, n: int) -> str:
+        """This panel's post-refine pseudo-strain, once it has one.
+
+        Shown in microstrain AND parts-per-1e-4 because the beamline's
+        standing figure of merit from the old mpe_wf workflow is "a few
+        parts in 1e-4", while the GUI reported microstrain only --
+        comparing a run against that baseline meant a factor of 100 in your
+        head, four times over. One line for all four panels is the point:
+        judging a Hydra calibration means comparing panels, and the
+        per-panel card shows one at a time.
+        """
+        res = getattr(self._cards.get(n), "result", None)
+        s = getattr(res, "post_residual_strain_uE", None) if res is not None else None
+        if not s:
+            return ""
+        return f" <b>{s:.0f} µε</b> ({s / 100.0:.2f}e-4)"
+
     def _update_panels_overview(self, running: Optional[int] = None):
         """One line naming every panel that will be fitted and the tx it
         will use, with the running one marked.
@@ -626,7 +643,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             tx = self._cards[n].seed_tx_value()
             mark = " ▶ fitting" if running == n else ""
             warn = "" if abs(tx) > 1e-9 else " <b>(tx not set)</b>"
-            bits.append(f"ge{n} tx {tx:g}°{warn}{mark}")
+            bits.append(f"ge{n} tx {tx:g}°{warn}{mark}{self._strain_bit(n)}")
         n_sel = len(selected)
         head = (f"<b>Fitting {n_sel} panel{'' if n_sel == 1 else 's'} "
                 f"independently</b> — ")

@@ -511,8 +511,16 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             self._r_diag.setText("Could not render parameter grid — see log.")
             self._log(f"ge{self.panel_number} param grid error:\n{_tb.format_exc()}")
         s = getattr(result, "post_residual_strain_uE", None)
-        strain_txt = f"{s:.1f} µε" if s else "n/a"
-        self._r_diag.setText(f"Post-refine strain: {strain_txt}")
+        seed_s = getattr(result, "seed_seconds", 0.0) or 0.0
+        ref_s = getattr(result, "refine_seconds", 0.0) or 0.0
+        # Same line the single-detector tab shows (tab_calibrate._on_done),
+        # plus the strain restated in parts-per-1e-4. The beamline's working
+        # figure of merit for the old mpe_wf workflow is "a few parts in
+        # 1e-4"; this readout was in microstrain only, so comparing against
+        # that baseline meant a mental factor of 100 every time.
+        strain_txt = f"{s:.1f} µε ({s / 100.0:.2f}e-4)" if s else "n/a"
+        self._r_diag.setText(f"Post-refine strain: {strain_txt}    ·    "
+                             f"timing: seed={seed_s:.1f} s, refine={ref_s:.1f} s")
         self._to_view_btn.setEnabled(True)
         self._save_json_btn.setEnabled(True)
         self._save_ps_btn.setEnabled(True)

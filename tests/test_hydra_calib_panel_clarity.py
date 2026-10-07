@@ -140,3 +140,43 @@ def test_the_card_header_names_the_panel_on_show(app, tmp_path):
     page = _page_with_panels(tmp_path)
     page._on_panel_changed("ge3")
     assert "ge3" in page._panel_hdr.text()
+
+
+# ── pseudo-strain, in the units the beamline judges it in ──────────────
+
+class _Res:
+    """Stand-in for an AutoCalibrationResult's strain field."""
+    def __init__(self, uE):
+        self.post_residual_strain_uE = uE
+
+
+def test_strain_is_reported_in_parts_per_1e4_as_well(app, tmp_path):
+    """The working figure of merit from the old mpe_wf workflow is "a few
+    parts in 1e-4"; the GUI reported microstrain only, so every comparison
+    against that baseline needed a mental factor of 100."""
+    page = _page_with_panels(tmp_path)
+    page._cards[1].result = _Res(237.0)
+    page._update_panels_overview()
+    text = page._panels_lbl.text()
+    assert "237 µε" in text
+    assert "2.37e-4" in text
+
+
+def test_every_panels_strain_is_on_one_line(app, tmp_path):
+    """Judging a Hydra calibration means comparing panels, and the
+    per-panel card shows one at a time."""
+    page = _page_with_panels(tmp_path)
+    for n, uE in ((1, 210.0), (2, 185.0), (3, 402.0), (4, 196.0)):
+        page._cards[n].result = _Res(uE)
+    page._update_panels_overview()
+    text = page._panels_lbl.text()
+    for uE in (210, 185, 402, 196):
+        assert f"{uE} µε" in text, f"ge with {uE} µε missing from the overview"
+
+
+def test_an_unfitted_panel_shows_no_strain(app, tmp_path):
+    """Absent is not zero — a panel that has not run must not read as a
+    perfect calibration."""
+    page = _page_with_panels(tmp_path)
+    page._update_panels_overview()
+    assert "µε" not in page._panels_lbl.text()
