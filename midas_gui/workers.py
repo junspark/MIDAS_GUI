@@ -956,7 +956,8 @@ class BatchCorrectionWorker(QtCore.QThread):
                  level: int = 4, shuffle: bool = False,
                  out_dtype: str = "float32",
                  ion_csv_extras=(),
-                 raw_start=None, raw_end=None, parent=None):
+                 raw_start=None, raw_end=None, write_monitor_csvs: bool = True,
+                 parent=None):
         super().__init__(parent)
         self._paths = [Path(p) for p in paths]
         self._dataset, self._out_dataset = dataset, out_dataset
@@ -984,6 +985,16 @@ class BatchCorrectionWorker(QtCore.QThread):
         # skips the file entirely when there is no real data behind it.
         self._ion_csv_extras = set(ion_csv_extras or ())
         self._raw_start, self._raw_end = raw_start, raw_end
+        # False only when a BatchCorrectionCoordinator is driving several of
+        # these over disjoint slices of ONE file list. A monitor CSV is per
+        # froot -- one scan, many numbered files -- so two workers holding
+        # different files of the same scan would each write the same
+        # <froot>_<detector>_bc.csv with half the rows in it. The rows are
+        # left on self._monitor_rows instead and the coordinator merges them
+        # and writes once. See DECISIONS 2026-10-07.
+        self._write_monitor_csvs_on_finish = bool(write_monitor_csvs)
+        #: froot -> {"rows": [...], "notes": [...]}, readable after finished.
+        self._monitor_rows: dict = {}
         self._cancel = False
 
     def _collect_monitor_rows(self, acc: dict, path, tree, ranges, *,
@@ -1115,7 +1126,7 @@ class BatchCorrectionWorker(QtCore.QThread):
             done = 0
             outputs = []
             #: froot -> {"rows": [...], "det": str, "dir": Path, "notes": []}
-            metadata_rows: dict = {}
+            metadata_rows = self._monitor_rows
             for path, ranges in plan:
                 if self._cancel:
                     break
@@ -1197,13 +1208,167 @@ class BatchCorrectionWorker(QtCore.QThread):
                         log=lambda msg: self.progress.emit(done, total, msg))
                     outputs.append(out)
                     self.fileDone.emit(out)
-            self._write_monitor_csvs(metadata_rows, done, total)
+            if self._write_monitor_csvs_on_finish:
+                self._write_monitor_csvs(metadata_rows, done, total)
             if self._cancel:
                 self.progress.emit(done, total,
                                    f"Cancelled — {len(outputs)} file(s) written.")
             self.finished.emit(outputs)
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+
+class BatchCorrectionCoordinator(QtCore.QObject):
+    """Runs one Batch Correction job either as a single
+    ``BatchCorrectionWorker`` ("sequential") or as several concurrent ones,
+    each given a disjoint slice of the FILE list ("parallel").
+
+    Exposes the same signal surface as ``BatchCorrectionWorker``
+    (``progress``, ``fileDone``, ``finished``, ``failed``) plus
+    ``start()``/``isRunning()``/``cancel()``/``wait()``, so
+    ``BatchCorrectionTab`` can construct this in place of the worker with no
+    change to its wiring -- the same contract ``BatchRunCoordinator`` has
+    with ``BatchTab``.
+
+    Files are the unit of work because they share nothing: chunks never
+    cross a file boundary, and each input yields its own output per method,
+    so no two workers can collide on a path. (Chunk-level splitting within
+    one file would complicate the writer for no gain -- these runs are
+    hundreds of files.)
+
+    Threads, not OS processes, for the same reason ``BatchRunCoordinator``
+    gives: h5py releases the GIL on reads and numpy on the reduction, so
+    this gets real multi-core throughput while staying in-process, with no
+    pickling and no cross-process progress plumbing.
+    """
+    progress = QtCore.pyqtSignal(int, int, str)
+    fileDone = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal(list)
+    failed   = QtCore.pyqtSignal(str)
+
+    def __init__(self, paths, *, out_dir, n_workers: int = 1, parent=None,
+                 **worker_kwargs):
+        super().__init__(parent)
+        self._paths = [Path(p) for p in paths]
+        self._out_dir = Path(out_dir)
+        self._kwargs = worker_kwargs
+        self._n = max(1, min(int(n_workers), len(self._paths) or 1))
+        self._workers: list = []
+        self._outputs: list = []
+        self._done_counts: dict = {}
+        self._totals: dict = {}
+        self._failed_once = False
+        self._finished_count = 0
+        self._started = False
+
+    # ── the same surface BatchCorrectionWorker offers ───────────────────
+    def isRunning(self) -> bool:
+        return any(w.isRunning() for w in self._workers)
+
+    def cancel(self):
+        for w in self._workers:
+            w.cancel()
+
+    def wait(self, *a):
+        for w in self._workers:
+            w.wait(*a)
+        return True
+
+    @staticmethod
+    def _slices(paths, n) -> list:
+        """``n`` contiguous, near-equal, non-empty slices of ``paths``.
+
+        Contiguous rather than round-robin so one scan's numbered files
+        mostly stay with one worker -- it does not affect correctness (the
+        CSVs are merged either way) but it keeps each worker reading a
+        locality-friendly run of files off the share.
+        """
+        out, lo = [], 0
+        for i in range(n):
+            hi = lo + len(paths) // n + (1 if i < len(paths) % n else 0)
+            if hi > lo:
+                out.append(paths[lo:hi])
+            lo = hi
+        return out
+
+    def start(self):
+        if self._started:
+            return
+        self._started = True
+        groups = self._slices(self._paths, self._n)
+        if not groups:
+            self.finished.emit([])
+            return
+        for i, group in enumerate(groups):
+            # Deliberately UNPARENTED. A QThread that is a Qt child is
+            # destroyed by the C++ parent-owns-children cascade the instant
+            # its parent is -- including while it is still running, which is
+            # a fatal "QThread: Destroyed while thread is still running"
+            # abort rather than an exception, and which PyQt's keep-alive
+            # for running threads does not save you from. self._workers
+            # below is the only reference these need, and it outlives them.
+            # See DataLoaderPanel._start_preview_worker for the same note.
+            w = BatchCorrectionWorker(
+                group, out_dir=str(self._out_dir),
+                # Every child collects rows; only this object writes them.
+                write_monitor_csvs=False, **self._kwargs)
+            w.progress.connect(lambda d, tt, m, k=i: self._on_progress(k, d, tt, m))
+            w.fileDone.connect(self.fileDone.emit)
+            w.finished.connect(lambda outs, k=i: self._on_child_finished(k, outs))
+            w.failed.connect(self._on_child_failed)
+            self._workers.append(w)
+        for w in self._workers:
+            w.start()
+
+    # ── fan-in ──────────────────────────────────────────────────────────
+    def _on_progress(self, key, done, total, msg):
+        self._done_counts[key] = done
+        self._totals[key] = total
+        self.progress.emit(sum(self._done_counts.values()),
+                           sum(self._totals.values()), msg)
+
+    def _on_child_failed(self, msg):
+        """First failure wins and stops the rest. Reported once: N workers
+        hitting the same bad share would otherwise raise N dialogs."""
+        if not self._failed_once:
+            self._failed_once = True
+            self.failed.emit(msg)
+        self.cancel()
+
+    def _on_child_finished(self, _key, outputs):
+        self._outputs.extend(outputs)
+        self._finished_count += 1
+        if self._finished_count < len(self._workers):
+            return
+        if not self._failed_once:
+            self._write_merged_monitor_csvs()
+        self.finished.emit(self._outputs)
+
+    def _write_merged_monitor_csvs(self):
+        """One CSV per froot, from every worker's rows together.
+
+        Rows carry source_file/frame_start/frame_end (DECISIONS 2026-10-06),
+        so the merge is a concatenate and sort -- which also restores the
+        file order the split broke.
+        """
+        merged: dict = {}
+        for w in self._workers:
+            for froot, bucket in (w._monitor_rows or {}).items():
+                dest = merged.setdefault(froot, {"rows": [], "notes": []})
+                dest["rows"].extend(bucket.get("rows") or [])
+                dest["notes"].extend(bucket.get("notes") or [])
+        for bucket in merged.values():
+            bucket["rows"].sort(
+                key=lambda r: (str(r.get("source_file") or ""),
+                               r.get("kind") != "dark",
+                               int(r.get("frame_start") or 0)))
+            bucket["notes"].sort()
+        if not merged or not self._workers:
+            return
+        total = sum(self._totals.values())
+        # Any child can write them -- _write_monitor_csvs only reads
+        # self._out_dir, which every child shares with this coordinator.
+        self._workers[0]._write_monitor_csvs(merged, total, total)
 
 
 class AllFrameStatsWorker(QtCore.QThread):

@@ -8,7 +8,7 @@ session — it keeps running (and can be re-adopted) after this GUI closes,
 which an in-process ``QThread`` (``BatchRunCoordinator``) cannot do.
 
 Departures from the source, and why:
-  - Progress is parsed with a trivial regex (``[batch] PROGRESS d/n``)
+  - Progress is parsed with a trivial regex (``[batch|correct] PROGRESS d/n``)
     instead of mpe_wf's detector-context/frame-number log-scraping — we
     control our own CLI's stdout format, so there's nothing to scrape.
   - A prior GUI's still-running jobs are re-discovered via a JSON sidecar
@@ -38,15 +38,18 @@ from PyQt5 import QtCore, QtWidgets
 JOBS_DIR = Path.home() / ".midas_gui" / "jobs"
 
 _SESSION_PREFIX = "midasgui_batch_"
-_PROGRESS_RE = re.compile(r"\[batch\] PROGRESS (\d+)/(\d+)")
+#: Both headless entry points report the same way: batch_cli tags its lines
+#: [batch], correct_cli tags them [correct]. One regex serves both so a
+#: Batch Correction job gets a progress bar too.
+_PROGRESS_RE = re.compile(r"\[(?:batch|correct)\] PROGRESS (\d+)/(\d+)")
 _DONE_RE = re.compile(r"\[launcher\] DONE exit=(\d+)")
 
 _LOG_RULES = [
     (re.compile(r"\[launcher\]"), "#b78bff", True),
     (re.compile(r"\bERROR\b"), "#ff5f5f", True),
     (re.compile(r"\b(WARNING|WARN)\b"), "#d7861f", False),
-    (re.compile(r"\[batch\] FINISHED"), "#2fa84f", True),
-    (re.compile(r"\[batch\] PROGRESS"), "#5f87d7", False),
+    (re.compile(r"\[(?:batch|correct)\] FINISHED"), "#2fa84f", True),
+    (re.compile(r"\[(?:batch|correct)\] PROGRESS"), "#5f87d7", False),
 ]
 
 

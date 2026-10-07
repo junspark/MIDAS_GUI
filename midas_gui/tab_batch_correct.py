@@ -45,7 +45,8 @@ from midas_gui.helpers import (CORRECTION_EXT, CORRECTION_SUFFIX,
                                suggest_correction_output_dir, widgets_to_dict,
                                warn_if_path_missing)
 from midas_gui.widgets import DataLoaderPanel, ImageViewer, LogPanel
-from midas_gui.workers import BatchCorrectionWorker
+from midas_gui.job_queue import JobQueuePanel
+from midas_gui.workers import BatchCorrectionCoordinator, BatchCorrectionWorker
 
 
 class BatchCorrectionTab(QtWidgets.QWidget):
@@ -127,6 +128,10 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         self._viewer = ImageViewer()
         right.addTab(self._viewer, "Preview")
         self._log = LogPanel()
+        # This tab's own queue. BatchTab has a separate JobQueuePanel in its
+        # own Logs area (tab_batch.py); one instance per tab is what keeps
+        # the two tabs' jobs independent.
+        self._job_queue = JobQueuePanel(self._log, on_job_done=self._on_job_done)
         right.addTab(self._log, "Log")
         split.addWidget(right)
         split.setStretchFactor(2, 1)
@@ -367,6 +372,34 @@ class BatchCorrectionTab(QtWidgets.QWidget):
 
     def _build_run_card(self):
         card = S.make_card("Run")
+        # Run mode, worded and shaped as Batch Integrate's (tab_batch.py) --
+        # the same choice should not read differently in two tabs. Files are
+        # the unit of parallelism here: chunks never cross a file boundary
+        # and each input yields its own output, so workers share nothing
+        # (BatchCorrectionCoordinator's docstring has the rest).
+        import os
+        _max_workers = max(1, (os.cpu_count() or 4))
+        mode_row = QtWidgets.QHBoxLayout(); mode_row.setSpacing(4)
+        mode_row.addWidget(S.LabelRight("Mode:"))
+        self._run_mode = _NoScrollComboBox()
+        self._run_mode.addItem("Sequential", "sequential")
+        self._run_mode.addItem("Parallel", "parallel")
+        self._run_mode.setToolTip(
+            "Sequential \u2014 one file at a time.\n"
+            "Parallel \u2014 several files at once, on worker threads. Each "
+            "output is independent, so the result is identical either way; "
+            "this only trades memory and disk bandwidth for wall-clock.")
+        mode_row.addWidget(self._run_mode, 1)
+        mode_row.addWidget(S.LabelRight("Workers:"))
+        self._n_workers = _NoScrollSpinBox()
+        self._n_workers.setRange(1, _max_workers)
+        self._n_workers.setValue(min(4, _max_workers))
+        self._n_workers.setEnabled(False)
+        self._run_mode.currentIndexChanged.connect(
+            lambda: self._n_workers.setEnabled(
+                self._run_mode.currentData() == "parallel"))
+        mode_row.addWidget(self._n_workers)
+        card.body.addLayout(mode_row)
         self._preview_btn = QtWidgets.QPushButton("Preview first chunk")
         self._preview_btn.setToolTip(
             "Reduce only the first chunk of the first file and show it, so a "
@@ -379,6 +412,14 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         self._cancel_btn.setEnabled(False)
         card.body.addLayout(S.button_grid(
             [self._preview_btn, self._run_btn, self._cancel_btn], 2))
+        self._job_btn = QtWidgets.QPushButton("Run as background job")
+        self._job_btn.setToolTip(
+            "Run this correction in a detached `screen` session instead of "
+            "in this process, so it survives closing the GUI. Needs an "
+            "output folder: the job writes its field images and its results "
+            "list there.")
+        self._job_btn.clicked.connect(self._run_as_job)
+        card.body.addWidget(self._job_btn)
         self._prog = QtWidgets.QProgressBar()
         self._prog.setRange(0, 100); self._prog.setVisible(False)
         card.body.addWidget(self._prog)
@@ -665,8 +706,17 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         for p in paths:
             self._emit(f"  source: {p}", panel=False)
         self._prog.setVisible(True); self._prog.setValue(0)
-        self._worker = BatchCorrectionWorker(
-            paths, out_dir=out_dir, parent=self, **self._worker_kwargs(paths))
+        n_workers = (self._n_workers.value()
+                     if self._run_mode.currentData() == "parallel" else 1)
+        # Always the coordinator, even for one worker: one code path means
+        # Sequential cannot drift from Parallel, and at n=1 it is a single
+        # BatchCorrectionWorker with a pass-through for the monitor CSVs.
+        self._worker = BatchCorrectionCoordinator(
+            paths, out_dir=out_dir, n_workers=n_workers, parent=self,
+            **self._worker_kwargs(paths))
+        if n_workers > 1:
+            self._emit(f"  run mode: parallel, {n_workers} worker(s) over "
+                       f"{len(paths)} file(s)", panel=False)
         self._worker.progress.connect(self._on_progress)
         self._worker.fileDone.connect(self._on_file_done)
         self._worker.finished.connect(self._on_finished)
@@ -674,6 +724,110 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         self._running = True
         self._worker.start()
         self._refresh_enabled()
+
+    def _run_as_job(self):
+        """Launch this same correction as a detached `screen` job (see
+        job_queue.JobQueuePanel) instead of running in-process -- survives
+        closing this GUI. Everything the CLI needs goes to disk first: the
+        background process (a fresh `python -m midas_gui.correct_cli`) has
+        no access to this GUI\u2019s live state. Mirrors
+        BatchTab._run_as_job."""
+        import sys
+        paths = self._h5_paths()
+        if not paths:
+            cfg_type = self._loader.source_cfg().get("type")
+            if cfg_type in ("tiff_glob", "tiff_list"):
+                show_error(
+                    self, "HDF5 sources only",
+                    "Batch Correction reduces each file\u2019s internal sub-frame "
+                    "stack, and chunks never cross a file boundary.\n\n"
+                    "A TIFF/GE file holds exactly one frame, so there is no "
+                    "stack within a file to combine. Select HDF5 files "
+                    "instead.")
+            else:
+                show_error(self, "No data", "Select an HDF5 file or files.")
+            return
+        ops = self._selected_ops()
+        if not ops:
+            show_error(self, "No method selected",
+                       "Tick at least one of Mean / Median / Sum / Max.")
+            return
+        out_dir = self._out_ed.text().strip()
+        if not out_dir:
+            show_error(self, "Output folder required",
+                       "Background jobs need an output folder \u2014 the job "
+                       "writes its field images and results list there.")
+            return
+        reason = check_output_dir_writable(out_dir)
+        if reason:
+            show_error(self, "Output folder not writable", reason)
+            return
+        out_path = Path(out_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        kw = self._worker_kwargs(paths)
+        argv = [sys.executable, "-m", "midas_gui.correct_cli",
+                "--paths", *[str(p) for p in paths],
+                "--dataset", str(kw["dataset"] or "exchange/data"),
+                "--out-dir", str(out_path),
+                "--ops", ",".join(ops),
+                "--chunk-size", str(kw["chunk_size"] or 0),
+                "--suffix", kw["suffix"], "--ext", kw["out_ext"],
+                "--out-dataset", kw["out_dataset"],
+                "--out-dtype", kw["out_dtype"],
+                "--compression", str(kw["compression"] or "none"),
+                "--level", str(kw["level"]),
+                "--dark-dataset", kw["dark_dataset"],
+                "--bright-mode", kw["bright_mode"]]
+        argv += ["--shuffle"] if kw["shuffle"] else []
+        argv += ["--auto-dark"] if kw["auto_dark"] else ["--no-auto-dark"]
+        argv += (["--clip-negatives"] if kw["clip_negatives"]
+                 else ["--no-clip-negatives"])
+        if kw["ion_csv_extras"]:
+            argv += ["--ion-csv-extras", ",".join(sorted(kw["ion_csv_extras"]))]
+        if kw["raw_start"] is not None:
+            argv += ["--raw-start", str(kw["raw_start"])]
+        if kw["raw_end"] is not None:
+            argv += ["--raw-end", str(kw["raw_end"])]
+        n_workers = (self._n_workers.value()
+                     if self._run_mode.currentData() == "parallel" else 1)
+        argv += ["--n-workers", str(n_workers)]
+
+        # Field images can\u2019t travel on a command line. Same approach, and
+        # the same _bg_job_ naming, as BatchTab._run_as_job.
+        import tifffile
+        for name in ("dark", "bright", "background"):
+            arr = kw.get(name)
+            if arr is None:
+                continue
+            f = out_path / f"_bg_job_{name}.tif"
+            tifffile.imwrite(str(f), np.asarray(arr, dtype=np.float32))
+            argv += [f"--{name}", str(f)]
+
+        total = sum(1 for _ in paths)
+        job = self._job_queue.launch(argv, name=out_path.name or "correct",
+                                     total_frames=max(1, total),
+                                     out_dir=str(out_path))
+        if job is not None:
+            self._log.append(
+                f"[correct] Launched background job: {job.session} "
+                f"({len(paths)} file(s) \u00d7 {len(ops)} method(s))")
+
+    def _on_job_done(self, job) -> None:
+        """A detached correction finished \u2014 report what it wrote.
+
+        The job has no Qt signals reaching this process, so its own
+        ``_bg_job_correction.json`` is the only thing to read back."""
+        import json
+        try:
+            data = json.loads(
+                (Path(job.out_dir) / "_bg_job_correction.json").read_text())
+        except Exception:
+            self._log.append(f"[correct] Job {job.session} finished.")
+            return
+        self._log.append(
+            f"[correct] Job {job.session} finished \u2014 "
+            f"{data.get('n', 0)} file(s) written.")
 
     def _emit(self, msg: str, *, screen: bool = True, panel: bool = True) -> None:
         """One line to the on-screen panel and to this run's screen log.
@@ -725,6 +879,14 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             self._screen_log.close()
             self._screen_log = None
 
+    def shutdown(self):
+        """App close — MainWindow calls this on any tab that has it
+        (app.py's close sweep). The generic sweep covers this tab's own
+        QThreads; the job queue's poll timer and its tracked `screen`
+        sessions are not QThreads, so they need this. Detached jobs are
+        deliberately left running: outliving the GUI is the point of them."""
+        self._job_queue.shutdown()
+
     def _cancel(self):
         if self._running and self._worker is not None:
             self._worker.cancel()
@@ -771,6 +933,7 @@ class BatchCorrectionTab(QtWidgets.QWidget):
             "ion_motors_chk": self._ion_motors_chk,
             "auto_dark_chk": self._auto_dark_chk, "dark_ds_ed": self._dark_ds_ed,
             "clip_chk": self._clip_chk,
+            "run_mode": self._run_mode, "n_workers": self._n_workers,
             **{f"op_{op}": chk for op, chk in self._op_chks.items()},
         }
 
