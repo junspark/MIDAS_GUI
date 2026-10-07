@@ -493,7 +493,13 @@ class CalibrationTab(QtWidgets.QWidget):
         # Seed tilts (deg). Honoured by the four-stage / advanced pipelines; the
         # one-shot / first-time paths seed tilts only if the installed backend
         # exposes initial-tilt kwargs (otherwise they start at 0).
-        self._seed_tx = _fspin(-180, 180, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
+        # tx is the panel's installation azimuth about the beam, not a small
+        # alignment tilt like ty/tz: real fitted Hydra geometries run the whole
+        # way round (the bundled example is 27.3 / 117.8 / 207.5 / 296.885).  A
+        # +/-180 range made three of those four untypable, and -- worse --
+        # setValue clamps silently, so loading such a file turned 296.885 into
+        # 180 with nothing said.  ty/tz stay at +/-180; they are sub-degree.
+        self._seed_tx = _fspin(-360, 360, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
         self._seed_ty = _fspin(-180, 180, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
         self._seed_tz = _fspin(-180, 180, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
         self._seed_tilts = (self._seed_tx, self._seed_ty, self._seed_tz)

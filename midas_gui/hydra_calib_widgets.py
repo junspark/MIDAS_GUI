@@ -136,7 +136,13 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._seed_bcy = _fspin(-99999, 99999, 2, DEFAULT_BC_Y, "px")
         self._seed_bcz = _fspin(-99999, 99999, 2, DEFAULT_BC_Z, "px")
         self._seed_lsd = _fspin(0.001, 1e5, 4, DEFAULT_LSD_UM / 1000.0, " mm")
-        self._seed_tx = _fspin(-180, 180, 4, 0.0, "°")
+        # tx is the panel's installation azimuth about the beam, not a small
+        # alignment tilt like ty/tz: real fitted Hydra geometries run the whole
+        # way round (the bundled example is 27.3 / 117.8 / 207.5 / 296.885).  A
+        # +/-180 range made three of those four untypable, and -- worse --
+        # setValue clamps silently, so loading such a file turned 296.885 into
+        # 180 with nothing said.  ty/tz stay at +/-180; they are sub-degree.
+        self._seed_tx = _fspin(-360, 360, 4, 0.0, "°")
         self._seed_ty = _fspin(-180, 180, 4, 0.0, "°")
         self._seed_tz = _fspin(-180, 180, 4, 0.0, "°")
         self._seed_tilts = (self._seed_tx, self._seed_ty, self._seed_tz)
