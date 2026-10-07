@@ -246,3 +246,44 @@ def test_an_unconfigured_tab_asks_for_zero_degrees(tab):
     """Not ``None``, not a sentinel — the defaults are a stationary sample."""
     assert tab._omega_cfg() == {"start": 0.0, "step": 0.0,
                                 "channel": "", "collapse": False}
+
+
+# ── η binning: one lineout over a limited azimuth ───────────────────────
+
+def test_eta_bin_accepts_a_single_bin_spanning_the_whole_range(tab):
+    """Reported: "I also want to range 110 for eta step to get 1 lineout but
+    the gui will not let me."
+
+    η bin was capped at 30°, which is not a physical limit — one bin
+    covering the entire selected azimuth is a normal thing to ask for, and
+    is how you get a single lineout out of a wedge. η can span at most a
+    full turn, so that is the cap.
+    """
+    assert tab._e_bin.maximum() >= 360.0
+    tab._eta_min.setValue(-100.0)
+    tab._eta_max.setValue(10.0)
+    tab._e_bin.setValue(110.0)
+    assert tab._e_bin.value() == pytest.approx(110.0), \
+        "the η bin was silently clamped"
+
+
+def test_the_cake_dialog_mirrors_the_widened_eta_range(dialog):
+    """The dialog builds its spins from the tab's own ranges, so a clamp
+    would reappear here if the two ever drifted."""
+    dialog._spins["ETA_STEP"].setValue(110.0)
+    assert dialog._spins["ETA_STEP"].value() == pytest.approx(110.0)
+
+
+def test_the_omega_channel_popup_is_wide_enough_for_full_paths(dialog):
+    """HDF5 dataset paths differ only in the middle — instrument/SMS/D/HR/
+    against instrument/SMS/E/HL/ — and that is exactly what Qt elides when
+    the popup inherits the closed combo's width."""
+    combo = dialog._ome_channel
+    combo.clear()
+    for name in ("", "instrument/SMS/D/HR/samRy", "instrument/SMS/E/HL/samRy"):
+        combo.addItem(name)
+    dialog._widen_popup(combo)
+    longest = max(combo.fontMetrics().boundingRect(combo.itemText(i)).width()
+                  for i in range(combo.count()))
+    assert combo.view().minimumWidth() >= longest, \
+        "the popup is narrower than its longest entry"

@@ -985,7 +985,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._prof_view = ProfileViewer()
         ptb = self._prof_view._toolbar_layout
         self._cal_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._cal_r_bin.setFixedWidth(78)
-        self._cal_eta_bin = _fspin(0.5, 30.0, 1, 5.0, "°"); self._cal_eta_bin.setFixedWidth(64)
+        self._cal_eta_bin = _fspin(0.5, 360.0, 1, 5.0, "°"); self._cal_eta_bin.setFixedWidth(64)
         self._cal_azim = _NoScrollComboBox()
         self._cal_azim.addItem("Pixel-weighted", True)
         self._cal_azim.addItem("η-bin mean", False)

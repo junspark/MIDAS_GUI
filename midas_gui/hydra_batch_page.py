@@ -139,7 +139,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         if _ki >= 0:
             self._kernel.setCurrentIndex(_ki)
         self._r_bin = _fspin(0.1, 20.0, 2, 1.0, "px")
-        self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
+        self._e_bin = _fspin(0.5, 360.0, 1, 5.0, "°")
         self._azim = _NoScrollComboBox()
         self._azim.addItem("Pixel-weighted", True)
         self._azim.addItem("η-bin mean (legacy)", False)

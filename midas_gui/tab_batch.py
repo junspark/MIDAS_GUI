@@ -201,6 +201,12 @@ class _CakeParamsDialog(QtWidgets.QDialog):
         form.full(line)
         self._ome_channel = QtWidgets.QComboBox()
         self._ome_channel.setEditable(True)
+        # Without this the popup is only as wide as the closed combo and
+        # Qt elides the MIDDLE of every entry — "instrum...R/samRy" — which
+        # is exactly the part that distinguishes one container from
+        # another (.../D/HR/ vs .../E/HL/). See _widen_popup.
+        self._ome_channel.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self._ome_collapse = QtWidgets.QCheckBox("one ω for all frames")
         self._extras = {"_ome_channel": self._ome_channel,
                         "_ome_collapse": self._ome_collapse}
@@ -224,6 +230,26 @@ class _CakeParamsDialog(QtWidgets.QDialog):
         apply_btn.clicked.connect(self.apply_to_tab)
         close_btn.clicked.connect(self.accept)
         v.addWidget(btns)
+
+    @staticmethod
+    def _widen_popup(combo, cap: int = 900) -> None:
+        """Size the drop-down list to its longest entry.
+
+        A QComboBox popup inherits the width of the closed box, and Qt
+        elides anything longer — in the middle, which for an HDF5 path is
+        the only part that differs between entries
+        (``instrument/SMS/D/HR/samRy`` against
+        ``instrument/SMS/E/HL/samRy`` both render as
+        ``instrum...R/samRy``). Widen the VIEW rather than the combo so the
+        form layout is unaffected, and cap it so a pathological name can't
+        push the popup off-screen; entries longer than the cap keep their
+        full text as a tooltip.
+        """
+        fm = combo.fontMetrics()
+        widest = max((fm.boundingRect(combo.itemText(i)).width()
+                      for i in range(combo.count())), default=0)
+        if widest:
+            combo.view().setMinimumWidth(min(widest + 40, cap))
 
     # ── which widget each key really lives in ──────────────────────────
     def _target(self, key):
@@ -289,8 +315,12 @@ class _CakeParamsDialog(QtWidgets.QDialog):
                 try:
                     for name, _n in list_h5_1d_datasets(path):
                         self._ome_channel.addItem(name)
+                        self._ome_channel.setItemData(
+                            self._ome_channel.count() - 1, name,
+                            QtCore.Qt.ToolTipRole)
                 except Exception:
                     pass
+            self._widen_popup(self._ome_channel)
             self._ome_channel.setEditText(typed)
         finally:
             self._ome_channel.blockSignals(False)
@@ -1453,7 +1483,7 @@ class BatchTab(QtWidgets.QWidget):
         bt_row.addWidget(self._bin_type, 1); bt_row.addWidget(self._radial_bins_btn)
         pf.row(("Bin type:", bt_row))
 
-        self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
+        self._e_bin = _fspin(0.5, 360.0, 1, 5.0, "°")
         self._eta_min = _fspin(-180.0, 180.0, 1, -180.0, "°")
         self._eta_max = _fspin(-180.0, 180.0, 1, 180.0, "°")
         for w in (self._eta_min, self._eta_max, self._e_bin):
@@ -1758,12 +1788,15 @@ class BatchTab(QtWidgets.QWidget):
         # rather than in the left Integration card.
         self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
         self._grid_chk.setToolTip(
-            "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
-            "integration bin grid on the Detector view tab — concentric "
-            "circles at each R-bin edge, spokes at each η-bin edge "
-            "(bounded to η min/max). Thinned to at most ~50 rings / ~72 "
-            "spokes for legibility with fine bin sizes. Unchecking this "
-            "hides the overlay entirely, including Rmin/Rmax.\n\n"
+            "Overlay the (R, η) integration bin grid on the Detector view "
+            "tab: the Rmin/Rmax boundaries, an arc at each R-bin edge and "
+            "a spoke at each η-bin edge.\n\n"
+            "Everything is bounded to η min/max, so the overlay covers the "
+            "region actually being integrated — a limited azimuth draws an "
+            "annulus sector, not the whole ring.\n\n"
+            "Thinned to at most ~50 arcs / ~72 spokes for legibility with "
+            "fine bin sizes. Unchecking this hides the overlay entirely, "
+            "including Rmin/Rmax.\n\n"
             "View-only — has no effect on the integration itself.")
         self._grid_chk.toggled.connect(self._refresh_detector_preview)
         self._view_tabs = QtWidgets.QTabWidget()

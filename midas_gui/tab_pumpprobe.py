@@ -286,7 +286,7 @@ class PumpProbeTab(QtWidgets.QWidget):
         if ki >= 0:
             self._kernel.setCurrentIndex(ki)
         self._r_bin = _fspin(0.1, 20.0, 2, 1.0, "px")
-        self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
+        self._e_bin = _fspin(0.5, 360.0, 1, 5.0, "°")
         self._axis = _NoScrollComboBox()
         for label, key in self._AXES:
             self._axis.addItem(label, key)

@@ -210,3 +210,71 @@ def test_a_saved_project_keeps_its_own_plane(app):
     w.set_state({"pol_plane": 0.0, "pol_fraction": 0.5})
     assert w.pol_plane.value() == pytest.approx(0.0)
     assert w.pol_fraction.value() == pytest.approx(0.5)
+
+
+def test_the_bin_grid_arcs_stop_at_the_eta_limits(app):
+    """Reported: "caking scheme plotting functionality still plots the full
+    rings when I am integrating limited eta range."
+
+    The grid depicts the region being integrated, so an arc has to stop
+    where the region does. It used to sweep a whole turn regardless, which
+    drew a grid over the entire detector for a run binning a 110° wedge.
+
+    Arcs are the items with many points; spokes have exactly two. Checked
+    in the same bc + r*(sin η, cos η) convention the spokes use — the old
+    full-circle path swept (cos, sin), which traces the same circle and so
+    was harmless only while the sweep was complete.
+    """
+    import pyqtgraph as pg
+    from midas_gui.widgets import ImageViewer
+    from midas_gui.helpers import draw_polar_bin_overlay
+
+    eta_lo, eta_hi, r_max = -100.0, 10.0, 40.0
+    v = ImageViewer()
+    v.set_image(np.zeros((200, 200), dtype=np.float32))
+    items = []
+    draw_polar_bin_overlay(
+        v, items, bc_y=BC, bc_z=BC, r_min=10.0, r_max=r_max, r_bin=10.0,
+        e_bin=20.0, show_grid=True, eta_min=eta_lo, eta_max=eta_hi)
+    try:
+        arcs = [it for it in items if isinstance(it, pg.PlotDataItem)
+                and it.xData is not None and len(it.xData) > 2]
+        assert arcs, "no arcs drawn"
+        for arc in arcs:
+            r = np.hypot(np.asarray(arc.xData) - BC,
+                         np.asarray(arc.yData) - BC)
+            eta = np.degrees(np.arctan2(np.asarray(arc.xData) - BC,
+                                        np.asarray(arc.yData) - BC))
+            assert eta.min() >= eta_lo - 1e-6, f"arc runs past η min: {eta.min()}"
+            assert eta.max() <= eta_hi + 1e-6, f"arc runs past η max: {eta.max()}"
+            # and it really does span the wedge, not collapse to a point
+            assert eta.max() - eta.min() > 100.0
+            assert np.ptp(r) < 1e-6, "an arc must stay at one radius"
+    finally:
+        for it in items:
+            v._iv.removeItem(it)
+
+
+def test_a_full_azimuth_still_draws_a_closed_ring(app):
+    """The default must not regress: with no η limit the arcs are circles."""
+    import pyqtgraph as pg
+    from midas_gui.widgets import ImageViewer
+    from midas_gui.helpers import draw_polar_bin_overlay
+
+    v = ImageViewer()
+    v.set_image(np.zeros((200, 200), dtype=np.float32))
+    items = []
+    draw_polar_bin_overlay(
+        v, items, bc_y=BC, bc_z=BC, r_min=10.0, r_max=40.0, r_bin=10.0,
+        e_bin=20.0, show_grid=True, eta_min=-180.0, eta_max=180.0)
+    try:
+        arcs = [it for it in items if isinstance(it, pg.PlotDataItem)
+                and it.xData is not None and len(it.xData) > 2]
+        assert arcs
+        for arc in arcs:
+            x, y = np.asarray(arc.xData), np.asarray(arc.yData)
+            assert abs(x[0] - x[-1]) < 1e-6 and abs(y[0] - y[-1]) < 1e-6, \
+                "a full-azimuth ring must close on itself"
+    finally:
+        for it in items:
+            v._iv.removeItem(it)

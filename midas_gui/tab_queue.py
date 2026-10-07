@@ -429,7 +429,7 @@ class BatchQueueTab(QtWidgets.QWidget):
         if ki >= 0:
             self._kernel.setCurrentIndex(ki)
         self._r_bin = _fspin(0.1, 20.0, 2, 1.0, "px")
-        self._e_bin = _fspin(0.5, 30.0, 1, 5.0, "°")
+        self._e_bin = _fspin(0.5, 360.0, 1, 5.0, "°")
         self._r_min = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
         self._r_max = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
         self._eta_min = _fspin(-180.0, 180.0, 1, -180.0, "°")

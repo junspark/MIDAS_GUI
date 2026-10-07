@@ -126,7 +126,7 @@ class CorrectionsTab(QtWidgets.QWidget):
         self._img_ed.returnPressed.connect(self._load_img)
         self._img_h5_ed.editingFinished.connect(
             lambda: self._image is not None and self._load_img())
-        self._rbin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._ebin = _fspin(0.5, 30.0, 1, 5.0, "°")
+        self._rbin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._ebin = _fspin(0.5, 360.0, 1, 5.0, "°")
         gf.addRow("Bins:", _twocol("R:", self._rbin, "η:", self._ebin))
         lv.addWidget(grp_img)
 

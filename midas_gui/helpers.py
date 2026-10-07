@@ -1497,7 +1497,8 @@ def _tilt_project_YZ(two_theta_deg: np.ndarray, eta_deg: np.ndarray,
 
 def tilted_ring_xy(two_theta_deg: float, tx: float, ty: float, tz: float,
                     Lsd_um: float, bc_y: float, bc_z: float,
-                    pxY_um: float, pxZ_um: float, n: int = 400):
+                    pxY_um: float, pxZ_um: float, n: int = 400,
+                    eta_min: float = 0.0, eta_max: float = 360.0):
     """Forward-project a diffraction ring at ``two_theta_deg`` through the tilt
     geometry (tx/ty/tz, degrees) onto detector pixel coordinates.
 
@@ -1508,8 +1509,14 @@ def tilted_ring_xy(two_theta_deg: float, tx: float, ty: float, tz: float,
     plain circle ``bc + r*(sin η, cos η)`` when tx=ty=tz=0, since it inverts
     the same ray/tilt-plane geometry as
     ``midas_integrate_v2.forward.pixels.pixel_to_REta_from_spec``.
+
+    ``eta_min``/``eta_max`` draw an ARC instead of the whole ring, for a
+    caller depicting an integration region that does not span the full
+    azimuth. The default is the full turn, so every existing caller — the
+    calibration-ring overlays, which show where the rings ARE rather than
+    which part is integrated — is unchanged.
     """
-    eta = np.linspace(0.0, 360.0, n, endpoint=True)
+    eta = np.linspace(float(eta_min), float(eta_max), n, endpoint=True)
     return _tilt_project_YZ(np.full(n, two_theta_deg), eta, tx, ty, tz,
                              Lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
 
@@ -2059,11 +2066,18 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
                            lsd_um: Optional[float] = None,
                            pxY_um: Optional[float] = None,
                            pxZ_um: Optional[float] = None) -> None:
-    """If ``show_grid``, draw the Rmin/Rmax exclusion-boundary circles
-    (skipping any non-positive radius) plus the full polar (R, η) bin
-    grid — concentric circles at each radial-bin edge plus spokes at each
+    """If ``show_grid``, draw the Rmin/Rmax boundaries plus the polar
+    (R, η) bin grid — arcs at each radial-bin edge plus spokes at each
     η-bin edge, both thinned to at most ``max_rings``/``max_spokes`` — onto
     ``viewer._iv``. Nothing is drawn when ``show_grid`` is false.
+
+    **The arcs are bounded to ``eta_min``/``eta_max``, like the spokes.**
+    They used to be full circles regardless, so integrating a limited
+    azimuth drew a grid over the whole detector and the overlay claimed a
+    region far larger than the one being binned. The grid depicts the
+    integration region, so it has to stop where the region does; with the
+    spokes at η min and η max already drawn, the result closes as the
+    annulus sector it actually is.
 
     ``tx``/``ty``/``tz`` (deg) + ``lsd_um``/``pxY_um``/``pxZ_um`` are
     optional: when the detector has a non-trivial tilt AND all three
@@ -2090,14 +2104,26 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
         return
     tilt_aware = (bool(lsd_um) and bool(pxY_um) and bool(pxZ_um)
                   and (abs(tx) > 1e-9 or abs(ty) > 1e-9 or abs(tz) > 1e-9))
-    th = np.linspace(0, 2 * math.pi, 256)
+    # Clamp to a sane sweep: a non-positive or wrapped span means "no limit
+    # given", and anything at or past a full turn is the whole ring.
+    span = float(eta_max) - float(eta_min)
+    if not (0.0 < span < 360.0 - 1e-9):
+        arc_lo, arc_hi = 0.0, 360.0
+    else:
+        arc_lo, arc_hi = float(eta_min), float(eta_max)
+    # Same parameterisation as the spokes below — bc + r*(sin η, cos η),
+    # η = 0 straight up. The old full-circle path swept bc + r*(cos, sin),
+    # which traces the SAME circle and so was harmless while the sweep was
+    # a whole turn; as an arc it would be a quarter turn out of place.
+    arc = np.radians(np.linspace(arc_lo, arc_hi, 256))
 
     def _ring_xy(r):
         if tilt_aware:
             two_theta = math.degrees(math.atan(r * pxY_um / lsd_um))
             return tilted_ring_xy(two_theta, tx, ty, tz, lsd_um, bc_y, bc_z,
-                                   pxY_um, pxZ_um, n=256)
-        return bc_y + r * np.cos(th), bc_z + r * np.sin(th)
+                                   pxY_um, pxZ_um, n=256,
+                                   eta_min=arc_lo, eta_max=arc_hi)
+        return bc_y + r * np.sin(arc), bc_z + r * np.cos(arc)
 
     def _circle(r, pen):
         Y, Z = _ring_xy(r)
