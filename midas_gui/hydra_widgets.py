@@ -561,11 +561,25 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         row.addWidget(browse)
         card.body.addLayout(row)
 
+        # One tick per panel: which GE files make up this Hydra array.
+        # Checkboxes rather than a dropdown because the four choices are
+        # independent and all four should be readable at once. They keep
+        # the old labels' colouring, so "found on disk" still reads at a
+        # glance -- the tick is a separate question from the colour.
+        # True while _set_path/set_state ticks these programmatically, so
+        # the per-tick re-emit does not fire once per box mid-rebuild.
+        self._loading_panel_ticks = False
         self._status_lbls = {}
         status_row = QtWidgets.QHBoxLayout(); status_row.setSpacing(6)
         for n in (1, 2, 3, 4):
-            lbl = QtWidgets.QLabel(f"ge{n}")
+            lbl = QtWidgets.QCheckBox(f"ge{n}")
             lbl.setStyleSheet(self._status_style(False))
+            lbl.setEnabled(False)       # until a path says this panel exists
+            lbl.setToolTip(
+                f"Include ge{n} in the Hydra array. Enabled only when a ge{n} "
+                f"file sits beside the one above; untick to leave that panel "
+                f"out of the composite, the caking and its per-panel card.")
+            lbl.toggled.connect(self._on_panel_selection_changed)
             status_row.addWidget(lbl)
             self._status_lbls[n] = lbl
         status_row.addStretch(1)
@@ -681,6 +695,43 @@ class HydraLoaderPanel(QtWidgets.QWidget):
 
         lv.addStretch(1)
 
+    def _selected_siblings(self) -> dict:
+        """The panels this array actually uses: found on disk AND ticked.
+
+        ``self._siblings`` stays the full found set so the info line can
+        keep reporting how many exist -- excluding a panel must never look
+        like a failed detection."""
+        return {n: p for n, p in (self._siblings or {}).items()
+                if self._status_lbls[n].isChecked()}
+
+    def _on_panel_selection_changed(self, *_args):
+        """A ge tick moved. Re-emit the active set: every consumer treats
+        siblingsChanged as authoritative (hydra_page._on_siblings_changed,
+        _toolbar.set_available), so filtering at this one emit point is the
+        whole mechanism -- no consumer needs to know selection exists."""
+        if self._loading_panel_ticks or not self._siblings:
+            return
+        self._refresh_panel_info()
+        self.siblingsChanged.emit(self._selected_siblings())
+
+    def _refresh_panel_info(self):
+        """The found/selected/frames line. Reports both counts, so a panel
+        left out is never mistaken for one that could not be found."""
+        found = len(self._siblings or {})
+        sel = len(self._selected_siblings())
+        if found < 2:
+            self._info_lbl.setText(
+                "Fewer than 2 Hydra panels found next to this file \u2014 "
+                "check the path.")
+        elif sel < 2:
+            self._info_lbl.setText(
+                f"Only {sel} of {found} panels selected \u2014 tick at least 2 "
+                f"to form a Hydra array.")
+        else:
+            extra = "" if sel == found else f"  \u00b7  {sel} selected"
+            self._info_lbl.setText(
+                f"Found {found}/4 panels{extra}  \u00b7  {self._n_frames} frame(s)")
+
     @staticmethod
     def _status_style(found: bool) -> str:
         color = "#66bb6a" if found else "#666"
@@ -765,12 +816,28 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         self._detected = detect_geometry_from_path(path) if self._mode == "nav" else {}
         siblings = hydra_siblings(path)
         self._siblings = siblings
-        for n, lbl in self._status_lbls.items():
-            lbl.setStyleSheet(self._status_style(n in siblings))
+        # A new path re-enables and re-ticks whatever it found, so the
+        # default stays exactly the pre-selection behaviour: every panel on
+        # disk is used. A tick left over for a panel this path lacks is
+        # cleared rather than carried across.
+        self._loading_panel_ticks = True
+        try:
+            for n, lbl in self._status_lbls.items():
+                found = n in siblings
+                lbl.setStyleSheet(self._status_style(found))
+                lbl.setEnabled(found)
+                lbl.setChecked(found)
+        finally:
+            self._loading_panel_ticks = False
         if len(siblings) < 2:
-            self._info_lbl.setText(
-                "Fewer than 2 Hydra panels found next to this file — check the path.")
-            self._set_nav_enabled(False)
+            self._refresh_panel_info()
+            # Nav widgets exist in "nav" mode only -- the success path below
+            # already guards this call, but this branch never did, so
+            # pointing Batch Integrate's Hydra loader at a file with no
+            # siblings raised AttributeError instead of showing the
+            # message. Pre-existing; found by the selection tests.
+            if self._mode == "nav":
+                self._set_nav_enabled(False)
             self._n_frames = 1
             self._proj_grp.setEnabled(False)
             self.siblingsChanged.emit({})
@@ -791,8 +858,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             self._set_nav_enabled(self._n_frames > 1)
         self._frame = 0
         self._proj_grp.setEnabled(self._n_frames > 1)
-        self._info_lbl.setText(f"Found {len(siblings)}/4 panels  ·  {self._n_frames} frame(s)")
-        self.siblingsChanged.emit(siblings)
+        self._refresh_panel_info()
+        self.siblingsChanged.emit(self._selected_siblings())
         self.frameChanged.emit(0)
 
     def _set_frame(self, i: int, from_widget: Optional[str] = None):
@@ -964,6 +1031,8 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             "fr_start": self._fr_start.value(), "fr_end": self._fr_end.value(),
             "fr_stride": self._fr_stride.value(),
             "masks": {n: sel.get_state() for n, sel in self._mask_sels.items()},
+            "panels": sorted(n for n, cb in self._status_lbls.items()
+                             if cb.isChecked()),
         }
 
     def set_state(self, state: dict):
@@ -979,6 +1048,21 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             sel = self._mask_sels.get(int(n_key))
             if sel is not None:
                 sel.set_state(mstate)
+        # Panel selection. This can only ever NARROW what the current path
+        # actually has: a saved tick for a panel not on disk must not
+        # re-enable a box no file can back, so the found set still gates it.
+        if state.get("panels") is not None:
+            want = {int(n) for n in state["panels"]}
+            self._loading_panel_ticks = True
+            try:
+                for n, cb in self._status_lbls.items():
+                    if cb.isEnabled():
+                        cb.setChecked(n in want)
+            finally:
+                self._loading_panel_ticks = False
+            if self._siblings:
+                self._refresh_panel_info()
+                self.siblingsChanged.emit(self._selected_siblings())
 
 
 class HydraDetectorToolbar(QtWidgets.QWidget):

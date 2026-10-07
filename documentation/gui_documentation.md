@@ -876,9 +876,19 @@ registered image for a full-coverage view.
 - **Hydra data (left panel)**: point the path field at **any one** of the 4
   GE panel files (a `.geN.h5`/`.tif` or a `geN/` folder — matching this
   beamline's own naming convention) and the other 3 panels are found
-  automatically. Small `ge1 ge2 ge3 ge4` status labels turn green as each
-  panel is located (grayed out if not found — the view still works with as
-  few as 2 panels present). A frame slider/spinbox navigates a shared frame
+  automatically. Small `ge1 ge2 ge3 ge4` **check boxes** turn green as each
+  panel is located (grayed out and unticked if not found — the view still
+  works with as few as 2 panels present). Every panel found is ticked by
+  default; **untick one to leave it out of the array** — a panel that was
+  mispositioned, unpowered or badly saved for this scan drops out of the
+  composite, the caking and its own per-panel card, without touching the
+  files. The line below reports both counts (`Found 4/4 panels · 3
+  selected · 10 frame(s)`), so an excluded panel never reads as a failed
+  detection; fewer than 2 selected is refused with a message that says so
+  rather than blaming the path. The selection is saved with the workspace
+  and can only ever narrow what the current path actually has — restoring
+  a project saved against a 4-panel scan onto a 3-panel one will not tick a
+  box with no file behind it. A frame slider/spinbox navigates a shared frame
   index across all panels (they're synchronized frames of the same scan).
   Its **⋯** button's **Browse…** only offers Single file (see "The Browse…
   popup" in §1) — the frame index already comes from that one file's own
