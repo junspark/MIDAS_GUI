@@ -181,6 +181,10 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._sync_seed_enabled()
         for cb in self._seed_enables:
             cb.toggled.connect(self._on_seed_enable_changed)
+        # The summary now reports values, so it has to follow them too.
+        for _sp in (self._seed_bcy, self._seed_bcz, self._seed_lsd,
+                    self._seed_tx, self._seed_ty, self._seed_tz):
+            _sp.valueChanged.connect(lambda *_: self._update_seed_summary())
         self._manual_seed_check.toggled.connect(self._on_seed_master_toggled)
         self._feedback_check = QtWidgets.QCheckBox("Feed result back to seed")
         self._feedback_check.setChecked(True)
@@ -309,11 +313,42 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             cb.setChecked(want)
 
     def _update_seed_summary(self):
-        on = [label for cb, label in zip(
+        """Name the seeded parameters AND show what they are set to.
+
+        Names alone ("Seeding: BC, Lsd, tx") meant the only way to see a
+        panel's tx was to open its Manual seed dialog, one panel at a time
+        -- asked at the beamline as "I do not know what Tx they are
+        getting". tx is reported whether or not it is ticked, because it is
+        used either way: unticked means 0.0, and four panels at 0.0 is the
+        state that piles every panel onto one wedge, so a silent default is
+        exactly the one worth showing.
+        """
+        vals = {
+            "BC": f"BC ({self._seed_bcy.value():.1f}, {self._seed_bcz.value():.1f})",
+            "Lsd": f"Lsd {self._seed_lsd.value():.3f} mm",
+            "tx": f"tx {self._seed_tx.value():g}°",
+            "ty": f"ty {self._seed_ty.value():g}°",
+            "tz": f"tz {self._seed_tz.value():g}°",
+        }
+        on = [vals[label] for cb, label in zip(
                   self._seed_enables, ("BC", "Lsd", "tx", "ty", "tz"))
               if cb.isChecked()]
-        self._seed_summary_lbl.setText(
-            "Seeding: " + ", ".join(on) if on else "Fully automatic (no manual seed)")
+        head = ("Seeding: " + "  ·  ".join(on) if on
+                else "Fully automatic (no manual seed)")
+        if self._seed_en_tx.isChecked():
+            tx_note = "tx is held at this value (never refined)."
+        elif abs(self._seed_tx.value()) > 1e-9:
+            tx_note = (f"tx {self._seed_tx.value():g}° is NOT ticked, so the fit "
+                       f"uses 0° — tick tx to use it.")
+        else:
+            tx_note = ("tx 0° (not set). This panel will land at the same "
+                       "azimuth as every other panel left at 0.")
+        self._seed_summary_lbl.setText(head + "\n" + tx_note)
+
+    def seed_tx_value(self) -> float:
+        """The tx this panel's fit will actually use: the seeded angle, or
+        0.0 when tx is not ticked. Read by the page's panel overview."""
+        return self._seed_tx.value() if self._seed_en_tx.isChecked() else 0.0
 
     def _enable_seed(self, **flags):
         by_name = dict(zip(("BC", "Lsd", "tx", "ty", "tz"), self._seed_enables))

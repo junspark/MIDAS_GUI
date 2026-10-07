@@ -423,7 +423,23 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         run_card.body.addWidget(self._prog)
         lv.addWidget(run_card)
 
+        # Which panels are in play, what tx each will use, and which one is
+        # running. Asked for at the beamline in one breath: "it is unclear
+        # what parameters are dedicated to each GE panel ... which panel is
+        # being fitted ... and I do not know what Tx they are getting."
+        # The per-panel card below shows one panel at a time, so none of
+        # those three were answerable without clicking through all four.
+        self._panels_lbl = QtWidgets.QLabel("")
+        self._panels_lbl.setWordWrap(True)
+        self._panels_lbl.setTextFormat(QtCore.Qt.RichText)
+        self._panels_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px;")
+        lv.addWidget(self._panels_lbl)
+
         # Per-panel: Transforms + Initial seed, switched with the active panel
+        self._panel_hdr = QtWidgets.QLabel("")
+        self._panel_hdr.setStyleSheet(
+            f"color:{S.ACCENT};font-size:11px;font-weight:bold;padding-top:4px;")
+        lv.addWidget(self._panel_hdr)
         self._card_stack = QtWidgets.QStackedWidget()
         for n in (1, 2, 3, 4):
             card = HydraCalibPanelCard(n)
@@ -439,6 +455,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                         "_seed_en_ty", "_seed_en_tz"):
                 getattr(card, attr).toggled.connect(
                     lambda checked, n=n, a=attr: self._sync_seed_checkbox(a, n, checked, block=False))
+            card._seed_tx.valueChanged.connect(lambda *_: self._update_panels_overview())
+            card._seed_en_tx.toggled.connect(lambda *_: self._update_panels_overview())
             self._cards[n] = card
             self._card_stack.addWidget(card)
         lv.addWidget(self._card_stack)
@@ -584,8 +602,39 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             return
         self._set_working_dir(d)
 
+    def _update_panels_overview(self, running: Optional[int] = None):
+        """One line naming every panel that will be fitted and the tx it
+        will use, with the running one marked.
+
+        ``running`` is the panel currently being fitted, or None. Panels
+        found on disk but unticked are listed as excluded rather than
+        omitted -- "ge3 is missing from this list" and "ge3 was left out on
+        purpose" must not look the same.
+        """
+        if not hasattr(self, "_panels_lbl"):
+            return
+        selected = self._loader.siblings()
+        found = self._loader.found_siblings()
+        if not found:
+            self._panels_lbl.setText("")
+            return
+        bits = []
+        for n in sorted(found):
+            if n not in selected:
+                bits.append(f"<span style='color:#777'>ge{n} excluded</span>")
+                continue
+            tx = self._cards[n].seed_tx_value()
+            mark = " ▶ fitting" if running == n else ""
+            warn = "" if abs(tx) > 1e-9 else " <b>(tx not set)</b>"
+            bits.append(f"ge{n} tx {tx:g}°{warn}{mark}")
+        n_sel = len(selected)
+        head = (f"<b>Fitting {n_sel} panel{'' if n_sel == 1 else 's'} "
+                f"independently</b> — ")
+        self._panels_lbl.setText(head + " &nbsp;·&nbsp; ".join(bits))
+
     def _on_siblings_changed(self, siblings: dict):
         self._toolbar.set_available(siblings.keys())
+        self._update_panels_overview()
         # Safe to autofill straight off the load signal here, unlike
         # CalibrationTab: this page never loads a bundled demo image in
         # __init__, so there is no packaged path to derive a bogus default from.
@@ -608,6 +657,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         n = int(key[2])
         if self._active_card is not None:
             self._active_card.bind_viewer(None)
+        if hasattr(self, "_panel_hdr"):
+            self._panel_hdr.setText(
+                f"ge{n} — this panel only (transforms, seed, result)")
         self._card_stack.setCurrentWidget(self._cards[n])
         self._resid_stack.setCurrentWidget(self._cards[n].residual_chart)
         self._results_stack.setCurrentWidget(self._cards[n].results_widget)
@@ -879,6 +931,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._start_panel_worker(n, capture_stdout=True)
 
     def _start_panel_worker(self, n: int, capture_stdout: bool):
+        self._update_panels_overview(running=n)
         card = self._cards[n]
         raw = self._panel_raw_image(n)
         if raw is None:
