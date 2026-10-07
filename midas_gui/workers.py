@@ -931,7 +931,7 @@ class BatchCorrectionWorker(QtCore.QThread):
             bucket["notes"].append(f"{Path(path).name}: {note}")
 
     def _write_monitor_csvs(self, acc: dict, done: int, total: int) -> None:
-        """One ``<froot>_<detector>_metadata.csv`` per froot.
+        """One ``<froot>_<detector>_bc.csv`` per froot.
 
         Written one level ABOVE the output directory. The output folder is
         per-detector (``…/<froot>/<detector>/``) while the monitor readings
@@ -943,7 +943,7 @@ class BatchCorrectionWorker(QtCore.QThread):
         det = self._out_dir.name
         dest_dir = self._out_dir.parent or self._out_dir
         for froot, bucket in sorted(acc.items()):
-            name = "_".join(p for p in (froot, det) if p) + "_metadata.csv"
+            name = "_".join(p for p in (froot, det) if p) + ion_csv.SUFFIX_BATCH_CORRECTION
             try:
                 written = ion_csv.write_ion_csv(
                     dest_dir / name, bucket["rows"],
@@ -1759,6 +1759,22 @@ class BatchWorker(QtCore.QThread):
     def _open_source(self):
         return _open_source_cfg(self._src)
 
+    def _ion_csv_name(self) -> str:
+        """``<froot>_<detector>_bi.csv`` — the same shape Batch Correction
+        uses for its own monitor sidecar, differing only in the tag.
+
+        The froot comes from the SOURCE file's name rather than from
+        ``_run_out_stem()``, which carries the first frame's id
+        (``gC_1s_ICtweak_000017.000000``) and would put a frame number in
+        a filename that describes the whole run.
+        """
+        from midas_gui.frame_correct import split_scan_name
+        src = self._src.get("path") or (self._src.get("paths") or [None])[0]
+        froot = split_scan_name(Path(src).name).froot if src else ""
+        det = self._out_dir.name if self._out_dir is not None else ""
+        stem = "_".join(p for p in (froot, det) if p) or "run"
+        return stem + ion_csv.SUFFIX_BATCH_INTEGRATE
+
     def _run_out_stem(self) -> str:
         """The run-level output stem: the source file's own stem, or the
         shared file root of a multi-file pick. Shared by the combined cake
@@ -2355,18 +2371,20 @@ class BatchWorker(QtCore.QThread):
             hi = int(max(all_frame_idx)) if all_frame_idx else 0
             combined_stem = f"{out_stem}.{lo:06d}_{hi:06d}.cake"
 
-            # Per-frame beam-monitor CSV. ONE file for the whole run, in the
-            # output root rather than beside an archive: under "frame"
-            # grouping there is one .zarr.zip per frame, so a sidecar per
-            # archive would be a file per row. Its frame column is the run's
-            # own 0-based processed index, matching all_profiles.
+            # Per-frame beam-monitor CSV. ONE file for the whole run, and
+            # placed/named exactly as Batch Correction places its own (see
+            # BatchCorrectionWorker._write_ion_csvs): beside the detector
+            # folder rather than inside it, as
+            # ``<froot>_<detector>_bi.csv``. The two tabs write the same
+            # kind of sidecar about the same scan, so reading one should
+            # not mean learning a second convention — it used to be
+            # ``<stem>.<lo>_<hi>.ioncham.csv`` one level further down, and
+            # a re-run over a different frame range left a second file
+            # beside the first rather than replacing it.
             if self._out_dir is not None and ion_meta:
                 try:
-                    i_lo = int(min(i for i, _m in ion_meta))
-                    i_hi = int(max(i for i, _m in ion_meta))
                     written = ion_csv.write_ion_csv(
-                        self._out_dir / f"{out_stem}.{i_lo:06d}_{i_hi:06d}"
-                                        ".ioncham.csv",
+                        self._out_dir.parent / self._ion_csv_name(),
                         ion_csv.rows_from_metas([m for _i, m in ion_meta]),
                         extras=self._ion_csv_extras)
                     if written:

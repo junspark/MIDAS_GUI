@@ -93,6 +93,15 @@ MOTOR_PREFIX = "motor:"
 #: Suffix on a dark-block column. The dark images themselves are not written
 #: out, but their monitor readings are a real measurement of the shutter-
 #: closed baseline and are the thing you subtract before taking any ratio.
+#: Filename tail for each tab's beam-monitor CSV, appended to
+#: ``<froot>_<detector>``. Both tabs write the same kind of sidecar about
+#: the same scan and put it in the same place (beside the detector folder),
+#: so only this two-letter tag says which produced it:
+#: ``gC_1s_ICtweak_eiger2_bc.csv`` next to ``gC_1s_ICtweak_eiger2_bi.csv``.
+SUFFIX_BATCH_CORRECTION = "_bc.csv"
+SUFFIX_BATCH_INTEGRATE = "_bi.csv"
+
+
 #: Retired. The dark is a ROW now (``kind="dark"``), not a companion column
 #: per channel — see :func:`rows_from_tree`. Kept only so an external caller
 #: importing the name still resolves; nothing in this module uses it.
