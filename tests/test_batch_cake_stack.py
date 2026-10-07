@@ -331,3 +331,47 @@ def test_cake_display_state_is_persisted_by_the_tab(tab):
     fresh = type(tab)()
     fresh.set_state(state)
     assert fresh._cake_stack_view.x_unit() == "d"
+
+
+# ── Q-uniform: the axis the views are told they have ────────────────────
+
+def test_q_uniform_profiles_carry_an_R_axis_not_a_Q_one():
+    """Reported as "2theta is 180 deg" and a waterfall x-axis of -2.264e-11.
+
+    Q-uniform is a REBIN of an R-uniform integration, and the axis that
+    travels with the rebinned profile is q_grid_and_r's second return
+    value — r_of_q, the R in PIXELS of each Q bin — not the Q grid. Telling
+    the views the native unit was "Q" made _convert_radial read those pixel
+    values as inverse angstroms: x·λ/4π exceeds 1 for any real radius, so
+    it clips and every bin lands on 2θ = 180° exactly, which converts back
+    to R = Lsd·tan(180°)/px ≈ -2.26e-11.
+    """
+    from midas_gui.widgets import _convert_radial
+    from midas_gui.workers import q_grid_and_r
+
+    lsd, px, wl = 13866027.0, 75.0, 0.13060
+    qgrid, r_of_q = q_grid_and_r(
+        {"QMin": 0.5, "QMax": 8.0, "QBinSize": 0.01}, lsd, px, wl)
+
+    # The bug, reproduced exactly.
+    wrong = _convert_radial(r_of_q, lsd, px, wl, "Q", "2th")
+    assert np.allclose(wrong, 180.0), "the reported symptom no longer reproduces"
+    assert _convert_radial(r_of_q, lsd, px, wl, "Q", "R")[0] == \
+        pytest.approx(-2.2641e-11, rel=1e-3)
+
+    # Read as what it is, every unit comes out physical and Q round-trips.
+    tth = _convert_radial(r_of_q, lsd, px, wl, "R", "2th")
+    assert 0.0 < tth.min() < tth.max() < 20.0
+    assert np.allclose(_convert_radial(r_of_q, lsd, px, wl, "R", "Q"), qgrid,
+                       rtol=1e-9)
+
+
+def test_the_batch_tab_declares_R_as_native_in_q_mode(qtbot_tab=None):
+    """The fix at its source: both set_axis_context sites must say "R"."""
+    import re
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1] / "midas_gui" / "tab_batch.py"
+    text = src.read_text()
+    assert '"Q" if q_cfg else "R"' not in text, \
+        "a set_axis_context site still labels the R-px axis as Q"
+    assert text.count("_axctx = ") == 2

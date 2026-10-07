@@ -1991,7 +1991,17 @@ class BatchTab(QtWidgets.QWidget):
                 "Q-uniform bins yet. Uncheck Multi-azimuth output, or set "
                 "Bin type back to Radial."); return
         lsd, px, wl = float(spec.Lsd), float(spec.pxY), float(spec.Wavelength)
-        _axctx = (lsd, px, wl, "Q" if q_cfg else "R")
+        # Native unit is R px in BOTH modes. Q-uniform is a rebin of an
+        # R-uniform integration (workers.rebin_R_to_Q), and the axis that
+        # travels with the rebinned profile is workers.q_grid_and_r's
+        # SECOND return value — r_of_q, the R in pixels of each Q bin — not
+        # the Q grid itself. Declaring "Q" here told _convert_radial to read
+        # those pixel values as Å⁻¹: x·λ/4π then exceeds 1 for any real
+        # radius, clips, and every bin comes out at 2θ = 180° exactly, which
+        # converts back to R = Lsd·tan(180°)/px ≈ -2.26e-11. That is the
+        # flat-line waterfall and the 2θ = 180 lineout reported from the
+        # beamline, and the profiles themselves were never wrong.
+        _axctx = (lsd, px, wl, "R")
 
         # Dark / bright / background fields (from the loader)
         for sel in self._loader.has_pending_fields():
@@ -2656,8 +2666,8 @@ class BatchTab(QtWidgets.QWidget):
             variance_cfg = None
         q_cfg = ({"QMin": self._q_min.value(), "QMax": self._q_max.value(),
                   "QBinSize": self._q_bin.value()} if self._q_mode_active() else None)
-        _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength),
-                  "Q" if q_cfg else "R")
+        # "R" in both modes — see the note at the other set_axis_context site.
+        _axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength), "R")
         self._stack_view.set_axis_context(*_axctx)
         self._waterfall.set_axis_context(*_axctx)
         weighted = bool(self._azim.currentData())
