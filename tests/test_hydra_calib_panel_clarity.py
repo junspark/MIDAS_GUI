@@ -180,3 +180,52 @@ def test_an_unfitted_panel_shows_no_strain(app, tmp_path):
     page = _page_with_panels(tmp_path)
     page._update_panels_overview()
     assert "µε" not in page._panels_lbl.text()
+
+
+# ── the Manual seed dialog says what the fit will do with each row ─────
+
+def test_the_seed_dialog_knows_the_refine_state(app, tmp_path):
+    """Reported twice: "the manual seed selections about what to refine
+    information do not get translated to the mainwindow."
+
+    set_refine_boxes was called only by the single-detector tab, so the
+    Hydra dialog's per-row status labels and its seed-vs-refine
+    explanation were never filled in -- the dialog came up blank about the
+    one thing being asked of it.
+    """
+    page = _page_with_panels(tmp_path)
+    for n in (1, 2, 3, 4):
+        dlg = page._cards[n]._seed_dialog
+        assert dlg._refine_boxes, f"ge{n}: seed dialog has no refine state"
+        assert "Lsd" in dlg._refine_boxes and "tx" in dlg._refine_boxes
+
+
+def test_every_panel_sees_the_pages_own_refine_boxes(app, tmp_path):
+    """The Refine choice is one setting for all four fits, so all four
+    dialogs must report the page's boxes, not per-card copies."""
+    page = _page_with_panels(tmp_path)
+    for n in (1, 2, 3, 4):
+        assert page._cards[n]._seed_dialog._refine_boxes["Lsd"] is page._ref_lsd
+
+
+def test_the_row_status_follows_the_refine_tick(app, tmp_path):
+    """The point of the wiring: toggling Refine changes what each seed row
+    says the fit will do, without the two becoming one control."""
+    page = _page_with_panels(tmp_path)
+    dlg = page._cards[1]._seed_dialog
+    page._ref_lsd.setChecked(True)
+    page._cards[1]._seed_en_lsd.setChecked(True)
+    held = dlg._status_lbls["Lsd"].text()
+    page._ref_lsd.setChecked(False)
+    assert dlg._status_lbls["Lsd"].text() != held, \
+        "the seed row's status did not follow the Refine tick"
+
+
+def test_seeding_and_refining_stay_separate_controls(app, tmp_path):
+    """Seeding something you do not refine is how you pin it to a measured
+    value -- exactly what tx is for -- so this must stay one-way."""
+    page = _page_with_panels(tmp_path)
+    page._cards[1]._seed_en_lsd.setChecked(True)
+    page._ref_lsd.setChecked(False)
+    assert page._cards[1]._seed_en_lsd.isChecked() is True
+    assert page._ref_lsd.isChecked() is False

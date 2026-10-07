@@ -465,6 +465,25 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                         "_seed_en_ty", "_seed_en_tz"):
                 getattr(card, attr).toggled.connect(
                     lambda checked, n=n, a=attr: self._sync_seed_checkbox(a, n, checked, block=False))
+            # Let each Manual seed row say what the fit will actually do
+            # with that parameter -- the same wiring tab_calibrate does, and
+            # the reason the single-detector dialog explains itself while
+            # this one came up blank. Reported twice: "the manual seed
+            # selections about what to refine information do not get
+            # translated to the mainwindow."
+            #
+            # Deliberately NOT a two-way sync. Seeding and refining are
+            # separate decisions (seeding something you do NOT refine is how
+            # you pin it to a measured value -- which is exactly what tx is
+            # for here). Showing the refine state on each row is what stops
+            # the two panels merely LOOKING like they disagree.
+            #
+            # All four cards get the page's own boxes because the Refine
+            # choice is one setting for all four fits.
+            card._seed_dialog.set_refine_boxes(
+                {"BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
+                 "ty": self._ref_ty, "tz": self._ref_tz,
+                 "Distortion": self._ref_dist})
             card._seed_tx.valueChanged.connect(lambda *_: self._update_panels_overview())
             card._seed_en_tx.toggled.connect(lambda *_: self._update_panels_overview())
             self._cards[n] = card
