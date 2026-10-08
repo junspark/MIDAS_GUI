@@ -44,6 +44,7 @@ _IMASK_MAX = 5_000_000_000
 
 class DataViewerTab(QtWidgets.QWidget):
     pushGeometry = QtCore.pyqtSignal(dict)   # λ/px/Lsd/BC → Calibrate tab
+    pushGeometryToBatch = QtCore.pyqtSignal(dict)   # full geometry → Batch Integrate
     pullGeometry = QtCore.pyqtSignal()       # "← Get": pull Calibrate's geometry
     imTransChanged = QtCore.pyqtSignal(list)  # ImTransOpt codes → Mask Builder
 
@@ -396,6 +397,7 @@ class DataViewerTab(QtWidgets.QWidget):
         self._geom_card = DetectorGeometryCard()
         self._geom_card.set_save_name_provider(self._default_save_path)
         self._geom_card.pushGeometry.connect(self.pushGeometry.emit)
+        self._geom_card.pushGeometryToBatch.connect(self.pushGeometryToBatch.emit)
         self._geom_card.pullGeometry.connect(self.pullGeometry.emit)
         self._geom_card.imTransChanged.connect(self._on_im_trans_changed)
         self._geom_card.set_image_source(lambda: self._cur, self._combined_bad_mask)

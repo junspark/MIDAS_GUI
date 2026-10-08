@@ -295,6 +295,11 @@ class DetectorGeometryCard(QtWidgets.QWidget):
     """
 
     pushGeometry = QtCore.pyqtSignal(dict)    # "Send →" (geometry → Calibrate) clicked
+    #: "→ Integrate" — the FULL geometry straight to Batch Integrate, for a
+    #: run that does not need a fit. Separate from pushGeometry because the
+    #: payloads differ: Calibrate wants seed fields, the integrator wants the
+    #: whole forward model (tilts, distortion, detector size, transforms).
+    pushGeometryToBatch = QtCore.pyqtSignal(dict)
     pullGeometry = QtCore.pyqtSignal()        # "← Get" (geometry ← Calibrate) clicked
     imTransChanged = QtCore.pyqtSignal()      # a Flip Y/Flip Z/Transpose checkbox toggled
     geometryChanged = QtCore.pyqtSignal()     # BC/tilt/calibration changed (edit, pick, or file load)
@@ -655,6 +660,23 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return [{k: v for k, v in m.items() if not k.startswith("_")}
                 for m in self._materials]
 
+    def _emit_geometry_to_batch(self):
+        """Hand the integrator the full forward model, or say why not.
+
+        ``_export_geom`` needs either a loaded calibration or an image to
+        read the detector size from; without one there is no NrPixels and
+        the spec builders would fail downstream with something far less
+        obvious than this.
+        """
+        g = self._export_geom()
+        if not g:
+            QtWidgets.QMessageBox.warning(
+                self, "No geometry",
+                "Load a frame (or a calibration file) first — the integrator "
+                "needs the detector size, which comes from the image.")
+            return
+        self.pushGeometryToBatch.emit(dict(g))
+
     def set_calib_path(self, path: str):
         """Set the calibration-file path field and load it if it exists —
         used when restoring saved GUI state (a saved value should always win
@@ -771,6 +793,22 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         calib_row.addWidget(self._to_calib_btn, 1)
         calib_row.addWidget(self._from_calib_btn, 1)
         ring.body.addLayout(calib_row)
+
+        # Straight to the integrator, skipping the fit. Plenty of runs only
+        # need a rough geometry -- a nominal Lsd and a picked beam centre --
+        # and the only route there was to save a paramstest and load it back
+        # in the other tab, or to run a calibration nobody wanted.
+        batch_row = QtWidgets.QHBoxLayout(); batch_row.setSpacing(4)
+        batch_row.addWidget(S.LabelRight(""))
+        self._to_batch_btn = QtWidgets.QPushButton("→ Batch Integrate")
+        self._to_batch_btn.setToolTip(
+            "Use these values as Batch Integrate's calibration, without "
+            "fitting. Sends the full geometry — λ, pixel size, Lsd, beam "
+            "centre, tilts, distortion and the Transforms checkboxes — not "
+            "just the seed fields the Calibrate hand-off carries.")
+        self._to_batch_btn.clicked.connect(self._emit_geometry_to_batch)
+        batch_row.addWidget(self._to_batch_btn, 1)
+        ring.body.addLayout(batch_row)
 
         ctl = QtWidgets.QHBoxLayout()
         self._show_rings = QtWidgets.QCheckBox("Rings"); self._show_rings.setChecked(True)
