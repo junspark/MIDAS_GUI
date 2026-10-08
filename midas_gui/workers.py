@@ -1160,19 +1160,33 @@ class BatchCorrectionWorker(QtCore.QThread):
                         raw = (np.asarray(dset[lo:hi + 1], dtype=np.float32)
                                if dset.ndim == 3 else
                                np.asarray(dset[...], dtype=np.float32)[None])
+                        # stats: blank sub-frames are dropped from the
+                        # combine (see frame_correct.reduce_chunk_multi) and
+                        # that has to be said, not just done -- the whole
+                        # reason it is a fix is that averaging them in was
+                        # wrong silently.
+                        cstats: dict = {}
                         combined = reduce_chunk_multi(
                             raw, self._ops, dark=dark, bright=self._bright,
                             bright_mode=self._bright_mode,
                             background=self._background,
-                            clip_negatives=self._clip)
+                            clip_negatives=self._clip, stats=cstats)
                         for op, plane in combined.items():
                             frames[op].append(plane)
                         done += 1
+                        n_blank = cstats.get("blank_skipped") or 0
+                        if cstats.get("all_blank"):
+                            note = "  — every raw frame blank, output is zeros"
+                        elif n_blank:
+                            note = (f"  — skipped {n_blank} blank raw "
+                                    f"frame(s) of {hi - lo + 1}")
+                        else:
+                            note = ""
                         self.progress.emit(
                             done, total,
                             f"{path.name}  chunk "
                             f"{len(frames[self._ops[0]])}/{len(ranges)} "
-                            f"(raw {lo}–{hi})")
+                            f"(raw {lo}–{hi}){note}")
                 if self._cancel:
                     break
                 aligned = h5_metadata.align(tree, ranges, n_aligned)

@@ -118,7 +118,8 @@ def chunk_ranges(n_raw: int, *, chunk_size: Optional[int] = None,
 
 def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
                        bright_mode: str = "divide", background=None,
-                       clip_negatives: bool = True) -> dict:
+                       clip_negatives: bool = True,
+                       skip_blank: bool = True, stats: Optional[dict] = None) -> dict:
     """``{op: frame}`` for several ops over ONE pass of ``frames``.
 
     Correcting a sub-frame is the same work whichever op consumes it, and
@@ -131,6 +132,33 @@ def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
     Only ``median`` needs the corrected stack kept — the others accumulate
     one frame at a time — so the memory cost is a single plane per op
     unless median is asked for.
+
+    ``skip_blank`` drops raw sub-frames that are entirely zero before they
+    reach the combine. A Pixirad arms one frame before it starts counting,
+    so frame 1 of every ``.pixi.h5`` is all zeros -- and averaging it in
+    scales every pixel by ``(n-1)/n``. Measured on 1-ID-E
+    ``air_80p725keV_3s_003512.pixi.h5``: 10 raw frames, frame 0 blank, and
+    the written output matched ``mean(frames 0..9)`` at 100% of pixels,
+    i.e. exactly 10/9 low. Silent, and it scales with how few frames you
+    combine -- 10% over ten frames, 33% over three.
+
+    The test is the RAW frame, before correction: a corrected frame can be
+    legitimately all-zero (a flat field that cancels, or a clip), and that
+    is real data, not a missing exposure. A frame that was zero as it came
+    off the detector never recorded anything, so it is not an observation
+    of zero for any of the four ops -- it is the absence of an observation.
+
+    ``sum`` and ``max`` are unaffected either way (adding or maximising
+    against zero changes nothing), so this only moves ``mean`` and
+    ``median`` -- but it moves them to the right answer, which is why it is
+    on by default rather than opt-in. A chunk that is ENTIRELY blank keeps
+    its frames: there is no good answer there, and raising "no frames to
+    combine" for a run that legitimately contains a dead chunk would be
+    worse than returning the zeros the detector actually produced.
+
+    ``stats``, when given, is filled with ``{"blank_skipped": n}`` so a
+    caller can report the drop instead of it being invisible -- the whole
+    point being that the old behaviour was wrong *quietly*.
     """
     names = []
     for op in ops:
@@ -151,8 +179,14 @@ def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
     total = None
     running_max = None
     n = 0
+    blank = 0
+    blank_like = None
     for frame in frames:
         arr = np.asarray(frame)
+        if skip_blank and not arr.any():
+            blank += 1
+            blank_like = arr            # all-zero, so one stands for all
+            continue
         if has_fields:
             # clip_negative=False — clipped once per op at the end. See the
             # module docstring for why the clip cannot move earlier.
@@ -169,8 +203,26 @@ def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
         if "max" in names:
             running_max = cur.copy() if running_max is None else \
                 np.maximum(running_max, cur, out=running_max)
+    if n == 0 and blank:
+        # Every frame in this chunk was blank. Returning the detector's own
+        # zeros beats failing the whole run over a dead chunk, so redo the
+        # pass without the skip rather than raise. Rebuilt from a stand-in
+        # rather than re-iterating `frames`: that may be a one-shot
+        # iterator, and every frame here is all-zero by definition, so
+        # `blank` copies of one of them is the same input exactly.
+        out = reduce_chunk_multi(
+            [blank_like] * blank, ops, dark=dark, bright=bright,
+            bright_mode=bright_mode, background=background,
+            clip_negatives=clip_negatives, skip_blank=False)
+        if stats is not None:
+            stats["blank_skipped"] = 0
+            stats["all_blank"] = True
+        return out
     if n == 0:
         raise ValueError("reduce_chunk: no frames to combine.")
+    if stats is not None:
+        stats["blank_skipped"] = blank
+        stats["all_blank"] = False
 
     raw_out = {}
     if "mean" in names:
@@ -191,7 +243,8 @@ def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
 
 def reduce_chunk(frames, op: str = "mean", *, dark=None, bright=None,
                  bright_mode: str = "divide", background=None,
-                 clip_negatives: bool = True) -> np.ndarray:
+                 clip_negatives: bool = True,
+                 skip_blank: bool = True, stats: Optional[dict] = None) -> np.ndarray:
     """Correct every frame, combine them with ``op``, clip once. Returns float32.
 
     See the module docstring for why that order, and why it is the same order
@@ -203,9 +256,10 @@ def reduce_chunk(frames, op: str = "mean", *, dark=None, bright=None,
     streaming form and does materialise, in float32.
     """
     name = "mean" if str(op).lower() == "average" else str(op).lower()
-    return reduce_chunk_multi(
+    return reduce_chunk_multi(  # skip_blank/stats: see reduce_chunk_multi
         frames, [name], dark=dark, bright=bright, bright_mode=bright_mode,
-        background=background, clip_negatives=clip_negatives)[name]
+        background=background, clip_negatives=clip_negatives,
+        skip_blank=skip_blank, stats=stats)[name]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
