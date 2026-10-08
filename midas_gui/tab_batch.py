@@ -441,6 +441,12 @@ class BatchTab(QtWidgets.QWidget):
         self._omega_span_timer.setInterval(150)
         self._omega_span_timer.timeout.connect(self._recompute_omega_span)
         self._project_ctx: Optional[project.ProjectContext] = None
+        #: The exact Output-folder string this tab last filled in by itself
+        #: (auto-fill or the Suggest button). Lets _maybe_autofill_output_dir
+        #: tell its own leftover from a path the user chose -- see there.
+        #: Must exist before _build_ui: the loader opens the bundled sample
+        #: data during construction, which fires dataChanged, which auto-fills.
+        self._autofilled_out: Optional[str] = None
         self._build_ui()
         self._loader.monitorToggled.connect(self._toggle_monitor)
         self._loader.dataChanged.connect(self._refresh_detector_preview)
@@ -1987,30 +1993,61 @@ class BatchTab(QtWidgets.QWidget):
         expid = self._expid_provider().strip() if self._expid_provider else ""
         return suggest_integration_output_dir(rep, expid_fallback=expid)
 
+    def _set_output_dir_suggested(self, suggested) -> None:
+        """Write a path WE derived into the Output field, and remember it.
+
+        Recording it is what lets a later data load tell this tab's own
+        leftover from a folder the user typed or browsed to (see
+        :meth:`_maybe_autofill_output_dir`). Everything that fills the field
+        on the GUI's own initiative goes through here; the … browse button
+        and project/session restore deliberately do not, so what they put
+        there is treated as the user's and never overwritten.
+        """
+        self._out_ed.setText(str(suggested))
+        self._autofilled_out = str(suggested)
+        reason = check_output_dir_writable(suggested)
+        if reason:
+            self._log.append(f"[batch] Warning: {reason}")
+
     def _apply_suggested_output_dir(self):
+        """The Suggest button: overwrite whatever is there, on request."""
         suggested = self._suggest_output_dir()
         if suggested is not None:
-            self._out_ed.setText(str(suggested))
-            reason = check_output_dir_writable(suggested)
-            if reason:
-                self._log.append(f"[batch] Warning: {reason}")
+            self._set_output_dir_suggested(suggested)
         else:
             self._log.append("[batch] No data source loaded yet — nothing to suggest.")
 
     def _maybe_autofill_output_dir(self):
-        """Auto-fill the Output folder once a source loads, unless the user
-        already typed/picked one — unlike mpe_wf's own GUIs (which only ever
-        hint via placeholder text and never auto-fill), MIDAS_GUI fills this
-        in live since there's no separate confirm-and-launch step to catch
-        a wrong guess."""
-        if self._out_ed.text().strip():
-            return
+        """Keep the Output folder pointing at the loaded source's own
+        ``<outroot>/<expid>_bc/<froot>/<detector>``, without ever discarding a
+        folder the user chose.
+
+        This used to fill only while the field was empty, which in practice
+        meant never: the loader opens the bundled sample data during
+        construction, so by the time any real data was loaded the field
+        already held the sample's path and the guard returned early. Measured
+        on a fresh tab -- the field read
+        ``…/MIDAS_GUI_bc/nickel_tifs/test_data`` and stayed there through
+        every subsequent load, so results went to whatever folder the last
+        run (or the sample data) had named.
+
+        So the test is now provenance, not emptiness: replace the value when
+        it is still the one we put there, leave it alone the moment the user
+        has typed or browsed to something of their own. Clearing the field by
+        hand asks for a fresh suggestion, which is the obvious reading of an
+        emptied box.
+
+        Unlike mpe_wf's own GUIs (which only hint via placeholder text and
+        never auto-fill), MIDAS_GUI fills this in live since there's no
+        separate confirm-and-launch step to catch a wrong guess.
+        """
+        current = self._out_ed.text().strip()
+        if current and current != (self._autofilled_out or ""):
+            return                      # the user's own choice -- never touch
         suggested = self._suggest_output_dir()
-        if suggested is not None:
-            self._out_ed.setText(str(suggested))
-            reason = check_output_dir_writable(suggested)
-            if reason:
-                self._log.append(f"[batch] Warning: {reason}")
+        if suggested is None or str(suggested) == current:
+            return
+        self._set_output_dir_suggested(suggested)
 
     def _confirm_detector_size(self, spec) -> bool:
         """Catch a calibration whose detector size does not match the data

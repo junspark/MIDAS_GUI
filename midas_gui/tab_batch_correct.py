@@ -65,6 +65,12 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         self._outputs: list = []
         self._im_trans: list = []
         self._expid_provider = None   # () -> str, wired by app.py
+        #: The exact Output-folder string this tab last filled in by itself.
+        #: Same provenance rule as Batch Integrate's -- see
+        #: BatchTab._maybe_autofill_output_dir for why emptiness is not the
+        #: test. Set before _build_ui: loading data during construction fires
+        #: dataChanged, which auto-fills.
+        self._autofilled_out: Optional[str] = None
         # Open only while a run is in flight — see _emit / _run / _close_log.
         self._screen_log: Optional[run_log.ScreenLog] = None
         self._build_ui()
@@ -481,15 +487,23 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         suffix = self._suffix_ed.text().strip() or CORRECTION_SUFFIX
         return f"{base}{suffix}{ext}"
 
+    def _set_output_dir_suggested(self, suggested) -> None:
+        """Write a path WE derived into the Output field, and remember it, so
+        a later data load can tell it from one the user chose. The … browse
+        button and project/session restore deliberately bypass this."""
+        self._out_ed.setText(str(suggested))
+        self._autofilled_out = str(suggested)
+        reason = check_output_dir_writable(suggested)
+        if reason:
+            self._log.append(f"Warning: {reason}")
+
     def _apply_suggested_output_dir(self):
+        """The Suggest button: overwrite whatever is there, on request."""
         suggested = self._suggest_output_dir()
         if suggested is None:
             self._log.append("No data source loaded yet — nothing to suggest.")
             return
-        self._out_ed.setText(str(suggested))
-        reason = check_output_dir_writable(suggested)
-        if reason:
-            self._log.append(f"Warning: {reason}")
+        self._set_output_dir_suggested(suggested)
 
     def _suggest_output_dir(self) -> Optional[Path]:
         cfg = self._loader.source_cfg()
@@ -503,14 +517,19 @@ class BatchCorrectionTab(QtWidgets.QWidget):
         return suggest_correction_output_dir(rep, expid_fallback=expid)
 
     def _maybe_autofill_output_dir(self):
-        """Fill the Output folder once a source loads, unless something is
-        already there — same live auto-fill as Batch Integrate, which has no
-        separate confirm-and-launch step to catch a wrong guess either."""
-        if self._out_ed.text().strip():
-            return
+        """Keep the Output folder following the loaded source, without ever
+        discarding a folder the user chose — the provenance rule is Batch
+        Integrate's, and the reasoning is written out in
+        ``BatchTab._maybe_autofill_output_dir``. Same live auto-fill, since
+        this tab has no separate confirm-and-launch step to catch a wrong
+        guess either."""
+        current = self._out_ed.text().strip()
+        if current and current != (self._autofilled_out or ""):
+            return                      # the user's own choice -- never touch
         suggested = self._suggest_output_dir()
-        if suggested is not None:
-            self._out_ed.setText(str(suggested))
+        if suggested is None or str(suggested) == current:
+            return
+        self._set_output_dir_suggested(suggested)
 
     def _selected_ops(self) -> list:
         return [op for op in FC.OPS if self._op_chks[op].isChecked()]
