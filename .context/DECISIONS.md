@@ -3,7 +3,42 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
-## 2026-10-07 (latest) — The CSV says which dark was subtracted
+## 2026-10-08 (latest) — A profile that maps to no hutch writes no CSV at all
+
+``ion_csv._PROFILE_HUTCH`` listed only 20-ID-E and 20-ID-D. On any other
+profile ``resolve_hutch`` returned None, ``scaler_channels`` returned [],
+no rows were built, and **no beam-monitor CSV was written** — while the run
+reported success. Nobody on 1-ID-E had ever got one.
+
+The omission was deliberate and asserted: ``("1-ID-E", None), # a different
+beamline that merely ends in E``. That was a guess about a station nobody
+had opened a file from, and it was wrong — 2026-10 1-ID files carry
+``instrument/Scalers/{B,C,E}`` with IC1-IC8/S1/S2/T under E. Reversed on
+that evidence, and the evidence is now in the test instead of the bare
+assertion.
+
+**One letter per profile is the whole mapping**, because
+``scaler_channels`` reads the channel list from the FILE: 1-ID-E records
+IC1-IC8 where 20-ID-E records US_IC/DS_IC, and neither needs an entry of
+its own. 17-BM stays unmapped deliberately — its group has not been seen,
+and a CSV of the wrong channels is worse than no CSV.
+
+**This is also what the three "pre-existing" ``test_batch_correction_parallel``
+failures were**, recorded in CLAUDE.md the day before as unexplained. They
+assert on the merged CSV and inherited the machine's active profile, so they
+went red when the GUI was switched to 1-ID-E and looked like flakiness. They
+now pin the profile. The general lesson is worth more than the fix: a test
+that reads global GUI state fails for reasons unrelated to the code it
+covers, and will be blamed on whatever changed most recently.
+
+**Observed while verifying, not a GUI matter.** On a real 1-ID file the
+scaler arrays are length-64 against 64 image frames (so the per-frame
+alignment is right) but every entry is identical — IC1 reads exactly 4866
+on all 64. That looks latched rather than sampled per frame. The CSV
+reports it faithfully; whether the DAQ should be updating it is a beamline
+question, and matters before anyone normalises against these.
+
+## 2026-10-07 — The CSV says which dark was subtracted
 
 Closes the follow-up left open when the beam-monitor dark became a row
 (2026-10-06, below): the CSV's ``kind="dark"`` row is the dark block
