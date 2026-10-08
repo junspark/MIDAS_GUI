@@ -150,6 +150,7 @@ HC_KEV_A = 12.398420
 # Common detector pixel sizes (label, pixel size in µm) for the clickable "px" menu.
 PIXEL_PRESETS = [
     ("GE", 200.0), ("Varex", 150.0), ("Pilatus", 172.0), ("Eiger", 75.0),
+    ("Pixirad", 62.0),
 ]
 
 # Common K-edge foil energies (element symbol, K absorption-edge energy in keV).
