@@ -132,6 +132,39 @@ def test_hydra_field_selector_sibling_discovery_and_compute(app, tmp_path):
     assert sel._path_ed.text().strip() == ""  # no Data-path provider set here — nothing to prefill
 
 
+def test_hydra_field_selector_background_scale(app, tmp_path):
+    """Only the background variant (``with_scale=True``) gets a scale factor
+    (default 1), and it multiplies every panel's returned field."""
+    import h5py
+
+    for n in (1, 2, 3, 4):
+        d = tmp_path / f"ge{n}"
+        d.mkdir()
+        data = np.full((1, 8, 8), float(n) * 10.0, dtype=np.float32)
+        with h5py.File(d / f"bg.ge{n}.h5", "w") as f:
+            f.create_dataset("exchange/data", data=data)
+
+    dark = HydraFieldSelector("Dark", default_dataset="exchange/data")
+    assert dark._scale is None   # no scale knob without with_scale=True
+
+    sel = HydraFieldSelector("Background", with_scale=True,
+                             default_dataset="exchange/data")
+    assert sel._scale.value() == 1.0
+    sel.setChecked(True)
+    sel._set_path(str(tmp_path / "ge1" / "bg.ge1.h5"))
+    sel._compute_all()
+    for w in list(sel._workers.values()):
+        w.wait()
+    for _ in range(20):
+        app.processEvents()
+
+    assert np.allclose(sel.field(1), 10.0)   # scale=1 -> unchanged
+
+    sel._scale.setValue(2.0)
+    for n in (1, 2, 3, 4):
+        assert np.allclose(sel.field(n), float(n) * 10.0 * 2.0)
+
+
 def test_hydra_field_selector_enter_on_a_missing_path_warns(app, monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning",

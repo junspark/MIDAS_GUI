@@ -108,6 +108,11 @@ class CorrectionsDialog(QtWidgets.QDialog):
             btn.clicked.connect(lambda _c=False, e=ed: self._browse(e))
             h.addWidget(ed, 1); h.addWidget(btn)
             self._fields[key] = ed
+            if key == "background":
+                self._bg_scale = _fspin(0.0, 1e9, 3, node.background_scale)
+                self._bg_scale.setToolTip(
+                    "Multiply the background frame by this factor before it is subtracted.")
+                h.addWidget(QtWidgets.QLabel("scale:")); h.addWidget(self._bg_scale)
             form.row((label, row))
         self._mode = _NoScrollComboBox()
         self._mode.addItem("divide", "divide"); self._mode.addItem("subtract", "subtract")
@@ -141,6 +146,7 @@ class CorrectionsDialog(QtWidgets.QDialog):
         node.name = self._name.text().strip() or "Corrections"
         for key, ed in self._fields.items():
             setattr(node, key, ed.text().strip() or None)
+        node.background_scale = self._bg_scale.value()
         node.bright_mode = self._mode.currentData() or "divide"
 
 
@@ -923,6 +929,10 @@ class BatchQueueTab(QtWidgets.QWidget):
                     self._log.append(f"[{sample.label}] could not read '{path}': {e}")
                     return None
 
+            background = _field(corr.background)
+            if background is not None:
+                background = background * corr.background_scale
+
             key = self._key_for(cal, corr, sample)
             items.append(RunItem(
                 key=key, group=cal_key, label=sample.label, spec=spec,
@@ -934,7 +944,7 @@ class BatchQueueTab(QtWidgets.QWidget):
                 fmts=tuple(st["fmt"]) or ("csv",), kernel=st["kernel"],
                 corrections=(None, None), variance_cfg=None, q_cfg=None,
                 dark=_field(corr.dark), bright=_field(corr.bright),
-                background=_field(corr.background), bright_mode=corr.bright_mode,
+                background=background, bright_mode=corr.bright_mode,
                 weighted=st["weighted"],
                 im_trans=tuple((self._calib_fields(cal) or {}).get("im_trans") or ()),
                 calibration_snapshot=self._calib_fields(cal),
@@ -1046,6 +1056,7 @@ class BatchQueueTab(QtWidgets.QWidget):
                         "fmt": self._fmt.checked_keys(),
                         "dark": corr.dark, "bright": corr.bright,
                         "background": corr.background,
+                        "background_scale": corr.background_scale,
                         "r_bin": self._r_bin.value(), "e_bin": self._e_bin.value()},
                 finished_payload=data,
                 calibration_snapshot=self._calib_fields(cal),

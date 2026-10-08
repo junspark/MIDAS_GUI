@@ -3,11 +3,21 @@
 Worker pattern (context/design_rules.md): redirect stdout to a log signal for
 verbose pipelines, catch every exception and emit it, store the worker as an
 instance variable on the caller so it is not GC'd mid-run.
+
+``CalibrationWorker`` is the one exception to "QThread": it runs the
+calibration pipeline in a separate OS process (``calib_cli.py``) instead, so
+it can be genuinely killed on abort and so Hydra's Parallel mode doesn't need
+to share one process-global stdout across concurrent jobs. See its own
+docstring.
 """
 from __future__ import annotations
 
+import json
 import math
+import pickle
 import re
+import sys
+import tempfile
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -16,12 +26,12 @@ import numpy as np
 from PyQt5 import QtCore
 
 import midas_gui._paths  # noqa: F401  (sys.path setup before MIDAS imports)
-from midas_gui import calib
+from midas_gui import calib_cli
 from midas_gui import h5_metadata
 from midas_gui import ion_csv
 from midas_gui import provenance
 from midas_gui import settings
-from midas_gui.helpers import (_LogStream, _load_image, _apply_im_trans, _build_spec,
+from midas_gui.helpers import (_load_image, _apply_im_trans, _build_spec,
                                _spec_from_json, average_field, apply_field_corrections,
                                read_hdf5_stack_chunk, load_profile_file,
                                CORRECTION_SUFFIX, CORRECTION_EXT)
@@ -1419,14 +1429,70 @@ class AllFrameStatsWorker(QtCore.QThread):
             self.failed.emit(traceback.format_exc())
 
 
-class CalibrationWorker(QtCore.QThread):
+def _json_default(obj):
+    """``json.dumps(..., default=_json_default)`` hook for a calibration cfg
+    dict: the only non-JSON-native value any cfg has ever carried is
+    ``refine["distortion_coeffs"]``, a ``set`` (see ``tab_calibrate.py``/
+    ``hydra_calib_widgets.py``). ``calib._distortion_coeffs`` already accepts
+    any iterable via ``set(coeffs)``, so a sorted list round-trips exactly."""
+    if isinstance(obj, (set, frozenset)):
+        return sorted(obj)
+    if isinstance(obj, np.generic):
+        return obj.item()
+    raise TypeError(f"not JSON-serializable in a calibration cfg: {type(obj)!r}")
+
+
+def _write_calib_job(job_dir: Path, mode: str, image, dark, cfg: dict,
+                     bright=None, background=None, bright_mode: str = "divide") -> None:
+    """Write ``calib_job.json``/``calib_job.npz`` into ``job_dir`` for
+    ``calib_cli.py`` to read — the subprocess hand-off of everything
+    ``CalibrationWorker`` used to pass straight to ``calib.run_pipeline`` in
+    its own ``run()``. ``cfg["mask"]`` (an array, not JSON-able) moves into
+    the npz; every other cfg key already round-trips through JSON as-is."""
+    job_dir.mkdir(parents=True, exist_ok=True)
+    cfg = dict(cfg)
+    mask = cfg.pop("mask", None)
+    job = {"mode": mode, "bright_mode": bright_mode, "cfg": cfg}
+    (job_dir / calib_cli.JOB_JSON).write_text(json.dumps(job, default=_json_default))
+    arrays = {"image": image}
+    for name, arr in (("dark", dark), ("bright", bright),
+                      ("background", background), ("mask", mask)):
+        if arr is not None:
+            arrays[name] = arr
+    np.savez(job_dir / calib_cli.JOB_NPZ, **arrays)
+
+
+class CalibrationWorker(QtCore.QObject):
+    """Runs one calibration (single-detector, or one Hydra panel) in its own
+    OS process via ``python -m midas_gui.calib_cli``, instead of an in-process
+    ``QThread``.
+
+    Duck-types the subset of ``QThread``'s interface every caller actually
+    uses (``start()``, ``isRunning()``, ``requestInterruption()``) plus the
+    same ``log_line``/``finished``/``failed`` signals the old QThread-based
+    worker had, so neither ``tab_calibrate.py`` nor ``hydra_calib_page.py``
+    needs to know the work moved to a subprocess.
+
+    Why: a calibration pipeline call is one uninterruptible native
+    torch/scipy call that can run for minutes. ``QThread.terminate()`` inside
+    one risks corrupting the whole GUI process, so the old worker's abort
+    could only *detach* (orphan the thread, discard its result) rather than
+    actually stop the work — see the tabs' own ``_abort``/``_abort_all``.
+    ``QProcess.kill()`` on a real child process has no such risk: aborting a
+    calibration now genuinely stops it. The same subprocess boundary also
+    removes the ``capture_stdout`` flag the old worker needed in Hydra's
+    Parallel mode (several concurrent QThreads redirecting the one
+    process-global ``sys.stdout`` would race) — every child process owns its
+    own real stdout, so full per-line log capture is always safe now,
+    whether Sequential or Parallel, single-detector or all four Hydra panels
+    at once. See ``calib_cli.py`` for the subprocess side.
+    """
     log_line = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal(object)
     failed   = QtCore.pyqtSignal(str)
 
     def __init__(self, mode, image, dark, cfg, parent=None,
-                 bright=None, background=None, bright_mode="divide",
-                 capture_stdout=True):
+                 bright=None, background=None, bright_mode="divide"):
         super().__init__(parent)
         self._mode  = mode
         self._image = image
@@ -1435,70 +1501,80 @@ class CalibrationWorker(QtCore.QThread):
         self._bright = bright
         self._background = background
         self._bright_mode = bright_mode
-        # sys.stdout/stderr are process-global, not per-thread — safe to
-        # redirect only when a single CalibrationWorker runs at a time (the
-        # single-detector tab, and Hydra's Sequential mode). Hydra's
-        # Parallel mode runs several of these concurrently and must NOT
-        # redirect (they'd race on the same global); it passes False here
-        # and relies on the coarser finished/failed/log_line signals for
-        # per-panel status instead of captured print() output.
-        self._capture_stdout = capture_stdout
+        self._proc: Optional[QtCore.QProcess] = None
+        self._job_dir: Optional[Path] = None
+        self._stdout_buf = ""
+        self._log_lines: list = []
 
-    def run(self):
-        import sys
-        old_out, old_err = sys.stdout, sys.stderr
-        stream = _LogStream(self.log_line) if self._capture_stdout else None  # type: ignore
-        if stream is not None:
-            sys.stdout = sys.stderr = stream
+    def isRunning(self) -> bool:
+        return self._proc is not None and self._proc.state() != QtCore.QProcess.NotRunning
+
+    def requestInterruption(self):
+        """Really stop the job — SIGKILL the subprocess. Safe to call even
+        after the caller has already disconnected our signals (the usual
+        abort sequence): whatever ``_on_process_finished`` later does with a
+        killed process's exit is emitted into the void."""
+        if self._proc is not None and self.isRunning():
+            self._proc.kill()
+
+    def start(self):
+        job_dir = Path(self._cfg.get("scratch_dir") or
+                       tempfile.mkdtemp(prefix="midas_calib_job_"))
         try:
-            image = self._image.astype(np.float32)
-            # Bright/background are applied here; dark stays passed to the pipeline.
-            if self._bright is not None or self._background is not None:
-                image = apply_field_corrections(
-                    image, dark=None, bright=self._bright,
-                    bright_mode=self._bright_mode, background=self._background
-                ).astype(np.float32)
-                self.log_line.emit(
-                    f"[calibrate] applied "
-                    f"{'bright(' + self._bright_mode + ') ' if self._bright is not None else ''}"
-                    f"{'background ' if self._background is not None else ''}correction")
-            mask = self._cfg.get("mask")
-            if mask is not None:
-                image = image.copy()
-                image[mask.astype(bool)] = 0.0   # zero sentinels before calibration
-            # Hand image/dark to the pipeline exactly as loaded, with the
-            # Transforms checkboxes' codes intact in cfg["im_trans"] —
-            # calib.run_pipeline applies them per-branch: the plain
-            # midas_calibrate_v2.calibrate() and first_time_calibrate() paths
-            # take im_trans as a native kwarg and flip internally; the other
-            # entry points (four_stage/bayesian/joint/partial-distortion) still
-            # have no such parameter, so run_pipeline pre-flips for those
-            # itself. Either way, this worker never flips the array — it just
-            # passes the raw data and codes through.
-            raw = calib.run_pipeline(self._mode, image, self._dark, self._cfg)
-            # Post-transform counts, not image.shape: every branch solves in the
-            # transformed frame, and a transpose swaps Y/Z on a non-square
-            # detector (see calib.effective_pixel_counts).
-            NY, NZ = calib.effective_pixel_counts(
-                image, self._cfg.get("im_trans", ()))
-            result = calib.normalize_result(
-                raw, self._mode, NY=NY, NZ=NZ,
-                pxY=self._cfg["pxY"], pxZ=self._cfg.get("pxZ"),
-                wavelength=self._cfg["wavelength"],
-                panel_layout=self._cfg.get("panel_layout"),
-                scratch=self._cfg.get("scratch_dir"),
-                stem=self._cfg.get("save_stem", ""))
-            result._calibrant_name = self._cfg["calibrant"]
-            self.finished.emit(result)
+            _write_calib_job(job_dir, self._mode, self._image, self._dark, self._cfg,
+                             bright=self._bright, background=self._background,
+                             bright_mode=self._bright_mode)
+        except Exception:
+            msg = traceback.format_exc()
+            QtCore.QTimer.singleShot(0, lambda: self.failed.emit(msg))
+            return
+        self._job_dir = job_dir
+
+        proc = QtCore.QProcess(self)
+        proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_stdout)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        self._proc = proc
+        proc.start(sys.executable, ["-m", "midas_gui.calib_cli", "--job-dir", str(job_dir)])
+
+    def _on_stdout(self):
+        data = bytes(self._proc.readAllStandardOutput()).decode("utf-8", errors="replace")
+        self._stdout_buf += data
+        while "\n" in self._stdout_buf:
+            line, self._stdout_buf = self._stdout_buf.split("\n", 1)
+            if line:
+                self._log_lines.append(line)
+                self.log_line.emit(line)
+
+    def _on_process_error(self, _error):
+        # errorOccurred fires e.g. on FailedToStart (bad interpreter path) —
+        # QProcess.finished is NOT emitted in that case, so failure has to be
+        # reported from here instead.
+        if self._proc is not None and self._proc.error() == QtCore.QProcess.FailedToStart:
+            self.failed.emit(f"could not start the calibration subprocess "
+                             f"({sys.executable} -m midas_gui.calib_cli)")
+
+    def _on_process_finished(self, exit_code: int, exit_status):
+        if self._stdout_buf:
+            self._log_lines.append(self._stdout_buf)
+            self.log_line.emit(self._stdout_buf)
+            self._stdout_buf = ""
+        if exit_status == QtCore.QProcess.CrashExit:
+            self.failed.emit("calibration subprocess crashed (killed/aborted)"
+                             + ("\n" + "\n".join(self._log_lines) if self._log_lines else ""))
+            return
+        if exit_code != 0:
+            self.failed.emit("\n".join(self._log_lines) or
+                             f"calibration subprocess exited with code {exit_code}")
+            return
+        try:
+            with open(self._job_dir / calib_cli.RESULT_PKL, "rb") as fh:
+                result = pickle.load(fh)
         except Exception:
             self.failed.emit(traceback.format_exc())
-        finally:
-            # Only restore if we're still the active redirect — a newer run (after
-            # an abort) may already have installed its own stream; don't clobber it.
-            if sys.stdout is stream:
-                sys.stdout = old_out
-            if sys.stderr is stream:
-                sys.stderr = old_err
+            return
+        self.finished.emit(result)
 
 
 class ManualDspacingCalibWorker(QtCore.QThread):

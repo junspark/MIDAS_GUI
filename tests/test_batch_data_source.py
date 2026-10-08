@@ -151,6 +151,49 @@ def test_unchecking_dark_clears_a_previously_computed_field():
     assert panel._dark_sel.get_field() is None
 
 
+def test_background_scale_defaults_to_one_and_multiplies_the_field():
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    assert panel._bg_sel._scale.value() == 1.0
+    panel._bg_sel.setChecked(True)
+    panel._bg_sel._field = np.full((2, 2), 3.0)
+    assert np.allclose(panel._bg_sel.get_field(), 3.0)   # scale=1 -> unchanged
+
+    panel._bg_sel._scale.setValue(2.5)
+    assert np.allclose(panel._bg_sel.get_field(), 7.5)
+    assert panel.background() is not None
+    assert np.allclose(panel.background(), 7.5)
+
+
+def test_dark_and_bright_have_no_scale_field():
+    # Only Background gets the scale knob — Dark/Bright are unchanged.
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    assert panel._dark_sel._scale is None
+    assert panel._bright_sel._scale is None
+
+
+def test_background_scale_change_emits_fields_changed():
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    seen = []
+    panel.fieldsChanged.connect(lambda: seen.append(True))
+    panel._bg_sel._scale.setValue(2.0)
+    assert seen
+
+
+def test_background_scale_roundtrips_through_get_set_state():
+    W, _app = _make_app_and_module()
+    panel = W.DataLoaderPanel(mode="single")
+    panel._bg_sel._scale.setValue(0.5)
+    state = panel.get_state()
+    assert state["background"]["scale"] == 0.5
+
+    restored = W.DataLoaderPanel(mode="single")
+    restored.set_state(state)
+    assert restored._bg_sel._scale.value() == 0.5
+
+
 def test_manual_edit_clears_stem_filter_and_explicit_paths():
     W, _app = _make_app_and_module()
     panel = W.DataLoaderPanel(mode="stream")

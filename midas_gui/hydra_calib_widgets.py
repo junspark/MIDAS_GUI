@@ -30,7 +30,7 @@ from midas_gui.helpers import (
     _fspin, im_trans_codes_from_checkboxes, geometry_fields_from_file,
     _predict_ring_radii, ring_xy_corrected, distortion_rho_d_um, paramstest_pairs,
     write_standalone_paramstest, apply_dict_to_widgets, rmax_corner_px,
-    result_refined_tx, _PARAMSTEST_DISTORTION)
+    _PARAMSTEST_DISTORTION)
 from midas_gui.widgets import ResidualBarChart, _mono_font
 from midas_gui.dialogs import _SaveParamstestDialog, ManualSeedDialog, show_error
 from midas_gui import style as S
@@ -49,6 +49,10 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
     imTransChanged = QtCore.pyqtSignal()
     #: "→ Send to Data Viewer" clicked, with this panel's number + geometry.
     sendToViewer = QtCore.pyqtSignal(int, dict)
+    #: this panel's seed enable state (which of BC/Lsd/tx/ty/tz are ticked)
+    #: changed — the owning page uses this to refresh its always-visible
+    #: seed-status banner without anyone having to open the seed dialog.
+    seedStateChanged = QtCore.pyqtSignal()
 
     def __init__(self, panel_number: int, parent=None):
         super().__init__(parent)
@@ -344,6 +348,13 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             tx_note = ("tx 0° (not set). This panel will land at the same "
                        "azimuth as every other panel left at 0.")
         self._seed_summary_lbl.setText(head + "\n" + tx_note)
+        # Styling and the signal are upstream's (cda7336); the two-line body
+        # above is ours. Not a pick between them: upstream made the summary
+        # noticeable and made the page able to react to it, we made it say
+        # what tx will actually do. Both survive.
+        self._seed_summary_lbl.setStyleSheet(
+            f"color:{S.ACCENT if on else S.MUTED};font-size:10px")
+        self.seedStateChanged.emit()
 
     def seed_tx_value(self) -> float:
         """The tx this panel's fit will actually use: the seeded angle, or
@@ -387,31 +398,47 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             self._flip_z.setChecked(2 in im_trans)
             self._transp.setChecked(3 in im_trans)
 
-    def seed_from_result(self, result):
-        """A completed fit is a full geometry — every parameter it refined is
-        enabled and written back.
+    def seed_from_result(self, result, refine: dict):
+        """Copy optimized geometry into the seed fields — but only the
+        parameters this fit actually refined. An unrefined parameter's value
+        in ``result`` is just whatever was fed in as a fixed constant, not
+        new information from this fit; promoting it would silently turn
+        "held fixed this one time" into a locked seed for every future run,
+        on every panel (``_sync_seed_checkbox`` mirrors the enable flags
+        across all 4 panels by design) — see DECISIONS for the
+        connoly_oct26 run this broke, where tx ended up locked at a
+        different nonsense value per panel.
 
-        ``tx`` is left alone unless the fit genuinely refined it (see
-        :func:`helpers.result_refined_tx`; no Hydra pipeline does today). It is
-        an input the fit never touches, so ``result.tx`` can only repeat the
-        seed or — where the pipeline does not carry it, as ``first_time``
-        does not — report 0 for a panel that is physically at 296.885°.
-        Writing that back silently replaced the measured azimuth with 0 on
-        every Run, and because the tx tick then reads as "not set" the next
-        fit ran at the wrong azimuth without saying so."""
-        self._enable_seed(BC=True, Lsd=True, ty=True, tz=True)
-        self._seed_bcy.setValue(float(result.BC_y))
-        self._seed_bcz.setValue(float(result.BC_z))
-        self._seed_lsd.setValue(float(result.Lsd) / 1000.0)
-        if result_refined_tx(result):
-            self._enable_seed(tx=True)
-            self._seed_tx.setValue(float(getattr(result, "tx", 0.0) or 0.0))
-        self._seed_ty.setValue(float(getattr(result, "ty", 0.0) or 0.0))
-        self._seed_tz.setValue(float(getattr(result, "tz", 0.0) or 0.0))
-        self._seed_note.setText("Seed updated from the last calibration result."
-                                if result_refined_tx(result) else
-                                "Seed updated from the last calibration result "
-                                "(tx kept — the fit does not refine it).")
+        ``tx`` is the sharpest case, and worth keeping the local finding
+        for: no Hydra pipeline refines it today, so ``result.tx`` can only
+        repeat the seed or -- where the pipeline does not carry it, as
+        ``first_time`` does not -- report 0 for a panel that is physically
+        at 296.885 deg. Writing that back silently replaced the measured
+        azimuth with 0 on every Run, and because the tx tick then read as
+        "not set", the next fit ran at the wrong azimuth without saying so.
+        The ``refine``-driven rule above covers it along with every other
+        parameter, which is why the earlier tx-only guard
+        (``helpers.result_refined_tx``) is not needed here."""
+        promoted = []
+        if refine.get("BC"):
+            self._enable_seed(BC=True)
+            self._seed_bcy.setValue(float(result.BC_y))
+            self._seed_bcz.setValue(float(result.BC_z))
+            promoted.append(f"BC=({result.BC_y:.1f}, {result.BC_z:.1f}) px")
+        if refine.get("Lsd"):
+            self._enable_seed(Lsd=True)
+            self._seed_lsd.setValue(float(result.Lsd) / 1000.0)
+            promoted.append(f"Lsd={float(result.Lsd) / 1000:.3f} mm")
+        for key, spin in (("tx", self._seed_tx), ("ty", self._seed_ty), ("tz", self._seed_tz)):
+            if refine.get(key):
+                self._enable_seed(**{key: True})
+                spin.setValue(float(getattr(result, key, 0.0) or 0.0))
+                promoted.append(f"{key}={float(getattr(result, key, 0.0) or 0.0):.2f}°")
+        if promoted:
+            self._seed_note.setText("Seed updated from the last fit: " + ", ".join(promoted) + ".")
+        else:
+            self._seed_note.setText(
+                "Last fit refined no seedable parameters — seed left unchanged.")
 
     def _load_calib_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -432,16 +459,17 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
     # ── Pick BC / Pick Ring ──────────────────────────────────────────
 
     def _on_bc_picked(self, bc_y, bc_z):
-        self._enable_seed(BC=True)
         self._seed_bcy.setValue(bc_y); self._seed_bcz.setValue(bc_z)
         self._seed_note.setText(
-            f"ge{self.panel_number}: BC set from click — Lsd is auto-seeded unless it's ticked too.")
+            f"ge{self.panel_number}: BC value set from click — "
+            "tick Manual seed yourself to use it in the fit.")
         self._log(f"ge{self.panel_number}: BC set by click: ({bc_y:.2f}, {bc_z:.2f}) px")
 
     def _on_ring_fit_bc(self, bc_y, bc_z, r_px):
-        self._enable_seed(BC=True)
         self._seed_bcy.setValue(bc_y); self._seed_bcz.setValue(bc_z)
-        self._seed_note.setText(f"ge{self.panel_number}: BC from ring fit (R={r_px:.1f} px).")
+        self._seed_note.setText(
+            f"ge{self.panel_number}: BC value from ring fit (R={r_px:.1f} px) — "
+            "tick Manual seed yourself to use it.")
         self._log(f"ge{self.panel_number}: ring fit BC=({bc_y:.2f}, {bc_z:.2f}) px  R={r_px:.1f} px")
 
     # ── Rings ────────────────────────────────────────────────────────
@@ -502,14 +530,19 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         bc.setVisible(self._show_rings)
         self._viewer._iv.addItem(bc); self._ring_items.append(bc)
 
-    def on_result(self, result):
-        """A fresh fitted result for this panel — store it, refresh seed
-        (if 'feed back' is on), redraw rings (if bound to the viewer), and
-        populate the Results grid."""
+    def on_result(self, result, refine: Optional[dict] = None):
+        """A result for this panel — store it, redraw rings (if bound to the
+        viewer), and populate the Results grid. Seed feedback (if 'feed
+        back' is on) only runs when ``refine`` is given, i.e. this is a
+        fresh fit that just completed in this session, as opposed to a
+        historical result redrawn from a reopened project
+        (``HydraCalibrationPage.display_stored_result``, which calls this
+        with no ``refine``) — a stored result must never silently become
+        tomorrow's seed."""
         self.result = result
-        if self._feedback_check.isChecked():
+        if refine is not None and self._feedback_check.isChecked():
             try:
-                self.seed_from_result(result)
+                self.seed_from_result(result, refine)
             except Exception:
                 pass
         self._redraw_rings()
@@ -576,6 +609,18 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             "distortion": dict(getattr(r, "distortion", {}) or {}),
             "im_trans": list(getattr(r, "im_trans", []) or [])})
 
+    def write_json(self, path) -> None:
+        """Write this panel's result to *path* as calibration.json — same
+        shape as ``CalibrationTab._save_json``, minus the panel-shifts
+        sidecar (a Hydra panel is a single detector, never a multi-panel
+        grid). Shared by the interactive ``_save_json`` button and
+        ``HydraCalibrationPage``'s page-level "Save All"."""
+        import json
+        d = {k: v for k, v in vars(self.result).items()
+             if not k.startswith("_") and not hasattr(v, "numpy")}
+        d.pop("residual_corr_map", None); d.pop("iter_history", None)
+        Path(path).write_text(json.dumps(d, indent=2, default=str))
+
     def _save_json(self):
         if not self.result:
             return
@@ -584,12 +629,28 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             f"ge{self.panel_number}_calibration.json", "JSON (*.json)")
         if not path:
             return
-        import json
-        d = {k: v for k, v in vars(self.result).items()
-             if not k.startswith("_") and not hasattr(v, "numpy")}
-        d.pop("residual_corr_map", None); d.pop("iter_history", None)
-        Path(path).write_text(json.dumps(d, indent=2, default=str))
+        self.write_json(path)
         self._log(f"ge{self.panel_number}: saved {path}")
+
+    def write_paramstest(self, out_path, tmpl_path=None) -> None:
+        """Write this panel's result to *out_path* as paramstest.txt — from
+        *tmpl_path* if given (geometry/distortion injected, everything else
+        carried verbatim), else a standalone file. Shared by the interactive
+        ``_save_paramstest`` button and ``HydraCalibrationPage``'s
+        page-level "Save All". Raises on failure; callers decide how to
+        report it (interactively vs. collected across panels)."""
+        if tmpl_path:
+            if not Path(tmpl_path).exists():
+                raise FileNotFoundError(f"Template not found: {tmpl_path}")
+            from midas_calibrate_v2.compat.to_v1 import ff_paramstest_from_auto_result
+            ff_paramstest_from_auto_result(self.result, tmpl_path, out_path)
+            im_trans = getattr(self.result, "im_trans", None)
+            if im_trans:
+                with open(out_path, "a") as _f:
+                    for code in im_trans:
+                        _f.write(f"ImTransOpt {int(code)}\n")
+        else:
+            write_standalone_paramstest(self.result, out_path)
 
     def _save_paramstest(self):
         if not self.result:
@@ -600,20 +661,8 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         out_path = dlg.out_path()
         if not out_path:
             QtWidgets.QMessageBox.warning(self, "No output", "Please specify an output file."); return
-        tmpl_path = dlg.template_path()
         try:
-            if tmpl_path:
-                if not Path(tmpl_path).exists():
-                    raise FileNotFoundError(f"Template not found: {tmpl_path}")
-                from midas_calibrate_v2.compat.to_v1 import ff_paramstest_from_auto_result
-                ff_paramstest_from_auto_result(self.result, tmpl_path, out_path)
-                im_trans = getattr(self.result, "im_trans", None)
-                if im_trans:
-                    with open(out_path, "a") as _f:
-                        for code in im_trans:
-                            _f.write(f"ImTransOpt {int(code)}\n")
-            else:
-                write_standalone_paramstest(self.result, out_path)
+            self.write_paramstest(out_path, dlg.template_path())
             self._log(f"ge{self.panel_number}: paramstest.txt saved: {out_path}")
         except Exception:
             import traceback

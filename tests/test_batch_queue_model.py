@@ -167,6 +167,14 @@ def test_from_json_tolerates_a_queue_saved_before_a_field_existed():
     corr = cal.corrections[0]
     assert (corr.name, corr.dark, corr.bright_mode) == ("Corrections", None, "divide")
     assert corr.samples[0].label == "a" and corr.samples[0].kind == KIND_HDF5
+    assert corr.background_scale == 1.0   # saved before the field existed
+
+
+def test_background_scale_defaults_to_one_and_round_trips():
+    assert CorrectionsNode().background_scale == 1.0
+    corr = CorrectionsNode(background="/d/bg.tif", background_scale=2.5)
+    back = CorrectionsNode.from_json(corr.to_json())
+    assert back.background_scale == 2.5
 
 
 def test_corrections_describe():

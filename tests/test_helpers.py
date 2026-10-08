@@ -653,6 +653,100 @@ def test_predict_ring_radii_uses_detector_coverage_not_fixed_30deg():
     assert radii == [expected_radius_px]
 
 
+def test_radial_spline_values_passes_exactly_through_the_given_points():
+    from midas_gui.helpers import radial_spline_values
+
+    radii = [0.0, 10.0, 30.0]
+    values = [10.0, 4.0, 0.0]
+    for r, v in zip(radii, values):
+        assert radial_spline_values(r, radii, values) == pytest.approx(v, abs=1e-9)
+
+
+def test_radial_spline_values_is_flat_below_the_first_and_above_the_last_knot():
+    from midas_gui.helpers import radial_spline_values
+
+    radii = [5.0, 10.0, 30.0]
+    values = [8.0, 4.0, 1.0]
+    assert radial_spline_values(-5.0, radii, values) == pytest.approx(8.0)
+    assert radial_spline_values(1000.0, radii, values) == pytest.approx(1.0)
+
+
+def test_radial_spline_values_sorts_unsorted_input():
+    from midas_gui.helpers import radial_spline_values
+
+    radii_sorted, values_sorted = [0.0, 10.0, 30.0], [10.0, 4.0, 0.0]
+    radii_shuffled, values_shuffled = [30.0, 0.0, 10.0], [0.0, 10.0, 4.0]
+    for r in (0.0, 5.0, 15.0, 30.0):
+        assert (radial_spline_values(r, radii_shuffled, values_shuffled)
+                == pytest.approx(radial_spline_values(r, radii_sorted, values_sorted)))
+
+
+def test_default_radial_threshold_points_shape_and_endpoints():
+    from midas_gui.helpers import default_radial_threshold_points
+
+    radii, values = default_radial_threshold_points(hi=100.0, rmax=200.0)
+    assert len(radii) == len(values) == 4
+    assert radii[0] == 0.0
+    assert radii[-1] <= 200.0
+    assert values[0] == pytest.approx(100.0)
+    assert values[-1] == pytest.approx(0.0)
+    assert all(a < b for a, b in zip(radii, radii[1:]))   # strictly increasing
+
+
+def test_median_intensity_near_bc_uses_only_pixels_within_r_max():
+    from midas_gui.helpers import median_intensity_near_bc
+
+    img = np.full((40, 40), 100.0, dtype=np.float32)
+    img[20, 20] = 5.0    # at BC itself
+    img[20, 25] = 7.0    # r=5, within r_max=10
+    img[0, 0] = 9999.0   # far outside r_max=10, must not affect the median
+
+    med = median_intensity_near_bc(img, bc_y=20.0, bc_z=20.0, r_max=10.0)
+    assert med == pytest.approx(np.median(img[np.hypot(
+        np.indices(img.shape)[1] - 20.0, np.indices(img.shape)[0] - 20.0) <= 10.0]))
+    assert med < 9999.0
+
+
+def test_median_intensity_near_bc_falls_back_to_nanmax_when_mask_is_empty():
+    from midas_gui.helpers import median_intensity_near_bc
+
+    img = np.full((40, 40), 3.0, dtype=np.float32)
+    img[10, 10] = 500.0
+    # BC placed far off-grid with r_max=0 so no pixel's radius is <= 0.
+    med = median_intensity_near_bc(img, bc_y=-1000.0, bc_z=-1000.0, r_max=0.0)
+    assert med == pytest.approx(500.0)
+
+
+def test_radial_spline_threshold_map_matches_radial_spline_values_at_bc():
+    from midas_gui.helpers import radial_spline_threshold_map, radial_spline_values
+
+    shape = (80, 80)
+    bc_y, bc_z = 40.0, 40.0
+    radii, values = [0.0, 10.0, 30.0], [10.0, 4.0, 0.0]
+    m = radial_spline_threshold_map(shape, bc_y, bc_z, radii, values)
+    assert m[int(bc_z), int(bc_y)] == pytest.approx(
+        float(radial_spline_values(0.0, radii, values)))
+
+
+def test_apply_radial_threshold_zeros_only_pixels_below_the_curve():
+    from midas_gui.helpers import apply_radial_threshold
+
+    img = np.full((60, 60), 5.0, dtype=np.float32)
+    bc_y, bc_z = 30.0, 30.0
+
+    out = apply_radial_threshold(img, bc_y, bc_z, radii=[0.0, 10.0], values=[10.0, 0.0])
+    assert out[int(bc_z), int(bc_y)] == 0.0   # 5 < peak threshold of 10 near BC
+    assert out[0, 0] == 5.0                   # far from BC the threshold decays below 5
+
+
+def test_apply_radial_threshold_constant_curve_is_a_flat_threshold():
+    from midas_gui.helpers import apply_radial_threshold
+
+    img = np.full((20, 20), 5.0, dtype=np.float32)
+    out = apply_radial_threshold(img, 10.0, 10.0, radii=[0.0, 10.0], values=[5.0, 5.0])
+    assert np.array_equal(out, img)   # 5 is not < the constant 5 threshold anywhere
+
+
 def test_apply_field_corrections_skips_mismatched_shape_instead_of_raising():
     """Regression test for a crash hit loading a saved session whose dark/
     bright/background paths were computed against a different detector

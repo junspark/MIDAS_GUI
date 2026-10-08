@@ -116,12 +116,20 @@ def _crystalline_result(**kw):
     return SimpleNamespace(**base)
 
 
+#: What a crystalline (powder) pipeline actually refines. tx is NOT in it --
+#: no crystalline pipeline fits the azimuth -- which is the whole point of
+#: these tests. Since the upstream merge, seed_from_result takes this
+#: explicitly instead of inferring "did the fit refine tx?" from the result,
+#: so the tests now state the premise they always relied on.
+_CRYSTALLINE_REFINE = {"BC": True, "Lsd": True, "ty": True, "tz": True}
+
+
 def test_a_fit_round_trip_leaves_the_seeded_azimuth_alone(hydra_card):
     """Set the real ge1 azimuth, run, feed the result back: tx must still be
     the azimuth the panel is installed at."""
     hydra_card._seed_tx.setValue(296.885)
     hydra_card._seed_en_tx.setChecked(True)
-    hydra_card.seed_from_result(_crystalline_result())
+    hydra_card.seed_from_result(_crystalline_result(), _CRYSTALLINE_REFINE)
     assert hydra_card._seed_tx.value() == pytest.approx(296.885), \
         "feeding a result back erased the panel's installation azimuth"
     assert hydra_card._seed_en_tx.isChecked(), \
@@ -133,14 +141,15 @@ def test_the_repeated_run_does_not_walk_the_azimuth_away(hydra_card):
     hydra_card._seed_tx.setValue(296.885)
     hydra_card._seed_en_tx.setChecked(True)
     for _ in range(3):
-        hydra_card.seed_from_result(_crystalline_result())
+        hydra_card.seed_from_result(_crystalline_result(), _CRYSTALLINE_REFINE)
     assert hydra_card.seed_tx_value() == pytest.approx(296.885)
 
 
 def test_the_parameters_the_fit_does_refine_still_come_back(hydra_card):
     """The fix must not turn feedback off wholesale -- Lsd/BC/ty/tz are
     refined, and feeding them back is the point of the checkbox."""
-    hydra_card.seed_from_result(_crystalline_result(Lsd=2_700_000.0, BC_y=1030.0))
+    hydra_card.seed_from_result(
+        _crystalline_result(Lsd=2_700_000.0, BC_y=1030.0), _CRYSTALLINE_REFINE)
     assert hydra_card._seed_lsd.value() == pytest.approx(2700.0)
     assert hydra_card._seed_bcy.value() == pytest.approx(1030.0)
     assert hydra_card._seed_ty.value() == pytest.approx(0.1)
@@ -155,6 +164,9 @@ def test_the_one_fit_that_does_refine_tx_still_feeds_it_back(app):
     tab._seed_tx.setValue(12.0)
     refined = _crystalline_result(tx=31.25)
     refined.fit_sigma = {"Lsd": 120.0, "tx": 0.04}
+    # The manual d-spacing fit DOES refine tx when asked, and the tab reads
+    # what the last run refined rather than being told per call.
+    tab._last_refine_flags = {**_CRYSTALLINE_REFINE, "tx": True}
     tab._seed_from_result(refined)
     assert tab._seed_tx.value() == pytest.approx(31.25, abs=5e-3)
 
@@ -164,5 +176,8 @@ def test_a_crystalline_result_does_not_touch_the_single_detector_tx(app):
     from midas_gui.tab_calibrate import CalibrationTab
     tab = CalibrationTab()
     tab._seed_tx.setValue(207.5)
+    # Explicit: the crystalline fit refined everything EXCEPT tx, so this is
+    # the real case, not the vacuous one where nothing is promoted at all.
+    tab._last_refine_flags = dict(_CRYSTALLINE_REFINE)
     tab._seed_from_result(_crystalline_result())
     assert tab._seed_tx.value() == pytest.approx(207.5, abs=5e-3)
