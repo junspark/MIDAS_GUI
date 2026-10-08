@@ -2012,6 +2012,48 @@ class BatchTab(QtWidgets.QWidget):
             if reason:
                 self._log.append(f"[batch] Warning: {reason}")
 
+    def _confirm_detector_size(self, spec) -> bool:
+        """Catch a calibration whose detector size does not match the data
+        BEFORE the run starts. Returns False to cancel.
+
+        Without this the mismatch surfaces as a bare backend exception part
+        way into the batch -- "image shape (402, 1024) does not match geometry
+        (2048, 2048)" out of midas_integrate_v2.binning.subpixel -- which says
+        nothing about which of the two is wrong or where to fix it. The
+        Detector-view tab already logs a warning when it has a frame to
+        compare, but that is a line in the Logs pane, not something that stops
+        a run being launched.
+
+        Only advisory: a transposed non-square detector can legitimately read
+        either way round, so both orientations are accepted, and an
+        unreadable/absent preview frame never blocks the run.
+        """
+        try:
+            frame = self._loader.current_frame()
+            if frame is None:
+                return True
+            shape = tuple(int(v) for v in frame.shape[-2:])
+            NY, NZ = int(spec.NrPixelsY), int(spec.NrPixelsZ)
+        except Exception:
+            return True       # a preflight check must never be what breaks a run
+        if shape in ((NZ, NY), (NY, NZ)):
+            return True
+        btn = QtWidgets.QMessageBox.warning(
+            self, "Detector size mismatch",
+            f"The calibration describes a {NY}x{NZ} px detector, but the data "
+            f"is {shape[1]}x{shape[0]} px.\n\n"
+            f"Integration will fail in the backend with \"image shape {shape} "
+            f"does not match geometry ({NZ}, {NY})\".\n\n"
+            f"This usually means the geometry was saved while a calibration "
+            f"for a different detector was loaded \u2014 the detector size "
+            f"(and the RhoD the distortion terms are normalised by) came from "
+            f"that calibration rather than from this data. Re-save the "
+            f"geometry in the Data Viewer with this data loaded, or pick a "
+            f"calibration that matches.",
+            QtWidgets.QMessageBox.Cancel | QtWidgets.QMessageBox.Ignore,
+            QtWidgets.QMessageBox.Cancel)
+        return btn == QtWidgets.QMessageBox.Ignore
+
     def _run(self):
         if self._worker and self._worker.isRunning():
             return
@@ -2030,6 +2072,9 @@ class BatchTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(
                 self, "No data",
                 "Select a data folder/glob, HDF5 file, or file selection."); return
+
+        if not self._confirm_detector_size(spec):
+            return
 
         kernel = self._kernel.currentData()
         corrections = self._corr_widget.build_corrections()
@@ -2187,11 +2232,12 @@ class BatchTab(QtWidgets.QWidget):
         disk first: the background process (a fresh `python -m
         midas_gui.batch_cli`) has no access to this GUI's live state."""
         try:
-            # Called for validation only — the background process rebuilds its
-            # own spec from the snapshot on disk, so the result is discarded.
-            # Keep the call: it is what reports a bad calibration up front,
-            # rather than letting the detached job fail where nobody sees it.
-            self._build_spec()
+            # Called for validation — the background process rebuilds its own
+            # spec from the snapshot on disk, so this one never reaches the
+            # job itself; it is only what reports a bad calibration (and, just
+            # below, a detector-size mismatch) up front, rather than letting
+            # the detached job fail where nobody sees it.
+            spec = self._build_spec()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Calibration error", str(e)); return
 
@@ -2200,6 +2246,12 @@ class BatchTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(
                 self, "No data",
                 "Select a data folder/glob, HDF5 file, or file selection."); return
+
+        # Same up-front check as the foreground run -- more important here,
+        # not less: a detached job that dies on frame 1 fails where nobody is
+        # watching for it.
+        if not self._confirm_detector_size(spec):
+            return
 
         out_dir = self._out_ed.text().strip()
         if not out_dir:

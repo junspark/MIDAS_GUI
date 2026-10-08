@@ -366,12 +366,20 @@ _AUTO_DETECT_PROFILES = {"1-ID-E", "20-ID-D", "20-ID-E"}
 _DETECTOR_FILENAME_TAGS = (
     (".ge1", "ge"), (".ge2", "ge"), (".ge3", "ge"), (".ge4", "ge"), (".ge5", "ge"),
     (".vrx", "vrx"),
-    (".pxrd", "pxrd"),
+    (".pxrd", "pxrd"), (".pixi", "pxrd"),
     (".pmg", "pimega"),
 )
-# Pixel size (µm) for each recognized detector tag. No entry for "pxrd" —
-# Pixirad is identified but its pixel size isn't auto-populated (not given).
-_DETECTOR_PIXEL_UM = {"ge": 200.0, "vrx": 150.0, "pimega": 55.0}
+# Pixel size (µm) for each recognized detector tag.
+#
+# "pxrd" was long listed without a size, so a Pixirad was identified but its
+# pixel size never auto-populated. Both halves of that bit the 1-ID-E SAXS
+# setup on 2026-10-08: files there are written ".pixi", which this table did
+# not match at all, so loading one left the px box holding whatever the
+# previously-loaded calibration had put there (200 µm, from a GE) — and a
+# geometry saved from that card described the GE's pixel, not the Pixirad's.
+# 62 µm is the PIXIRAD CdTe pitch and is already what constants.PIXEL_PRESETS
+# offers under "Pixirad".
+_DETECTOR_PIXEL_UM = {"ge": 200.0, "vrx": 150.0, "pimega": 55.0, "pxrd": 62.0}
 # HDF5 dataset holding the beam energy (keV) used to derive wavelength, on the
 # beamlines above — confirmed as the authoritative source over the other
 # energy-like datasets present in these files (HRM/IDEnergy readbacks, which

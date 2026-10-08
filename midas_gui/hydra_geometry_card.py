@@ -327,6 +327,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._profile_view = None
         self._cake_view = None
         self._image_provider: Callable[[], Optional[np.ndarray]] = lambda: None
+        self._detected_px: Optional[float] = None   # px size the data implies
         #: ``fn(suffix) -> full path`` for the Save dialogs; see
         #: set_save_name_provider.
         self._save_name_provider: Optional[Callable[[str], Optional[str]]] = None
@@ -563,6 +564,14 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             v = fields.get(key)
             if v is not None:
                 w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
+        # What the DATA says the pixel size is, kept separately from the box:
+        # loading a calibration afterwards overwrites the box, and a geometry
+        # saved from that card would then describe the calibration's detector
+        # rather than the one on screen. Only used to warn at save time --
+        # detection covers a handful of detectors and a refined pixel size is
+        # legitimately not the nominal one, so it must not override anything.
+        if fields.get("pxY") is not None:
+            self._detected_px = float(fields["pxY"])
         if self._sim_btn.isChecked() and self._image_provider() is not None:
             self._simulate()
         else:
@@ -612,8 +621,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         }
         img = self._image_provider()
         if not (geom["NrPixelsY"] and geom["NrPixelsZ"]) and img is not None:
-            nz, ny = img.shape
-            geom["NrPixelsY"], geom["NrPixelsZ"] = ny, nz
+            geom["NrPixelsY"], geom["NrPixelsZ"] = self._raw_pixel_counts(img)
         required = ("wavelength_A", "Lsd", "BC_y", "BC_z", "pxY",
                     "NrPixelsY", "NrPixelsZ")
         if any(not geom.get(k) for k in required):
@@ -1800,6 +1808,29 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             import traceback
             show_error(self, "Calibration load error", traceback.format_exc())
 
+    def _raw_pixel_counts(self, img) -> Optional[tuple]:
+        """``(NrPixelsY, NrPixelsZ)`` of the *raw* detector frame behind ``img``.
+
+        ``image_provider`` hands back the display-oriented frame (this card's
+        Transforms checkboxes already applied), but every geometry dict here
+        pairs raw-frame pixel counts with a separate ``im_trans`` the backend
+        applies itself — see the un-transform in :meth:`_radial_from_geometry`
+        before it builds a spec. Only opcode 3 (transpose) changes the shape,
+        and it swaps Y and Z, so an odd number of them flips the pair; the
+        mirrors (1, 2) leave it alone. Same rule as
+        :func:`calib.effective_pixel_counts`, in the opposite direction.
+
+        Silent on a square detector, which is why it went unnoticed: it only
+        bites on a non-square one (e.g. a 1024x402 Pixirad) with a transpose
+        active.
+        """
+        if img is None:
+            return None
+        nz, ny = np.asarray(img).shape
+        if tuple(self.im_trans_codes() or ()).count(3) % 2:
+            ny, nz = nz, ny
+        return int(ny), int(nz)
+
     def get_full_geometry(self) -> Optional[dict]:
         """Public alias for ``_export_geom`` — the best-available full
         geometry (NrPixelsY/Z, pxY/Z, Lsd, BC, tx/ty/tz, distortion,
@@ -1840,8 +1871,9 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "tx": self._tx.value(), "ty": self._ty.value(), "tz": self._tz.value(),
             "pxY": px, "im_trans": self.im_trans_codes(),
         }
+        counts = self._raw_pixel_counts(img)
         if base is None:
-            nz, ny = img.shape
+            ny, nz = counts
             return {**live, "pxZ": px, "NrPixelsY": ny, "NrPixelsZ": nz,
                     "distortion": {}}
         # Override only the fields the user has actually MOVED since the
@@ -1861,6 +1893,18 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         # not flatten pxZ onto pxY behind the user's back.
         if "pxY" in geom and abs(float(base.get("pxY") or px) - px) > 1e-9:
             geom["pxZ"] = px
+        # The detector SIZE is the one field that must follow the data rather
+        # than the loaded calibration. It has no live widget, so the loop above
+        # can never override it, and a geometry loaded from another detector
+        # used to be exported with that detector's size -- a CeO2 GE
+        # calibration (2048x2048, 200 um) loaded here and re-saved against
+        # Pixirad frames wrote "NrPixelsY/Z 2048" beside the edited 62 um
+        # pixel, and Batch Integrate then died inside the backend with
+        # "image shape (402, 1024) does not match geometry (2048, 2048)".
+        # The on-screen frame is ground truth about how big the detector is;
+        # the file can only be stale about it.
+        if counts is not None and (geom.get("NrPixelsY"), geom.get("NrPixelsZ")) != counts:
+            geom["NrPixelsY"], geom["NrPixelsZ"] = counts
         return geom
 
     def _snapshot_calib_baseline(self) -> None:
@@ -1920,4 +1964,29 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             import traceback
             show_error(self, "Save failed", traceback.format_exc())
             return
-        QtWidgets.QMessageBox.information(self, "Saved", f"Calibration saved to:\n{path}")
+        # A saved geometry must describe the detector on screen, not the one
+        # whose calibration happens to be loaded on the card. The array size
+        # is corrected automatically (see _export_geom) because the frame is
+        # unarguable about it; the pixel size is only flagged, because
+        # detection knows a handful of detectors and a refined pixel is
+        # legitimately not the nominal one. Both are reported, so re-using one
+        # detector's geometry for another is never silent.
+        notes = []
+        loaded = self._calib_geom or {}
+        if loaded and (loaded.get("NrPixelsY"), loaded.get("NrPixelsZ")) != \
+                (geom.get("NrPixelsY"), geom.get("NrPixelsZ")):
+            notes.append(
+                f"Array size written as {geom['NrPixelsY']}x{geom['NrPixelsZ']} px, "
+                f"taken from the loaded frame — the calibration on this card is for "
+                f"a {loaded.get('NrPixelsY')}x{loaded.get('NrPixelsZ')} px detector. "
+                f"Its distortion terms (and the RhoD they are normalised by) were "
+                f"fit on that detector; check they belong to this one.")
+        written_px = float(geom.get("pxY") or 0.0)
+        if self._detected_px and abs(written_px - self._detected_px) > 1e-6:
+            notes.append(
+                f"Pixel size written as {written_px:g} µm, but this data's detector "
+                f"reads as {self._detected_px:g} µm. Set the px box to the right "
+                f"value and save again if that is not deliberate.")
+        note = ("\n\n" + "\n\n".join(notes)) if notes else ""
+        QtWidgets.QMessageBox.information(
+            self, "Saved", f"Calibration saved to:\n{path}{note}")

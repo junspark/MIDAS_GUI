@@ -94,6 +94,8 @@ def test_kedge_label_menu_rebuilds_from_current_constants(app, monkeypatch):
     ("scan.ge1", "ge"), ("scan.GE3.h5", "ge"), ("scan_ge4_001.ge4", "ge"),
     ("scan.vrx", "vrx"), ("scan.VRX.h5", "vrx"),
     ("scan.pxrd", "pxrd"),
+    # 1-ID-E writes Pixirad frames as ".pixi", not ".pxrd".
+    ("scan.pixi", "pxrd"), ("AgBeh_80p725keV_3s_003510.pixi.h5", "pxrd"),
     ("silver_behenate_72keV_001027.pmg.h5", "pimega"), ("scan.PMG", "pimega"),
     ("scan.tif", None), ("scan.h5", None),
 ])
@@ -116,8 +118,11 @@ def test_detect_geometry_pixel_size_from_filename(profile):
     assert detect_geometry_from_path("scan.ge1", profile=profile) == {"pxY": 200.0}
     assert detect_geometry_from_path("scan.vrx", profile=profile) == {"pxY": 150.0}
     assert detect_geometry_from_path("scan.pmg.h5", profile=profile) == {"pxY": 55.0}
-    # Pixirad is identified but has no known pixel size to auto-populate.
-    assert detect_geometry_from_path("scan.pxrd", profile=profile) == {}
+    # Pixirad used to be identified without a pixel size, so loading one left
+    # the px box holding whatever the previously-loaded calibration had put
+    # there -- a GE's 200 um, in the 1-ID-E SAXS case that surfaced this.
+    assert detect_geometry_from_path("scan.pxrd", profile=profile) == {"pxY": 62.0}
+    assert detect_geometry_from_path("scan.pixi", profile=profile) == {"pxY": 62.0}
     assert detect_geometry_from_path("scan.tif", profile=profile) == {}
 
 
