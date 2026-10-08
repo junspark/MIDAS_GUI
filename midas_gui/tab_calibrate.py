@@ -294,6 +294,11 @@ class CalibrationTab(QtWidgets.QWidget):
             self._pipeline.addItem(label, key)
             if not enabled:
                 self._pipeline.model().item(self._pipeline.count() - 1).setEnabled(False)
+        # Each pipeline re-centres its windows a different number of times
+        # (one_shot honours "E-M iters", four_stage/bayesian run their own
+        # counts, first_time/frozen_point ignore the windows entirely), so the
+        # limits note and the hard cap's divisor both go stale on a switch.
+        self._pipeline.currentIndexChanged.connect(self._update_limits_label)
         _pi = self._pipeline.findData(DEFAULT_PIPELINE)
         if _pi >= 0 and self._pipeline.model().item(_pi).isEnabled():
             self._pipeline.setCurrentIndex(_pi)
@@ -1513,10 +1518,14 @@ class CalibrationTab(QtWidgets.QWidget):
     #: line.
     _XTAL_NOTE_PREFIX = "Always applied, re-centred every E-M iteration: "
     _XTAL_CAP_PREFIX = "Hard cap on the whole run: "
+    #: Used where the selected pipeline never receives the windows, so
+    #: "always applied" would be flatly false.
+    _XTAL_UNUSED_PREFIX = "Set, but not used by this pipeline: "
 
     @property
     def _xtal_note_prefixes(self):
-        return (self._XTAL_CAP_PREFIX, self._XTAL_NOTE_PREFIX)
+        return (self._XTAL_CAP_PREFIX, self._XTAL_UNUSED_PREFIX,
+                self._XTAL_NOTE_PREFIX)
 
     def _update_limits_label(self, *_args):
         if self._limits_mode_is_dsp is False:
@@ -1535,31 +1544,41 @@ class CalibrationTab(QtWidgets.QWidget):
             tols = self._crystalline_tols() or {}
             eff = {**tol_defaults(), **tols}
             # _build_ui calls this before the Advanced group exists.
-            spin = getattr(self, "_n_iter", None)
-            n = max(1, spin.value() if spin is not None else 4)
-            capped = self._hard_cap.isChecked()
-            # Under a cap the backend was handed tol/n, so multiply back to
+            rounds = (self._recentre_rounds()
+                      if getattr(self, "_n_iter", None) is not None else 4)
+            div = self._cap_divisor()
+            capped = div > 1
+            # Under a cap the backend was handed tol/div, so multiply back to
             # quote the number the user typed -- the bound on the answer.
-            shown = {f: v * (n if capped else 1) for f, v in eff.items()}
+            shown = {f: v * div for f, v in eff.items()}
             bits = [f"{lbl} ±{shown[f] * sc:{fmt}}{(' ' + u) if u else ''}"
                     for f, lbl, sc, u, fmt in self._XTAL_NOTE_ROWS if f in shown]
-            if capped and n > 1 and "tolLsd" in eff:
-                drift = (f"  — the backend is handed 1/{n} of each, so "
-                         f"{n} re-centred iterations cannot carry the answer "
-                         f"past the cap (Lsd ±{eff['tolLsd'] * 1e-3:.4g} mm "
-                         f"per iteration).")
-            elif not capped and n > 1 and "tolLsd" in eff:
-                drift = (f"  — the window moves with the fit, so over "
-                         f"{n} iterations the answer can drift {n}× this "
-                         f"from the seed (Lsd ±"
-                         f"{eff['tolLsd'] * 1e-3 * n:.4g} mm); tick the cap "
-                         f"below to bound the run instead.")
+            lsd = eff.get("tolLsd")
+            if rounds == 0:
+                # The pipeline never sees these at all -- saying anything
+                # about an envelope would be inventing one.
+                drift = "  — it " + self._recentre_note() + "."
+            elif capped and lsd:
+                drift = (f"  — the backend is handed 1/{div} of each, so "
+                         f"this pipeline's {div} re-centring rounds cannot "
+                         f"carry the answer past the cap "
+                         f"(Lsd ±{lsd * 1e-3:.4g} mm per round).")
+            elif self._hard_cap.isChecked() and not capped:
+                drift = ("  — the cap cannot be honoured here: this "
+                         "pipeline " + self._recentre_note() + ".")
+            elif rounds and rounds > 1 and lsd:
+                drift = (f"  — the window moves with the fit, so over this "
+                         f"pipeline's {rounds} rounds the answer can drift "
+                         f"{rounds}× this from the seed (Lsd ±"
+                         f"{lsd * 1e-3 * rounds:.4g} mm); tick the cap below "
+                         f"to bound the run instead.")
             else:
                 drift = ""
             tail = ("" if tols else
                     "  — backend defaults; edit any to tighten or loosen")
-            prefix = (self._XTAL_CAP_PREFIX if capped
-                      else self._XTAL_NOTE_PREFIX)
+            prefix = (self._XTAL_UNUSED_PREFIX if rounds == 0 else
+                      self._XTAL_CAP_PREFIX if capped else
+                      self._XTAL_NOTE_PREFIX)
             self._limits_note.setText(prefix + "   ".join(bits) + tail + drift)
             return
         bounds, skipped = self._limit_bounds()
@@ -1615,8 +1634,7 @@ class CalibrationTab(QtWidgets.QWidget):
             "centre": self._limit_seed_values(),
             "tols": tols,
             "seeded": self._manual_seed_check.isChecked(),
-            "cap_n": (max(1, self._n_iter.value())
-                      if self._hard_cap.isChecked() else 1)}
+            "cap_n": self._cap_divisor()}
 
     def _crystalline_at_limit(self, result) -> set:
         """Which crystalline parameters came back sitting on their window.
@@ -1662,6 +1680,33 @@ class CalibrationTab(QtWidgets.QWidget):
                     out.add(slot)
         return out
 
+    def _recentre_note(self) -> str:
+        """Why this pipeline's round count is 0 or unknown, as a clause."""
+        from midas_gui.calib import _RECENTRE_ROUNDS_NOTE
+        return _RECENTRE_ROUNDS_NOTE.get(
+            self._pipeline.currentData(), "does not report its round count")
+
+    def _recentre_rounds(self):
+        """How many times the selected pipeline re-centres its ± windows.
+
+        ``0`` = the windows are not applied at all, ``None`` = the count is
+        not knowable before the run; in both cases a hard cap cannot be
+        promised. Delegated to :func:`calib.limit_recentre_rounds` because
+        only ``one_shot`` uses the GUI's own "E-M iters" box -- Four-stage
+        and Bayesian ignore it and run counts fixed in the backend's
+        signatures.
+        """
+        from midas_gui.calib import limit_recentre_rounds
+        return limit_recentre_rounds(self._pipeline.currentData(),
+                                      self._n_iter.value())
+
+    def _cap_divisor(self) -> int:
+        """The divisor the hard cap applies, or 1 when it cannot be honoured."""
+        if not self._hard_cap.isChecked():
+            return 1
+        rounds = self._recentre_rounds()
+        return rounds if rounds and rounds > 1 else 1
+
     def _crystalline_tols(self) -> Optional[dict]:
         """The ``tol*`` overrides for a crystalline run, or ``None`` when every
         row still sits at the backend default (which keeps ``run_pipeline`` on
@@ -1684,15 +1729,19 @@ class CalibrationTab(QtWidgets.QWidget):
             centre = seed.get(name, 0.0)
             lo, hi = limit_window(name, centre, spin.value(), combo.currentText())
             out[field] = abs(hi - lo) / 2.0
-        if out and self._hard_cap.isChecked():
-            # Each E-M iteration re-centres the window on that iteration's
-            # result, so the run's total excursion from the seed is at most
-            # n_iter windows. Handing the backend tol/n_iter makes the number
-            # on the card the bound on the ANSWER, which is what a
-            # mechanically constrained geometry needs: four Hydra panels share
-            # one frame, so a panel's Lsd cannot wander, and "±5 mm" has to
-            # mean 5 mm total rather than 5 mm per iteration.
-            n = max(1, self._n_iter.value())
+        n = self._cap_divisor()
+        if out and n > 1:
+            # Each round re-centres the window on that round's result, so the
+            # run's total excursion from the seed is at most `n` windows.
+            # Handing the backend tol/n makes the number on the card a bound
+            # on the ANSWER, which is what a mechanically constrained geometry
+            # needs: four Hydra panels share one frame, so a panel's Lsd
+            # cannot wander, and "±5 mm" has to mean 5 mm total.
+            #
+            # `n` is the PIPELINE's round count, not the "E-M iters" box.
+            # Dividing by the box was wrong for Four-stage, which ignores it
+            # and runs n_iter_stage1 + n_iter_stage2 = 5: a ±5 mm cap at 4
+            # iters handed over 1.25 mm and still permitted 6.25 mm.
             out = {k: v / n for k, v in out.items()}
         return None if tols_are_default(out) else out
 
@@ -2849,6 +2898,9 @@ class CalibrationTab(QtWidgets.QWidget):
         for item in self._ring_items:
             self._img_view._iv.removeItem(item)
         self._ring_items.clear()
+        # Before any item is added, so each one is stamped with the current
+        # roll as it goes in rather than needing a second pass.
+        self._sync_lab_rotation(ns)
         if ns is None:
             self._ring_status.setText("")
             return
@@ -2875,12 +2927,12 @@ class CalibrationTab(QtWidgets.QWidget):
                                    np.where(on, zs, np.nan),
                                    pen=pen, connect="finite")
             item.setVisible(visible)
-            self._img_view._iv.addItem(item); self._ring_items.append(item)
+            self._add_ring_item(item)
         bc = pg.ScatterPlotItem([ns.BC_y], [ns.BC_z], symbol="o", size=10,
                                 pen=pg.mkPen("yellow", width=2),
                                 brush=pg.mkBrush("red"))
         bc.setVisible(visible)
-        self._img_view._iv.addItem(bc); self._ring_items.append(bc)
+        self._add_ring_item(bc)
         self._ring_status.setText(
             f"{len(curves)} ring(s) from the seed — not yet fitted"
             + self._ring_model_note(ns))
@@ -2901,6 +2953,7 @@ class CalibrationTab(QtWidgets.QWidget):
         for item in self._ring_items:
             self._img_view._iv.removeItem(item)
         self._ring_items.clear()
+        self._sync_lab_rotation(result)
         max_r = rmax_corner_px(result.BC_y, result.BC_z, result.NrPixelsY, result.NrPixelsZ)
         radii = [r for r in _predict_ring_radii(result) if 0 < r <= max_r]
         visible = self._show_rings_check.isChecked()
@@ -2919,14 +2972,40 @@ class CalibrationTab(QtWidgets.QWidget):
             zs_clip = np.where(on, zs, np.nan)
             item = pg.PlotDataItem(ys_clip, zs_clip, pen=pen, connect="finite")
             item.setVisible(visible)
-            self._img_view._iv.addItem(item); self._ring_items.append(item)
+            self._add_ring_item(item)
         bc = pg.ScatterPlotItem([result.BC_y], [result.BC_z], symbol="o", size=10,
                                 pen=pg.mkPen("yellow", width=2), brush=pg.mkBrush("red"))
         bc.setVisible(visible)
-        self._img_view._iv.addItem(bc); self._ring_items.append(bc)
+        self._add_ring_item(bc)
         self._ring_status.setText(
             f"{len(curves)} ring(s) from the fitted geometry"
             + self._ring_model_note(result))
+
+    def _add_ring_item(self, item):
+        """Add a predicted-ring overlay, which is computed in panel pixel
+        coordinates (``helpers._tilt_project_YZ`` projects onto the detector
+        plane's own basis) and so must be carried into the lab frame with the
+        image. The lab-frame compass is the deliberate exception -- it points
+        at the hutch already."""
+        self._img_view._iv.addItem(item)
+        self._img_view.apply_lab_transform(item)
+        self._ring_items.append(item)
+
+    def _sync_lab_rotation(self, ns=None):
+        """Point the viewer at the roll the current geometry describes.
+
+        Prefers a landed fit over the seed card, matching which geometry the
+        rings are drawn from, so the picture and the overlay never disagree
+        about the mounting.
+        """
+        g = ns if ns is not None else (self._calib_result or self._seed_namespace())
+        if g is None:
+            self._img_view.set_lab_rotation(0.0, None, None)
+            return
+        self._img_view.set_lab_rotation(
+            float(getattr(g, "tx", 0.0) or 0.0),
+            float(getattr(g, "BC_y", 0.0) or 0.0),
+            float(getattr(g, "BC_z", 0.0) or 0.0))
 
     def _on_show_rings_toggled(self, visible):
         for item in self._ring_items:

@@ -132,14 +132,30 @@ class DataViewerTab(QtWidgets.QWidget):
         """Ordered MIDAS ImTransOpt codes from the Transforms checkboxes."""
         return self._geom_card.im_trans_codes()
 
+    def _sync_lab_rotation(self):
+        """Draw the frame as the detector is mounted, per the card's tx.
+
+        A display transform only — ``ImageViewer.set_lab_rotation`` keeps
+        every pick, ROI and saved geometry in panel (row, col) space, and is
+        identity for the unrolled detectors that are the normal case.
+        """
+        g = self.get_geometry() or {}
+        self._viewer.set_lab_rotation(float(g.get("tx") or 0.0),
+                                       g.get("BC_y"), g.get("BC_z"))
+
     def _radial_readout(self, col, row) -> str:
         """2θ / Q / d / η under the cursor — see
         ``widgets.ImageViewer.set_radial_readout_fn``.
 
         The displayed frame is already in the geometry's own orientation
         (every path here goes through ``set_raw_frame`` with these same
-        ``im_trans`` codes), so the hovered pixel needs no remapping. The
-        card carries no ``tx``; ``pixel_readout_text`` defaults it to 0.
+        ``im_trans`` codes), and ``(col, row)`` arrives in panel space even
+        when the picture is drawn rolled (``ImageViewer.panel_xy`` inverts
+        the lab rotation at the hover boundary), so the hovered pixel needs
+        no remapping here. ``tx`` rides along in the geometry dict and
+        ``pixel_readout_text`` uses it for η — without it the status bar
+        names an azimuth a full tx away from the cake axis the pixel is
+        actually binned into.
         """
         return pixel_readout_text(col, row, self.get_geometry())
 
@@ -409,6 +425,12 @@ class DataViewerTab(QtWidgets.QWidget):
         vtb.addWidget(self._lab_axes_on)
         self._geom_card.geometryChanged.connect(self._redraw_lab_axes_if_on)
         self._geom_card.geometryChanged.connect(self._on_profile_geometry_changed)
+        # tx is the panel's installation roll about the beam, so a non-zero
+        # one means the frame as stored is not the frame as mounted. Drawing
+        # it unrotated puts the picture in a different coordinate system from
+        # every number beside it.
+        self._geom_card.geometryChanged.connect(self._sync_lab_rotation)
+        self._sync_lab_rotation()
         self._viewer.originChanged.connect(self._redraw_lab_axes_if_on)
         # ROI popups are always-on-top (roi_tools.ROIStatsPopup) so they don't
         # get buried behind the main window; minimizing one tucks it into this

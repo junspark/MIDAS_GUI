@@ -174,6 +174,68 @@ def tols_are_default(tols: Optional[dict]) -> bool:
                for k, v in tols.items() if k in defaults)
 
 
+#: How many times a pipeline re-centres its ± windows, as a function of the
+#: GUI's "E-M iters". ``None`` where the count is not statically knowable and
+#: ``0`` where the windows are not applied at all. See
+#: :func:`limit_recentre_rounds`, which resolves these against the *installed*
+#: backend rather than trusting the numbers written here.
+_RECENTRE_ROUNDS_NOTE = {
+    "first_time":   "takes no bounds arguments at all",
+    "frozen_point": "is not yet handed the window settings",
+    "joint":        "seeds with a bounded loop and then runs an unbounded "
+                    "joint optimisation, so the total is not knowable up front",
+}
+
+
+def _sig_default(fn, name, fallback):
+    """One keyword default off an installed backend function's signature."""
+    import inspect
+    try:
+        p = inspect.signature(fn).parameters.get(name)
+        if p is not None and p.default is not inspect.Parameter.empty:
+            return int(p.default)
+    except (TypeError, ValueError):
+        pass
+    return fallback
+
+
+def limit_recentre_rounds(mode: str, n_iter: int) -> Optional[int]:
+    """How many times ``mode`` re-centres each ± window on the running fit.
+
+    The windows are a per-iteration trust region, not a bound on the answer:
+    ``pipelines/single.py`` rebuilds each parameter's bounds around that
+    iteration's result before the next LM call ("Bounds move with the
+    value"), so a fit that rails travels one full window per round and the
+    run's total excursion from the seed is ``rounds × tol``. This is the
+    ``rounds``.
+
+    It is emphatically **not** always the GUI's "E-M iters" box. Only
+    ``one_shot`` passes that through. ``four_stage`` and ``bayesian`` ignore
+    it entirely and run counts fixed in their own signatures, which is why
+    those are read off the installed functions here rather than hardcoded —
+    the same reasoning as :func:`tol_defaults`.
+
+    Returns ``0`` when the windows are not applied at all, and ``None`` when
+    the count cannot be known ahead of the run. Callers must not promise a
+    hard cap in either case; :data:`_RECENTRE_ROUNDS_NOTE` says why.
+    """
+    mode = str(mode or "")
+    if mode in ("first_time", "frozen_point"):
+        return 0
+    if mode == "joint":
+        return None
+    if mode == "one_shot":
+        return max(1, int(n_iter or 1))
+    if mode == "four_stage":
+        from midas_calibrate_v2.pipelines import autocalibrate_four_stage as f
+        return (_sig_default(f, "n_iter_stage1", 2)
+                + _sig_default(f, "n_iter_stage2", 3))
+    if mode == "bayesian":
+        from midas_calibrate_v2.pipelines import autocalibrate_bayesian as f
+        return _sig_default(f, "n_iter_map", 5)
+    return max(1, int(n_iter or 1))        # unknown mode: the honest guess
+
+
 def _refine_dict(refine: dict) -> dict:
     """Translate the GUI refine flags into a v1 ``Refine`` dict.
 
@@ -557,6 +619,56 @@ def tilt_seed_effective(mode: str, *, panel_layout=None, refine: Optional[dict] 
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────────
 
+def _first_time_max_ring_rad(manual: Optional[dict], NY, NZ) -> Optional[float]:
+    """``max_ring_rad_px`` for ``first_time_calibrate``, or ``None`` to leave
+    the backend's own default alone.
+
+    That default is the beam-centre-to-*nearest-edge* distance
+    (``pipelines/first_time.py``: ``min(bc_y, ny-bc_y, bc_z, nz-bc_z) * 0.95``),
+    which silently assumes the beam lands **on** the detector. A panel offset
+    from the beam — the normal arrangement when the rings of interest are
+    corner arcs, and every Hydra panel — puts the centre outside the frame, so
+    one of those terms is negative and ``CalibrationParams.validate()`` raises
+    ``ValueError: MaxRingRad must be positive (px)`` before the fit begins.
+    Measured at 1-ID: BC (2384.7, 2182.7) on a 2048x2048 frame gives
+    ``2048 - 2384.7 = -336.7``.
+
+    Substituted only when the backend's default would be unusable, so every
+    on-detector geometry keeps the value it has always had. The replacement is
+    the BC-to-farthest-*corner* distance, which is the only meaningful maximum
+    once the centre is off-frame and is already what the integration path uses
+    for an automatic RMax.
+
+    A centre just *inside* an edge is the same hazard without the exception —
+    a tiny positive window that quietly searches almost no rings — so that is
+    warned about rather than overridden.
+    """
+    if not manual or "BC_y" not in manual or "BC_z" not in manual:
+        return None          # auto-seeded: the backend picks its own BC too
+    try:
+        bc_y, bc_z = float(manual["BC_y"]), float(manual["BC_z"])
+        ny, nz = int(NY or 0), int(NZ or 0)
+    except (TypeError, ValueError):
+        return None
+    if ny <= 0 or nz <= 0:
+        return None
+    backend_default = min(bc_y, ny - bc_y, bc_z, nz - bc_z) * 0.95
+    if backend_default > 0:
+        if backend_default < 0.1 * max(ny, nz):
+            print(f"[calib] NOTE: the beam centre is {backend_default / 0.95:.0f} px "
+                  f"from the nearest detector edge, so 'First-time' will search "
+                  f"rings only out to {backend_default:.0f} px. If the rings you "
+                  f"need lie beyond that, use One-shot or Four-stage.")
+        return None
+    from midas_gui.helpers import rmax_corner_px
+    rr = rmax_corner_px(bc_y, bc_z, ny, nz)
+    print(f"[calib] NOTE: beam centre ({bc_y:.1f}, {bc_z:.1f}) lies outside the "
+          f"{ny}x{nz} frame, so 'First-time' default MaxRingRad "
+          f"(BC-to-nearest-edge) is negative. Using BC-to-farthest-corner "
+          f"= {rr:.0f} px instead.")
+    return rr
+
+
 def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
     """Run the requested calibration pipeline.
 
@@ -743,6 +855,9 @@ def run_pipeline(mode: str, image: np.ndarray, dark, cfg: dict):
             # an explicit panel-aware spec) — it just needs the layout passed.
             panel_layout=panel_layout,
         )
+        rr = _first_time_max_ring_rad(manual, NY, NZ)
+        if rr is not None:
+            kwargs["max_ring_rad_px"] = rr
         # Native im_trans since midas_calibrate_v2 0.15.0: the backend flips
         # image, dark and panel_mask together and re-derives n_pixels_y/z from
         # the transformed shape, so this branch hands over the RAW frame and

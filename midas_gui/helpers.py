@@ -1711,23 +1711,36 @@ def _pixel_to_two_theta_deg(Y_px, Z_px, Lsd_um: float, bc_y: float, bc_z: float,
 
 
 def pixel_eta_deg(Y_px, Z_px, bc_y: float, bc_z: float,
-                  pxY_um: float, pxZ_um: float):
+                  pxY_um: float, pxZ_um: float, tx: float = 0.0):
     """Azimuth η (degrees) of pixel(s) about the beam centre.
 
-    Matches the backend's ``pixel_to_REta`` exactly — ``atan2(-Yc, Zc)``
-    with ``Yc = (bc_y - Y) * pxY`` and ``Zc = (Z - bc_z) * pxZ`` — so η = 0
-    is straight **up** (+Z), not along +Y, and η increases towards +Y. The
-    same convention the η spokes are drawn in (see the note in
-    ``draw_bin_grid``); swapping the arguments puts every value 90° out.
+    Matches the backend's ``pixel_to_REta`` — ``atan2(-Yc, Zc)`` with
+    ``Yc = (bc_y - Y) * pxY`` and ``Zc = (Z - bc_z) * pxZ`` — so η = 0 is
+    straight **up** (+Z), not along +Y, and η increases towards +Y. The same
+    convention the η spokes are drawn in (see the note in ``draw_bin_grid``);
+    swapping the arguments puts every value 90° out.
 
-    Deliberately flat (no tilt): η names which spoke of the cake a pixel
-    falls in, and the cake's own η binning is this detector-plane angle.
-    2θ is the quantity that must be tilt-corrected, and
+    ``tx`` is the panel's installation roll about the beam. It is a pure
+    offset here: MEASURED against ``midas_calibrate_v2.forward.geometry.
+    pixel_to_REta`` at five pixels and three rolls, the backend's η is
+    exactly this detector-plane angle plus tx, wrapped to (-180, 180].
+    It defaults to 0 because η was flat for a long time and most detectors
+    are unrolled, but a rolled panel binned without it is reported a full tx
+    away from the cake axis it actually lands in — at 1-ID with tx=120° the
+    status bar read η = -120.28° for a pixel the integration puts at
+    -0.28°.
+
+    Still deliberately flat in ty/tz: η names which spoke of the cake a pixel
+    falls in, and the cake's η binning is this in-plane angle. 2θ is the
+    quantity that must be tilt-corrected, and
     :func:`_pixel_to_two_theta_deg` is where that happens.
     """
     Yc = (bc_y - np.asarray(Y_px, dtype=float)) * pxY_um
     Zc = (np.asarray(Z_px, dtype=float) - bc_z) * pxZ_um
-    return np.degrees(np.arctan2(-Yc, Zc))
+    eta = np.degrees(np.arctan2(-Yc, Zc))
+    if tx:
+        eta = (eta + float(tx) + 180.0) % 360.0 - 180.0
+    return eta
 
 
 def im_trans_map_point(col, row, shape, codes):
@@ -1861,7 +1874,8 @@ def pixel_readout_text(col, row, geom: dict) -> str:
         float(geom.get("tx") or 0.0), float(geom.get("ty") or 0.0),
         float(geom.get("tz") or 0.0), float(pxY), float(pxZ)))
     eta = float(pixel_eta_deg(col, row, float(bc_y), float(bc_z),
-                              float(pxY), float(pxZ)))
+                              float(pxY), float(pxZ),
+                              float(geom.get("tx") or 0.0)))
     parts = [f"2θ = {_fmt_g(tt, 4)}°"]
     wl = geom.get("wavelength_A")
     if wl and float(wl) > 0:

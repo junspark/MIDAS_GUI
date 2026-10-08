@@ -141,6 +141,11 @@ class ImageViewer(QtWidgets.QWidget):
     #: be rebuilt on this; everything anchored to (row, col) needs nothing.
     originChanged = QtCore.pyqtSignal(str)
 
+    #: The lab-frame rotation changed. Overlays the owner draws itself (the
+    #: predicted rings, the lab-frame compass) must be re-transformed or
+    #: rebuilt on this; the viewer re-transforms its own.
+    labRotationChanged = QtCore.pyqtSignal()
+
     def __init__(self, parent=None, title=""):
         super().__init__(parent)
         pg.setConfigOptions(background="k", foreground="w")
@@ -222,6 +227,9 @@ class ImageViewer(QtWidgets.QWidget):
             "font-size:12px; padding:2px 6px; border-top:1px solid #444;")
         layout.addWidget(self._coord_bar)
 
+        #: Panel-pixel -> lab-frame display map, or None for "unrolled".
+        #: See :meth:`set_lab_rotation`.
+        self._lab_tf = None
         self._data: Optional[np.ndarray] = None
         # Last cursor position, in image (col, row) coordinates, or None when
         # the cursor is not over this viewer. Remembered so the readout can be
@@ -293,6 +301,89 @@ class ImageViewer(QtWidgets.QWidget):
         frame = _apply_im_trans(raw_frame, codes) if codes else raw_frame
         self.set_image(frame, autorange=autorange, reset_levels=reset_levels)
         return frame
+
+    def set_lab_rotation(self, tx_deg: float, bc_y: float, bc_z: float) -> None:
+        """Draw the frame as the detector is actually mounted.
+
+        ``tx`` is the panel's installation azimuth about the beam, not a small
+        tilt, so a rolled panel's image is a rolled picture of the lab. Left
+        unrotated, the display disagrees with the coordinate system every
+        other number on screen is quoted in.
+
+        A display transform only, in the spirit of :meth:`set_origin`:
+        **nothing stored, emitted or fitted leaves panel (row, col) space.**
+        The rotation goes on the ``ImageItem``, which buys two things for
+        free. ``pyqtgraph``'s ROI machinery already routes through that item
+        (``roi.getArrayRegion(data.T, imgitem)``, and ``_raster_roi_mask``'s
+        ``imgitem.mapFromScene(...)``), so box/line ROIs keep working with no
+        changes at all; and ``mapFromView`` gives an exact inverse for the
+        pick/readout boundary rather than a hand-rolled one.
+
+        The map is MEASURED against ``helpers._tilt_project_YZ`` rather than
+        derived on paper (8 azimuths, max error 2e-13 px)::
+
+            lab_Y = BC_y + dY*cos(tx) + dZ*sin(tx)
+            lab_Z = BC_z - dY*sin(tx) + dZ*cos(tx)      d = panel - BC
+
+        A whole turn is identity, so an unrolled detector -- every detector
+        that has ever worked here -- gets ``None`` and a byte-identical path.
+        """
+        tf = None
+        if bc_y is not None and bc_z is not None:
+            try:
+                a = math.radians(float(tx_deg) % 360.0)
+            except (TypeError, ValueError):
+                a = 0.0
+            if abs(a) > 1e-12 and abs(a - 2 * math.pi) > 1e-12:
+                c, sn = math.cos(a), math.sin(a)
+                by, bz = float(bc_y), float(bc_z)
+                tf = QtGui.QTransform(c, -sn, sn, c,
+                                       by - c * by - sn * bz,
+                                       bz + sn * by - c * bz)
+        if tf == self._lab_tf:
+            return
+        self._lab_tf = tf
+        for it in (self._iv.getImageItem(), self._overlay):
+            self.apply_lab_transform(it)
+        self.labRotationChanged.emit()
+
+    def lab_transform(self):
+        """The panel->lab display map, or ``None`` when the frame is drawn
+        unrotated. Owners that place their own overlays in panel pixel
+        coordinates pass each one to :meth:`apply_lab_transform`."""
+        return self._lab_tf
+
+    def apply_lab_transform(self, item) -> None:
+        """Put ``item`` -- positioned in panel pixel coordinates -- into the
+        lab frame alongside the image.
+
+        Needed by anything added straight to the ViewBox rather than through
+        the ImageItem. NOT for the lab-frame compass, which already points at
+        the hutch, nor for the cursor crosshairs, which track the pointer in
+        view space.
+        """
+        if item is None:
+            return
+        try:
+            item.setTransform(self._lab_tf if self._lab_tf is not None
+                              else QtGui.QTransform())
+        except Exception:
+            pass    # not every pg item accepts one; never take the view down
+
+    def panel_xy(self, view_pt):
+        """A point in view coordinates as panel ``(col, row)``.
+
+        The one inverse in the codebase: every pick and the pixel readout
+        come through here, so everything downstream keeps working in the
+        frame the geometry is fitted and saved in.
+        """
+        if self._lab_tf is not None:
+            try:
+                p = self._iv.getImageItem().mapFromView(view_pt)
+                return p.x(), p.y()
+            except Exception:
+                pass
+        return view_pt.x(), view_pt.y()
 
     def set_origin(self, origin: str) -> None:
         """Choose which screen corner pixel (0,0) is drawn in.
@@ -494,9 +585,11 @@ class ImageViewer(QtWidgets.QWidget):
         vb = self._iv.getView().getViewBox()
         if self._iv.getView().sceneBoundingRect().contains(pos):
             mp = vb.mapSceneToView(pos)
-            x, y = mp.x(), mp.y()
-            self._vl.setPos(x); self._hl.setPos(y)
-            self._hover_xy = (x, y)
+            # The crosshair follows the pointer, so it stays in view space;
+            # the readout indexes the array, so it must come back to panel
+            # space. Identical when the frame is drawn unrotated.
+            self._vl.setPos(mp.x()); self._hl.setPos(mp.y())
+            self._hover_xy = self.panel_xy(mp)
             self._refresh_coord_bar()
 
     def leaveEvent(self, ev):
@@ -648,6 +741,9 @@ class PickableImageViewer(ImageViewer):
         self._ring_fit_item    = None
         self._ring_fit_center  = None
         self._bc_click_item    = None
+        # Markers are placed in panel pixels and carried into the lab frame
+        # by the shared transform, so they must be re-stamped when it moves.
+        self.labRotationChanged.connect(self._retransform_pick_items)
         self._dsp_pts:         list = []
         #: One entry per pick, each a tuple of the plot items drawn for it
         #: (see _add_dspacing_point) — not a flat item list, so undo/clear
@@ -782,7 +878,10 @@ class PickableImageViewer(ImageViewer):
             return
         vb  = self._iv.getView().getViewBox()
         pos = vb.mapSceneToView(event.scenePos())
-        x, y = pos.x(), pos.y()
+        # Back to panel pixels before anything downstream sees it: the marker
+        # items are placed in panel space and carry the lab transform, and
+        # bcPicked/ringFitBC feed a fit that works in panel space throughout.
+        x, y = self.panel_xy(pos)
         if self._pick_mode == self.PICK_BC:
             self._set_bc_marker(x, y)
             self.bcPicked.emit(x, y)
@@ -792,13 +891,27 @@ class PickableImageViewer(ImageViewer):
         elif self._pick_mode == self.PICK_DSPACING:
             self._add_dspacing_point(x, y)
 
+    def _add_panel_item(self, item):
+        """Add an overlay positioned in panel pixel coordinates."""
+        self._iv.addItem(item)
+        self.apply_lab_transform(item)
+        return item
+
+    def _retransform_pick_items(self):
+        for it in (self._bc_click_item, self._ring_fit_item,
+                   self._ring_fit_center, *self._ring_pt_items):
+            self.apply_lab_transform(it)
+        for items in self._dsp_pt_items:
+            for it in items:
+                self.apply_lab_transform(it)
+
     def _set_bc_marker(self, x: float, y: float):
         if self._bc_click_item is not None:
             self._iv.removeItem(self._bc_click_item)
         self._bc_click_item = pg.ScatterPlotItem(
             [x], [y], symbol="+", size=20,
             pen=pg.mkPen("#00aaff", width=2.5), brush=pg.mkBrush(0, 0, 0, 0))
-        self._iv.addItem(self._bc_click_item)
+        self._add_panel_item(self._bc_click_item)
         self._clear_ring_btn.setEnabled(True)
 
     def _add_ring_point(self, x: float, y: float):
@@ -807,7 +920,7 @@ class PickableImageViewer(ImageViewer):
             [x], [y], symbol="o", size=10,
             pen=pg.mkPen("#2a7fd4", width=1.5),
             brush=pg.mkBrush(42, 127, 212, 180))
-        self._iv.addItem(dot)
+        self._add_panel_item(dot)
         self._ring_pt_items.append(dot)
         self._undo_btn.setEnabled(True)
         self._clear_ring_btn.setEnabled(True)
@@ -871,7 +984,7 @@ class PickableImageViewer(ImageViewer):
                                   pen=pg.mkPen(color, width=1.5), brush=None)
         items = (halo, core)
         for it in items:
-            self._iv.addItem(it)
+            self._add_panel_item(it)
         self._dsp_pt_items.append(items)
         self._undo_btn.setEnabled(True)
         self._clear_ring_btn.setEnabled(True)
@@ -960,13 +1073,13 @@ class PickableImageViewer(ImageViewer):
         if self._ring_fit_item is not None:
             self._iv.removeItem(self._ring_fit_item)
         self._ring_fit_item = pg.PlotDataItem(xs, ys, pen=pen)
-        self._iv.addItem(self._ring_fit_item)
+        self._add_panel_item(self._ring_fit_item)
         if self._ring_fit_center is not None:
             self._iv.removeItem(self._ring_fit_center)
         self._ring_fit_center = pg.ScatterPlotItem(
             [cx], [cy], symbol="+", size=18,
             pen=pg.mkPen("#2a7fd4", width=2.5), brush=pg.mkBrush(0, 0, 0, 0))
-        self._iv.addItem(self._ring_fit_center)
+        self._add_panel_item(self._ring_fit_center)
         self._pick_status.setText(
             f"{n} pts | fit: BC=({cx:.1f}, {cy:.1f})  R={r:.1f} px → seed updated")
         self.ringFitBC.emit(cx, cy, r)

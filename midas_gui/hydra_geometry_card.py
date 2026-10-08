@@ -837,6 +837,12 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._bcz.valueChanged.connect(self._on_bc_changed)
         self._ty.valueChanged.connect(self._on_bc_changed)
         self._tz.valueChanged.connect(self._on_bc_changed)
+        # tx was added to this card without this line, so it fed
+        # get_geometry() while notifying nobody: editing the roll left the
+        # pixel readout's η, the lab-frame compass, the radial profile and
+        # (once the viewer gained one) the lab-frame image rotation all
+        # sitting on the previous value until some *other* field was touched.
+        self._tx.valueChanged.connect(self._on_bc_changed)
 
     # ── Materials list ───────────────────────────────────────────
 

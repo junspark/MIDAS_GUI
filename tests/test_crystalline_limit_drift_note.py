@@ -185,7 +185,7 @@ def test_the_capped_note_quotes_the_cap_not_the_divided_window(tab):
     txt = tab._limits_note.text()
     assert txt.startswith("Hard cap on the whole run: ")
     assert "Lsd ±5 mm" in txt
-    assert "±1.25 mm per iteration" in txt
+    assert "±1.25 mm per round" in txt
     assert "can drift" not in txt          # the uncapped warning must be gone
 
 
@@ -228,3 +228,80 @@ def test_the_cap_survives_a_project_round_trip(tab, app):
     assert not other._hard_cap.isChecked()
     other.set_state(state)
     assert other._hard_cap.isChecked()
+
+
+# -- the divisor is the PIPELINE's round count, not the spin box ------------
+
+def _mode(tab, key):
+    tab._pipeline.setCurrentIndex(tab._pipeline.findData(key))
+
+
+def test_four_stage_ignores_the_em_iters_box(tab):
+    """The defect this file's cap shipped with.
+
+    autocalibrate_four_stage does not take n_iter at all -- it runs
+    n_iter_stage1 then n_iter_stage2 from its own signature. Dividing by the
+    GUI's box let a +-5 mm cap permit 6.25 mm, which is how a beamline run
+    walked BC 307 px past a +-200 px window.
+    """
+    from midas_gui.calib import limit_recentre_rounds
+    assert limit_recentre_rounds("one_shot", 4) == 4      # honours the box
+    assert limit_recentre_rounds("one_shot", 9) == 9
+    assert limit_recentre_rounds("four_stage", 4) == 5    # ...and ignores it
+    assert limit_recentre_rounds("four_stage", 9) == 5
+
+    cb, spin, combo = tab._limit_widgets["Lsd"]
+    combo.setCurrentText("mm"); spin.setValue(5.0); cb.setChecked(True)
+    tab._n_iter.setValue(4)
+    tab._hard_cap.setChecked(True)
+
+    _mode(tab, "one_shot")
+    assert _tol_lsd(tab) == pytest.approx(1250.0)         # 5 mm / 4
+    _mode(tab, "four_stage")
+    assert _tol_lsd(tab) == pytest.approx(1000.0)         # 5 mm / 5
+    # Either way the product is the cap the user asked for -- that is the
+    # whole invariant.
+    assert _tol_lsd(tab) * tab._recentre_rounds() == pytest.approx(5000.0)
+
+
+def test_a_cap_is_not_promised_where_it_cannot_be_kept(tab):
+    """first_time takes no bounds at all and joint's round count is not
+    knowable up front. Dividing there would hand the backend a tighter
+    window while still claiming a bound it cannot enforce."""
+    cb, spin, combo = tab._limit_widgets["Lsd"]
+    combo.setCurrentText("mm"); spin.setValue(5.0); cb.setChecked(True)
+    tab._hard_cap.setChecked(True)
+
+    for key in ("first_time", "joint"):
+        _mode(tab, key)
+        assert tab._cap_divisor() == 1, key
+        assert _tol_lsd(tab) == pytest.approx(5000.0), key
+        assert "cannot be honoured" in tab._limits_note.text() \
+            or "not used by this pipeline" in tab._limits_note.text(), key
+
+
+def test_a_pipeline_that_ignores_the_windows_says_so(tab):
+    """"Always applied" is false for first_time/frozen_point, and a reader
+    who believes it tightens a window that was never consulted."""
+    for key in ("first_time", "frozen_point"):
+        _mode(tab, key)
+        txt = tab._limits_note.text()
+        assert txt.startswith("Set, but not used by this pipeline: "), key
+        assert "Always applied" not in txt, key
+        assert tab._recentre_rounds() == 0, key
+
+    _mode(tab, "one_shot")
+    assert tab._limits_note.text().startswith("Always applied")
+
+
+def test_switching_pipeline_refreshes_the_note(tab):
+    """The round count is in the text, so the note goes stale on a switch --
+    and the pipeline combo is three cards above the limits card, so a stale
+    number there is not something you would notice."""
+    cb, spin, combo = tab._limit_widgets["Lsd"]
+    combo.setCurrentText("mm"); spin.setValue(5.0); cb.setChecked(True)
+    tab._n_iter.setValue(4)
+    _mode(tab, "one_shot")
+    assert "4 rounds" in tab._limits_note.text()
+    _mode(tab, "four_stage")
+    assert "5 rounds" in tab._limits_note.text()
