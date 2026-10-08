@@ -142,3 +142,60 @@ def test_cancelling_the_dialog_changes_nothing(page, monkeypatch):
                         staticmethod(lambda *a, **k: ([], "")))
     page._load_four_calibrations()
     assert touched == [] and page._load4_lbl.text() == ""
+
+
+def test_one_pick_fills_in_its_siblings(page, tmp_path, monkeypatch):
+    """Reported: "I loaded 4x calibration files ... and I still see only 1x
+    set of calibration." The button promises four and then hands over a
+    multi-select dialog, so picking one file and pressing Open loaded one
+    panel. Panel calibrations are written as a set and named alike, so the
+    other three are usually sitting right next to the one that was clicked.
+    """
+    for n in (1, 2, 3, 4):
+        (tmp_path / f"s_00001.ge{n}.instr.txt").write_text("Lsd 1\n")
+    seen = {}
+    for n in (1, 2, 3, 4):
+        monkeypatch.setattr(page._cards[f"ge{n}"], "set_calib_path",
+                            lambda p, k=n: seen.__setitem__(k, p))
+    monkeypatch.setattr(
+        "PyQt5.QtWidgets.QFileDialog.getOpenFileNames",
+        staticmethod(lambda *a, **k: (
+            [str(tmp_path / "s_00001.ge1.instr.txt")], "")))
+    page._load_four_calibrations()
+    assert sorted(seen) == [1, 2, 3, 4]
+    assert seen[3].endswith("ge3.instr.txt")
+    # Says which ones arrived without being clicked.
+    assert "matched by name: ge2, ge3, ge4" in page._load4_lbl.text()
+
+
+def test_an_explicit_pick_is_never_overridden(page, tmp_path, monkeypatch):
+    """Filling in gaps must not second-guess a file the user chose."""
+    for n in (1, 2):
+        (tmp_path / f"s_00001.ge{n}.instr.txt").write_text("Lsd 1\n")
+    (tmp_path / "other.ge2.instr.txt").write_text("Lsd 2\n")
+    seen = {}
+    for n in (1, 2, 3, 4):
+        monkeypatch.setattr(page._cards[f"ge{n}"], "set_calib_path",
+                            lambda p, k=n: seen.__setitem__(k, p))
+    monkeypatch.setattr(
+        "PyQt5.QtWidgets.QFileDialog.getOpenFileNames",
+        staticmethod(lambda *a, **k: (
+            [str(tmp_path / "s_00001.ge1.instr.txt"),
+             str(tmp_path / "other.ge2.instr.txt")], "")))
+    page._load_four_calibrations()
+    assert seen[2].endswith("other.ge2.instr.txt"), "the chosen file wins"
+
+
+def test_nothing_is_invented_when_there_are_no_siblings(page, tmp_path, monkeypatch):
+    (tmp_path / "lonely.ge1.instr.txt").write_text("Lsd 1\n")
+    seen = {}
+    for n in (1, 2, 3, 4):
+        monkeypatch.setattr(page._cards[f"ge{n}"], "set_calib_path",
+                            lambda p, k=n: seen.__setitem__(k, p))
+    monkeypatch.setattr(
+        "PyQt5.QtWidgets.QFileDialog.getOpenFileNames",
+        staticmethod(lambda *a, **k: (
+            [str(tmp_path / "lonely.ge1.instr.txt")], "")))
+    page._load_four_calibrations()
+    assert sorted(seen) == [1]
+    assert "unchanged: ge2, ge3, ge4" in page._load4_lbl.text()

@@ -114,7 +114,22 @@ _SCALERS_PREFIX = "instrument/Scalers/"
 #: only as a fallback — and deliberately NOT a prefix match: "1-ID-E" ends in
 #: E but is a different beamline entirely, and reading its scalers as 20-ID's
 #: would invent a monitor rather than report none.
-_PROFILE_HUTCH = {"20-id-e": "E", "20-id-d": "D"}
+#: Profile name -> the ``instrument/Scalers/<letter>`` group that profile's
+#: station writes into. Only the hutch LETTER is needed: ``scaler_channels``
+#: then reads whichever channels the file actually carries, so a station with
+#: different hardware (1-ID-E records IC1/IC2/IC3 where 20-ID-E records
+#: US_IC/DS_IC) needs no entry of its own beyond this.
+#:
+#: 1-ID-E was missing, and the cost was silent: ``resolve_hutch`` returned
+#: None, ``scaler_channels`` returned nothing, no rows were built and **no
+#: beam-monitor CSV was written at all** for anyone on that profile. The run
+#: reported success and simply had no sidecar. Confirmed against 2026-10
+#: 1-ID files, which carry instrument/Scalers/{B,C,E} with IC1-IC3 under E.
+#:
+#: Stations are added here only once their scaler group has been seen in a
+#: real file -- 17-BM has no entry because nobody has checked, and guessing
+#: a letter would write a CSV of the wrong channels rather than none.
+_PROFILE_HUTCH = {"20-id-e": "E", "20-id-d": "D", "1-id-e": "E"}
 
 
 def resolve_hutch(path, profile: Optional[str] = None) -> Optional[str]:

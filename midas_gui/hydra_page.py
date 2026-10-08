@@ -304,11 +304,15 @@ class HydraViewerPage(QtWidgets.QWidget):
                 clashes.append(f"ge{n}")
             else:
                 chosen[n] = p
+        found_by_name = self._fill_in_sibling_calibrations(chosen)
         for n, p in sorted(chosen.items()):
             card = self._cards.get(f"ge{n}")
             if card is not None:
                 card.set_calib_path(p)
         bits = []
+        if found_by_name:
+            bits.append("matched by name: "
+                        + ", ".join(f"ge{n}" for n in sorted(found_by_name)))
         if chosen:
             bits.append("loaded " + ", ".join(f"ge{n}" for n in sorted(chosen)))
         if unmatched:
@@ -320,6 +324,38 @@ class HydraViewerPage(QtWidgets.QWidget):
         if missing and chosen:
             bits.append("unchanged: " + ", ".join(missing))
         self._load4_lbl.setText("  ·  ".join(bits))
+
+    def _fill_in_sibling_calibrations(self, chosen: dict) -> set:
+        """Complete a partial pick from the files sitting next to it.
+
+        The button promises four calibrations and then hands over a
+        multi-select dialog, so picking one file and pressing Open loads one
+        panel -- reported as "I loaded 4x calibration files and I still see
+        only 1x set". Panel calibrations are written as a set and named
+        alike (``..._ge1.instr.txt`` beside ``..._ge2.instr.txt``), so the
+        other three are usually right there.
+
+        Only ever fills panels the pick did not cover, and only from a file
+        that actually exists on disk, so an explicit choice is never
+        overridden and nothing is invented. Returns the panels filled in, to
+        be named in the summary -- a calibration that arrived without being
+        clicked should say so.
+        """
+        if not chosen:
+            return set()
+        filled = set()
+        for n in (1, 2, 3, 4):
+            if n in chosen:
+                continue
+            for have_n, have_p in sorted(chosen.items()):
+                cand = self._PANEL_IN_NAME.sub(
+                    lambda m, _n=n: m.group(0)[:-len(m.group(1))] + str(_n),
+                    str(have_p))
+                if cand != str(have_p) and Path(cand).exists():
+                    chosen[n] = cand
+                    filled.add(n)
+                    break
+        return filled
 
     def _default_save_path(self, key: str, suffix: str) -> str:
         """``<expid>_<data stem>_<panel><suffix>``, beside the data.

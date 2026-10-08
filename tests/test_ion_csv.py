@@ -42,14 +42,25 @@ def test_hutch_is_read_from_the_path(path, want):
 
 @pytest.mark.parametrize("profile,want", [
     ("20-ID-E", "E"), ("20-id-e", "E"), ("20-ID-D", "D"),
-    ("1-ID-E", None),       # a different beamline that merely ends in E
+    # 1-ID-E was asserted to be None here, on the reasoning that it is "a
+    # different beamline that merely ends in E". That was a guess about a
+    # station nobody had looked at, and it was wrong: 2026-10 1-ID files
+    # carry instrument/Scalers/{B,C,E}, with IC1-IC3 under E. The cost of
+    # the guess was total and silent -- no hutch meant no channels, no rows,
+    # and no beam-monitor CSV written at all for anyone on that profile,
+    # while the run still reported success.
+    ("1-ID-E", "E"), ("1-id-e", "E"),
     ("17-BM", None), ("Default", None), ("", None), (None, None),
 ])
 def test_the_profile_is_the_fallback_when_the_path_is_silent(profile, want):
     """Reported from the beamline: an Eiger run lives under eiger2/, which
     matches neither varexE nor varexD, so a file carrying perfectly good
     Scalers/E/US_IC data silently produced no CSV. The header already says
-    which station the user is on."""
+    which station the user is on.
+
+    17-BM stays None deliberately: its scaler group has not been seen in a
+    real file, and a CSV of the wrong channels is worse than no CSV.
+    """
     assert IC.resolve_hutch("/mnt/s20a/brown_sep26/eiger2/x.h5", profile) == want
 
 
@@ -324,3 +335,47 @@ def test_the_column_is_written_out_when_present():
     assert "subtracted_dark" in headers
     # Index columns keep their fixed order; this one trails them.
     assert headers.index("subtracted_dark") < headers.index("US_IC")
+
+
+# ── which station a profile means ────────────────────────────────────────
+
+def test_the_beamlines_in_use_resolve_to_a_scaler_group():
+    """A profile that maps to nothing writes NO CSV at all, silently: the
+    run reports success and simply has no sidecar.
+
+    1-ID-E was missing for exactly that reason and nobody noticed, because
+    nothing fails -- resolve_hutch returns None, scaler_channels returns [],
+    rows_from_tree builds nothing, and the writer has nothing to write.
+    Confirmed against 2026-10 1-ID files, which carry
+    instrument/Scalers/{B,C,E} with IC1-IC3 under E.
+    """
+    for profile in ("1-ID-E", "20-ID-E"):
+        assert IC.resolve_hutch("", profile) == "E", profile
+    assert IC.resolve_hutch("", "20-ID-D") == "D"
+    # Case and surrounding whitespace are how it arrives from the header.
+    assert IC.resolve_hutch("", "  1-id-e  ") == "E"
+
+
+def test_an_unknown_profile_still_yields_nothing_rather_than_a_guess():
+    """Writing a CSV of the wrong channels would be worse than writing
+    none, so a station nobody has checked gets no entry."""
+    assert IC.resolve_hutch("", "17-BM") is None
+    assert IC.resolve_hutch("", "") is None
+    assert IC.resolve_hutch("", None) is None
+
+
+def test_the_path_still_outranks_the_profile():
+    """A varexD folder names the station outright; the profile is only the
+    fallback for layouts that say nothing."""
+    assert IC.resolve_hutch("/data/varexD/x.h5", "1-ID-E") == "D"
+
+
+def test_channels_come_from_the_file_not_from_a_mapping():
+    """Which is why one letter per profile is enough: 1-ID-E records
+    IC1/IC2/IC3 where 20-ID-E records US_IC, and neither needs its own
+    channel list."""
+    tree = {"instrument/Scalers/E/IC1": np.arange(8.0),
+            "instrument/Scalers/E/IC2": np.arange(8.0),
+            "instrument/Scalers/E/IC1_sensitivity": np.array([1.0])}
+    got = [p.rsplit("/", 1)[-1] for p in IC.scaler_channels(tree, "E")]
+    assert got == ["IC1", "IC2"], "sensitivities are scalars, not columns"

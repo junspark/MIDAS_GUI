@@ -23,6 +23,19 @@ N_RAW = 12
 DARK_LEVEL = 10.0
 
 
+@pytest.fixture(autouse=True)
+def _pinned_profile(monkeypatch):
+    """These tests assert on the beam-monitor CSV, which only exists when the
+    active profile resolves to a scaler group. They used to inherit whatever
+    profile the machine happened to be set to, so switching the GUI to a
+    station that was not in ion_csv._PROFILE_HUTCH turned all three CSV tests
+    red with no code change -- which is how a real bug (1-ID-E mapping to
+    nothing, so no CSV was ever written) spent time being mistaken for flaky
+    tests. Pin it so these fail for CSV reasons only."""
+    from midas_gui import settings
+    monkeypatch.setattr(settings, "active_profile", lambda: "20-ID-E")
+
+
 @pytest.fixture(scope="module")
 def app():
     QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
