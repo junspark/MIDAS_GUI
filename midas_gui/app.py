@@ -364,12 +364,6 @@ class MainWindow(QtWidgets.QMainWindow):
             # fields — either Calibrate's own "→ Send to Data Viewer", or the
             # Viewer's "← Get" pulling the same geometry on demand.
             self._cal_tab.sendGeometryToViewer.connect(self._view_tab.set_geometry)
-            # Data Viewer -> Batch Integrate, skipping Calibrate entirely.
-            # Plenty of runs only need a rough geometry (nominal Lsd, picked
-            # beam centre) and the only route to the integrator was to save a
-            # paramstest and load it back, or to run a fit nobody wanted.
-            self._view_tab.pushGeometryToBatch.connect(
-                self._use_viewer_geometry_in_batch)
             self._view_tab.pullGeometry.connect(self._pull_geometry_from_calibrate)
             # Same hand-off, Hydra mode: per-panel geometry, keyed by panel number.
             self._cal_tab.pullHydraFromViewer.connect(
@@ -414,31 +408,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "The currently-open FAIR provenance project file (File → New/Open Project…).\n"
             "Calibrate and Batch Integrate runs are logged to it automatically while open.")
         self.statusBar().addPermanentWidget(self._project_lbl)
-
-    def _use_viewer_geometry_in_batch(self, geom: dict):
-        """Install the Data Viewer's geometry as Batch Integrate's calibration.
-
-        ``set_calibration`` also flips the source to "From Tab 2" and
-        refreshes the detector preview, so the integrator uses this rather
-        than whatever file was last named -- which is the point, and would
-        be an easy thing to leave silently out of step.
-
-        The tab is raised afterwards: this is a hand-off between two tabs,
-        and landing on the one that now owns the value is what makes it
-        obvious it arrived.
-        """
-        if not geom:
-            return
-        from midas_gui import project
-        try:
-            self._batch_tab.set_calibration(project.calibration_namespace(geom))
-        except Exception:
-            _log(f"Data Viewer -> Batch Integrate geometry failed:\n"
-                 f"{traceback.format_exc()}")
-            return
-        idx = self._tabs.indexOf(self._batch_tab)
-        if idx >= 0:
-            self._tabs.setCurrentIndex(idx)
 
     def _pull_geometry_from_calibrate(self):
         """Data Viewer's "← Get" — copy the Calibrate tab's latest calibrated
