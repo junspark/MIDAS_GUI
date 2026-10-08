@@ -348,3 +348,65 @@ produces less than what was asked for.
 - Alternative: greyed-out/auto-unchecked HDF5 checkbox in the Output-format picker
   whenever Multi-azimuth is toggled on, so the incompatibility is visible before
   you even hit Run rather than discovered by a missing file afterward.
+
+---
+
+## 8. Calibration `tol*` windows bound each E-M iteration, not the answer — can we get a true cap?
+
+Reported at the beamline on a 1-ID CeO2 frame: *"the range limits are not respected
+when optimizing for instrument parameter. Lsd was set to 2390mm with +/-2 mm but the
+value converged to 2382 mm."*
+
+**The limits are applied; they just don't mean what the number suggests.**
+`midas_calibrate_v2/pipelines/single.py` (installed 0.17.0, lines 181-193) re-centres
+every refined parameter's bounds on that iteration's result before the next LM call:
+
+```python
+# Bounds move with the value: they were built as init +- tol, so
+# leaving them anchored to the original seed would let the trust
+# region drift off-centre as the fit walks.
+half = 0.5 * (float(prm.bounds[1]) - float(prm.bounds[0]))
+prm.bounds = (new_init - half, new_init + half)
+prm.init = new_init
+```
+
+So `tolLsd` is a per-iteration trust region. A fit that rails against it moves one
+full window per E-M iteration, and the run's total excursion from the seed is
+`n_iter × tol`. Measured on the beamline runs, exact to the micron:
+
+| run | seed (µm) | tolLsd | n_iter | predicted floor | observed |
+|---|---|---|---|---|---|
+| attempt_0016 | 2390051.00 | ±2 mm | 4 | 2382051.00 | **2382051.00** |
+| attempt_0025 | 2390351.79 | ±1 mm | 4 | 2386351.79 | **2386351.79** |
+
+In both, every iteration stepped by exactly `-tol`, i.e. the bound was binding each
+round and the fit genuinely wanted to go much further.
+
+**Why this matters beyond the labelling.** For Hydra, the four GE panels are mounted
+on a single frame at a fixed sample distance, so a per-panel Lsd cannot physically
+deviate by more than a few mm — 5 mm is already generous. Calibrating panels
+individually therefore needs `tolLsd` to be a *constraint on the answer*, not a step
+size. With the current semantics, a ±5 mm window at the default 4 iterations permits
+±20 mm, which is far outside what the hardware allows.
+
+**What the GUI does for now.** `CalibrationTab` has an opt-in "± values are a hard cap
+on the whole run" tick that divides each `tol*` by `n_iter` before building the config,
+so `n` re-centred iterations cannot carry the answer past the number the user typed.
+That is exact, but it is arithmetic around the backend rather than a real constraint,
+and it has a cost: the per-iteration trust region shrinks by `n`, which slows
+convergence for a parameter that legitimately needs to travel (a bad BC seed, say).
+
+Questions:
+
+- Is the re-centring intended to be unbounded, or should the walk be clamped to the
+  original seed ± tol as a backstop? The comment argues for a trust region that
+  follows the fit, which is reasonable for conditioning — but a trust region and a
+  physical constraint are different things and `tol*` is currently serving as both.
+- Could `CalibrationSpec`/`Parameter` carry a separate hard bound alongside the
+  moving one — e.g. `Parameter.hard_bounds`, clamped after each re-centre — so a
+  caller can say "step at most 1 mm per iteration, but never leave ±5 mm of the
+  seed"? That is what a mechanically constrained geometry actually needs, and it
+  would let the GUI drop the division hack.
+- Failing that: would you accept the per-iteration meaning being documented on
+  `autocalibrate`'s docstring? Nothing currently says the window moves, and the
+  natural reading of "tolerance" is a bound on the result.

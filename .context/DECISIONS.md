@@ -3,7 +3,142 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
-## 2026-10-06 (latest) — One output rebin, two units; Q and 2θ are not backend modes
+## 2026-10-07 (latest) — One parameter table on the single-detector Calibrate tab
+
+"I don't understand what the manual seed window actually adds. All that
+functionality can be done through the refine parameters panel."
+
+Nearly right. The "Manual seed…" popup held the *initial values*, which did
+exist nowhere else — but the refine flags and ± windows beside them were
+duplicated from a card two cards below. Decisions about the same eight
+parameters, split across two surfaces that could not be seen at once.
+
+The popup was pure packaging: ``ManualSeedDialog`` **reparents** the caller's
+own widgets rather than owning copies, so removing it was a layout move, not
+a behaviour change. ``_state_widgets()`` keys stayed valid untouched because
+``widgets_to_dict``/``apply_dict_to_widgets`` dispatch on ``isinstance`` and
+never look at ``parentWidget()``.
+
+**The two tick columns did not collapse into one.** All four pairings of
+(seeded, refined) mean something different, and ``(seeded, not refined)`` —
+"held at this value" — is how a panel is pinned to a measured azimuth. That
+is the whole tx workflow. Merging to a single tick would have deleted it.
+
+Layout: ``name | seed tick | refine tick | start value | ± window | units``,
+with a muted full-width sub-row per parameter carrying the outcome text. The
+left column is a 260px-minimum ``QScrollArea``, so width is the scarce
+resource and height is cheap; the sub-row keeps the long outcome strings
+("refined, from this value") out of the control row. Several widths were
+measured and rejected along the way — a 7-column layout came to 643px, and
+putting the outcome on the window line 452px.
+
+``ty``/``tz`` share one crystalline tilt window. Said in the row's caption
+("ty + tz ±") rather than by spanning the cell: a parameter owns *three*
+grid lines here, so a span reaches across ``tz``'s own value box and draws
+over it.
+
+**Scope: the single-detector tab only.** The intended workflow is to
+calibrate each GE panel individually here, then port the results into the
+Hydra tab, which becomes a composite viewer and caking planner rather than a
+calibration surface. So ``ManualSeedDialog`` stays in ``dialogs.py`` for the
+Hydra panel card, and no shared/parameterised row widget was built — that
+would be speculative work for a surface slated to stop calibrating. Extract
+one later if a second caller actually appears. This supersedes the part of
+``documentation/calibration_unification_plan.md`` that assumes both surfaces
+remain calibration UIs and should converge.
+
+**tx is an input to the display now, not just to the fit.** It is a panel
+installation azimuth about the beam (0-360°), not a small tilt, and is never
+refined by a powder pipeline — a powder pattern is invariant under rotation
+about the beam, and upstream declined ``refine_tx`` because of the gauge
+orbit ``(tx, phi_k) -> (tx+d, phi_k+k*d)``. Two consequences that cost real
+time to pin down:
+
+- *Rings cannot see tx.* They are circles about the beam centre; measured
+  0.000 px displacement at matched azimuth. An early claim that "tx has no
+  effect on the display" was wrong all the same — it is correct for ring
+  radii and false for eta, where the backend includes tx and the GUI did
+  not, leaving the readout off by exactly tx.
+- *Feeding a result back must not erase tx.* ``_seed_from_result`` now
+  writes tx only when ``result_refined_tx(result)`` says the fit actually
+  floated it (a 1-sigma is reported for free parameters only), rather than
+  never writing it — which would have broken the manual d-spacing path,
+  the one pipeline that does refine tx.
+
+## 2026-10-07 — Calibration ± windows bound an iteration, not the answer
+
+Reported from the beamline: "Lsd was set to 2390mm with +/-2 mm but the value
+converged to 2382 mm." The limits were being applied. They do not mean what
+the card said they mean.
+
+``midas_calibrate_v2/pipelines/single.py`` re-centres every refined
+parameter's bounds on each E-M iterate before the next LM call ("Bounds move
+with the value"), so ``tol*`` is a per-iteration trust region and a railing
+fit walks one full window per iteration. Total excursion is ``n_iter x tol``.
+Confirmed to the micron against two runs: ±2 mm x 4 iterations landed
+2382051.00 µm from a 2390051.00 seed, and ±1 mm x 4 landed 2386351.79 from
+2390351.79. Every iteration stepped by exactly ``-tol``.
+
+**Three separate problems came out of this, fixed separately.**
+
+**1. The wording was the actual defect.** The note read "Always applied,
+centred on the seed" and the header "the MIDAS backend always bounds the fit
+to a ± window around the seed". Both describe a bound on the answer. A
+reader who believes them concludes the limits are broken and stops trusting
+the card — which is what happened. The note now says "re-centred every E-M
+iteration" and quotes the real envelope.
+
+**2. The at-limit warning could never fire.** ``_crystalline_at_limit``
+already existed to catch exactly this, and had never fired in practice:
+``_on_done`` applies "Feed result back to seed" *before* calling it, and it
+read the seed spin boxes live. Feedback had just overwritten them with this
+very result, so it compared the result against itself — difference 0. The
+default is for feedback to be on, so the check was dead for the common case.
+Runs now snapshot centre/tolerances/seeded-state in ``_last_limit_ctx``
+before anything can disturb them. The widget fallback is kept so the method
+still works before any run.
+
+*Generalisation worth remembering:* any post-run check that reads an input
+widget is suspect while result-feedback exists. The widgets are outputs by
+then.
+
+**3. A hard cap, because the physics needs one.** The four Hydra GE panels
+sit on one frame at a fixed sample distance, so a per-panel Lsd cannot
+deviate more than ~5 mm. Honest labelling does not help there; the constraint
+has to bind. Opt-in tick on the limits card divides each ``tol*`` by
+``n_iter`` before building the config, so ``n`` re-centred iterations cannot
+carry the answer past the number typed. Exact, not approximate — each
+iteration moves at most one window.
+
+Chosen over the alternatives:
+
+- *Set ``n_iter = 1``.* Makes window == bound exactly, but throws away the
+  peak re-extraction loop that makes the calibration good.
+- *Clamp after the fact and refit.* Re-implements the backend's loop in the
+  GUI, and the second fit starts from a geometry the first one rejected.
+- *Ask upstream for ``Parameter.hard_bounds``.* The right fix, and logged as
+  ``QUESTIONS_FOR_COLLEAGUES.md`` item 8 — but it needs a backend release and
+  the beamline needs this now.
+
+Off by default, because it shrinks *every* per-iteration trust region by
+``n``, which slows a parameter that legitimately needs to travel (a bad BC
+seed). Applied uniformly to all rows rather than Lsd alone: a per-row cap
+column would be a third tick per parameter on a card already fighting for
+width, and the rows that matter are capped together in practice.
+
+Under a cap the at-limit threshold moves from one window to the cap itself.
+Railing a round or two is *how* a capped fit crosses its allowed span, so the
+uncapped "railed at least once" test would cry wolf on every healthy run.
+
+**Also found en route:** ``_seed_namespace`` passed ``_d_list=None``, so the
+seed-ring preview computed zero rings for every d-spacing calibrant — it
+drew nothing, which is precisely the "my geometry was dropped" reading the
+preview exists to prevent. The test that should have caught it passed because
+its "no image loaded" premise was false (the constructor loads the bundled
+demo frame); the empty overlay came from the missing d-list, not the missing
+image. Two bugs cancelling.
+
+## 2026-10-06 — One output rebin, two units; Q and 2θ are not backend modes
 
 Two asks: "Q-uniform bins aren't wired into background jobs yet" (a guard in
 ``_run_as_job``) and "I think we also want even 2theta case."
