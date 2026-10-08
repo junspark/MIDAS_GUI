@@ -14,9 +14,11 @@ Independently, each panel's own ``BatchRunCoordinator`` can further split
 that panel's frames across N concurrent chunk workers ("Batch Parallel"),
 sharing one detector map — see ``workers.BatchRunCoordinator``.
 ``BatchWorker``/``BatchRunCoordinator`` never touch process-global state
-(they log via the ``log_line`` signal only, unlike ``CalibrationWorker``'s
-stdout redirect), so no ``capture_stdout``-style flag is needed for safe
-concurrent runs.
+(they log via the ``log_line`` signal only), so no ``capture_stdout``-style
+flag is needed for safe concurrent runs — the same is now true of
+``CalibrationWorker``, which runs each panel's calibration in its own OS
+process (see ``workers.py``/``calib_cli.py``) rather than redirecting
+``sys.stdout``.
 
 Deliberately has no Drift-correction or live-MONITOR (folder-watch) support
 for Hydra mode in this first pass — both exist on the single-detector Batch

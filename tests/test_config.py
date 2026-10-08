@@ -22,7 +22,7 @@ def test_bundled_beamline_profiles_seeded(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
     names = settings.list_profiles()
-    assert set(names) == {"Default", "20-ID-D", "20-ID-E", "1-ID-E", "17-BM"}
+    assert set(names) == {"Default", "20-ID-D", "20-ID-E", "1-ID-E", "17-BM", "S3IDC"}
     assert settings.active_profile() == "Default"  # unseeded fresh install stays on Default
 
     d_names = [d["name"] for d in settings.read_json(settings.profile_path("20-ID-D"))["devices"]]
@@ -42,6 +42,10 @@ def test_bundled_beamline_profiles_seeded(tmp_path, monkeypatch):
         "pixirad": "s1_pixirad2:", "gh1": "1idGH1:", "pg1": "1idPG1:", "pg5": "1idSP5:",
         "s1varex1": "1idVarex1:", "Sim Detector": "midasSim:",
     }
+
+    s3idc_devices = {d["name"]: d["prefix"]
+                     for d in settings.read_json(settings.profile_path("S3IDC"))["devices"]}
+    assert s3idc_devices == {"eiger2": "dp_eiger_sn:", "Sim Detector": "midasSim:"}
 
     # A bundled profile a user deletes must not be silently resurrected.
     settings.delete_profile("20-ID-E")

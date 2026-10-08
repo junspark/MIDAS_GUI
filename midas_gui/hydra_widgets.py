@@ -17,7 +17,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollComboBox, hydra_siblings,
+from midas_gui.helpers import (_NoScrollSpinBox, _NoScrollComboBox, _fspin, hydra_siblings,
                          hydra_panel_index, is_h5, list_h5_datasets, source_kind,
                          detect_geometry_from_path, warn_if_path_missing)
 from midas_gui.workers import FieldAverageWorker, ProjectionWorker
@@ -133,13 +133,14 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
     auto-discovered via ``helpers.hydra_siblings`` — exactly like
     ``HydraLoaderPanel``'s own main data path — then each panel's field is
     reduced to a mean independently (``workers.FieldAverageWorker``, one per
-    panel).
+    panel). The background variant (``with_scale=True``) adds a "scale:"
+    factor (default 1) that multiplies every panel's field before use.
     """
     #: emitted whenever any panel's field finishes computing, or the
     #: checkbox is toggled (turning correction on/off is itself a change).
     fieldsReady = QtCore.pyqtSignal()
 
-    def __init__(self, title, parent=None, *, with_mode=False,
+    def __init__(self, title, parent=None, *, with_mode=False, with_scale=False,
                  default_dataset="exchange/data"):
         super().__init__(title, parent)
         self.setCheckable(True)
@@ -209,14 +210,22 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
         ir.addWidget(QtWidgets.QLabel("mean")); ir.addWidget(self._start)
         ir.addWidget(QtWidgets.QLabel("–")); ir.addWidget(self._end)
         ir.addWidget(self._nfr_lbl)
+        ir.addStretch(1)
         if with_mode:
             self._mode_combo = _NoScrollComboBox()
             self._mode_combo.addItems(["Flat-field divide", "Subtract"])
             self._mode_combo.setFixedWidth(104)
-            ir.addStretch(1); ir.addWidget(self._mode_combo)
+            ir.addWidget(self._mode_combo)
         else:
             self._mode_combo = None
-            ir.addStretch(1)
+        if with_scale:
+            self._scale = _fspin(0.0, 1e9, 3, 1.0)
+            self._scale.setToolTip(
+                "Multiply this field by this factor before it is subtracted.")
+            self._scale.valueChanged.connect(lambda *_: self.fieldsReady.emit())
+            ir.addWidget(QtWidgets.QLabel("scale:")); ir.addWidget(self._scale)
+        else:
+            self._scale = None
         v.addLayout(ir)
 
         self._compute_btn = QtWidgets.QPushButton("Compute field")
@@ -435,12 +444,20 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
     # ── Public accessors ─────────────────────────────────────────
 
     def field(self, n: int) -> Optional[np.ndarray]:
-        return self._fields.get(n) if self.isChecked() else None
+        if not self.isChecked():
+            return None
+        f = self._fields.get(n)
+        if f is None or self._scale is None:
+            return f
+        return f * self._scale.value()
 
     def mode(self) -> str:
         if self._mode_combo is None:
             return "divide"
         return "divide" if self._mode_combo.currentIndex() == 0 else "subtract"
+
+    def get_scale(self) -> float:
+        return self._scale.value() if self._scale is not None else 1.0
 
     def set_path(self, path: str):
         """Programmatic equivalent of typing a path and pressing Enter —
@@ -630,7 +647,7 @@ class HydraLoaderPanel(QtWidgets.QWidget):
         fld = S.make_card("Dark / Bright / Background")
         self._dark_sel = HydraFieldSelector("Dark", default_dataset="exchange/data_dark")
         self._bright_sel = HydraFieldSelector("Bright", with_mode=True)
-        self._bg_sel = HydraFieldSelector("Background")
+        self._bg_sel = HydraFieldSelector("Background", with_scale=True)
         for w in (self._dark_sel, self._bright_sel, self._bg_sel):
             w.fieldsReady.connect(self.fieldsChanged)
             w.set_data_path_provider(lambda: self._path_ed.text().strip())

@@ -114,6 +114,14 @@ BUNDLED_PROFILES = {
         _ca("varex", "17bmVarex:"),
         _pva("Sim Detector", "midasSim:"),
     ]},
+    # Extracted from the beamline's apstools.devices.ad_creator spec (not a
+    # B-PILOT blueprint, unlike the others above) -- its "pva" plugin entry
+    # has no explicit port/suffix override, so it's the apstools default
+    # ("Pva1:Image"), matching _pva()'s own default.
+    "S3IDC": {"devices": [
+        _pva("eiger2", "dp_eiger_sn:"),
+        _pva("Sim Detector", "midasSim:"),
+    ]},
 }
 
 

@@ -91,7 +91,7 @@ def _load_qt():
 
     class _FakeCalibrationWorker(_FakeWorker):
         def __init__(self, mode, image, dark, cfg, parent=None, bright=None, background=None,
-                     bright_mode="divide", capture_stdout=True):
+                     bright_mode="divide"):
             super().__init__(parent)
             self._cfg = cfg
 
@@ -215,8 +215,84 @@ def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available):
     page._cards[4]._feedback_check.setChecked(False)
     assert all(not page._cards[n]._feedback_check.isChecked() for n in (1, 2, 3, 4))
 
+    # "Feed result back to seed" must only promote parameters that were
+    # actually refined in that fit — an unrefined one (tx, held fixed) must
+    # never get silently locked in as the next run's seed (the
+    # connoly_oct26 Hydra bug: tx ended up locked at a different nonsense
+    # value per panel this way — see .context/DECISIONS.md).
+    for card in page._cards.values():
+        card._feedback_check.setChecked(True)
+    card1 = page._cards[1]
+    for cb in card1._seed_enables:
+        cb.setChecked(False)
+    assert "automatic" in page._seed_status_lbl.text().lower()
+    stale_tx = card1._seed_tx.value()
+    fake_result = SimpleNamespace(
+        Lsd=3_227_008.5, BC_y=2265.66, BC_z=2080.73,
+        tx=180.0, ty=-5.2542, tz=24.4086, distortion={},
+        wavelength_A=0.15381, pxY=200.0, pxZ=200.0,
+        NrPixelsY=2048, NrPixelsZ=2048)
+    refine = {"Lsd": True, "BC": True, "ty": True, "tz": True, "tx": False}
+    card1.on_result(fake_result, refine=refine)
+    assert card1._seed_en_tx.isChecked() is False
+    assert card1._seed_tx.value() == pytest.approx(stale_tx)
+    assert card1._seed_en_lsd.isChecked() and card1._seed_en_bc.isChecked()
+    assert card1._seed_lsd.value() == pytest.approx(3227.0085, rel=1e-6)
 
-def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_available, tmp_path):
+    # The always-visible seed-status banner reflects the shared enable state
+    # without anyone opening the Manual seed… dialog.
+    text = page._seed_status_lbl.text()
+    tokens = [t.strip() for t in text.split(":")[-1].split(",")]
+    assert {"BC", "Lsd", "ty", "tz"} <= set(tokens)
+    assert "tx" not in tokens
+
+    # A stored/replayed result (display_stored_result's call shape — no
+    # `refine`) must never promote anything, even with feedback checked.
+    for cb in card1._seed_enables:
+        cb.setChecked(False)
+    card1.on_result(fake_result)
+    assert not any(cb.isChecked() for cb in card1._seed_enables)
+    assert "automatic" in page._seed_status_lbl.text().lower()
+
+    # Radially-adaptive threshold: toggling enables the curve editor, and
+    # _calib_image_for uses the CALLED panel's own BC, not a shared one.
+    assert page._thr_editor.isEnabled() is False
+    page._thr_check.setChecked(True)
+    assert page._thr_editor.isEnabled() is True
+
+    img = np.full((60, 60), 5.0, dtype=np.float32)
+    page._thr_editor.set_domain(50.0)
+    page._thr_editor.set_points([0.0, 5.0], [10.0, 0.0])
+    page._cards[1]._seed_bcy.setValue(10.0); page._cards[1]._seed_bcz.setValue(10.0)
+    page._cards[2]._seed_bcy.setValue(50.0); page._cards[2]._seed_bcz.setValue(50.0)
+    out1 = page._calib_image_for(img, 1)
+    out2 = page._calib_image_for(img, 2)
+    assert out1[10, 10] == 0.0 and out1[50, 50] == 5.0
+    assert out2[50, 50] == 0.0 and out2[10, 10] == 5.0
+    page._thr_check.setChecked(False)
+
+    # Pick BC / Pick Ring on a panel set its BC value but must not activate
+    # that panel's Manual-seed "Beam centre" checkbox (the user must tick it
+    # themselves — see .context/DECISIONS.md). Explicitly cleared here since
+    # the bulk-checkbox exercise above left it ticked.
+    card2 = page._cards[2]
+    card2._seed_en_bc.setChecked(False)
+    assert card2._seed_en_bc.isChecked() is False
+    style_before = card2._seed_btn.styleSheet()
+    card2._on_bc_picked(77.0, 88.0)
+    assert card2._seed_bcy.value() == pytest.approx(77.0)
+    assert card2._seed_bcz.value() == pytest.approx(88.0)
+    assert card2._seed_en_bc.isChecked() is False
+    assert card2._seed_btn.styleSheet() == style_before
+
+    card2._on_ring_fit_bc(5.0, 6.0, 20.0)
+    assert card2._seed_bcy.value() == pytest.approx(5.0)
+    assert card2._seed_bcz.value() == pytest.approx(6.0)
+    assert card2._seed_en_bc.isChecked() is False
+    assert card2._seed_btn.styleSheet() == style_before
+
+
+def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_available, tmp_path, monkeypatch):
     """Sequential run: independent per-panel BCs. Parallel run: all 4
     workers started up-front. Results/Ring-Residuals tabs switch with the
     active panel. All against ONE page instance (see module docstring).
@@ -243,6 +319,10 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
         page._cards[n]._seed_bcy.setValue(100.0 + n)
         page._cards[n]._seed_bcz.setValue(100.0 + n)
 
+    # No fitted panels yet — Save All starts disabled.
+    assert not page._save_all_json_btn.isEnabled()
+    assert not page._save_all_ps_btn.isEnabled()
+
     page._run_mode_combo.setCurrentIndex(0)   # Sequential
     page._run_all()
     ok = _pump(app, lambda: not page._workers and not page._pending_panels)
@@ -252,6 +332,35 @@ def test_hydra_calib_run_orchestration_and_results_switching(app, fixture_availa
     bcs = {n: (r.BC_y, r.BC_z) for n, r in results.items()}
     assert len(set(bcs.values())) > 1, "panels should not all share the same fitted BC"
     assert page._run_btn.isEnabled() and not page._abort_btn.isEnabled()
+
+    # Save All: one file per panel with a fitted result, named <stem>_ge<N>,
+    # matching CalibrationTab's always-visible Save footer but producing a
+    # separate file per panel rather than one combined file.
+    assert page._save_all_json_btn.isEnabled() and page._save_all_ps_btn.isEnabled()
+    json_dir = tmp_path / "out_json"; json_dir.mkdir()
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: str(json_dir)))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    page._save_all_json()
+    stem = page._default_save_stem()
+    for n in (1, 2, 3, 4):
+        assert (json_dir / f"{stem}_ge{n}.instr.json").is_file()
+
+    class _FakeSaveDlg:
+        def __init__(self, parent=None, default_out=""):
+            self._out = default_out
+        def exec_(self):
+            return QtWidgets.QDialog.Accepted
+        def out_path(self):
+            return self._out
+        def template_path(self):
+            return ""
+
+    monkeypatch.setattr(hydra_calib_page_mod, "_SaveParamstestDialog", _FakeSaveDlg)
+    page._save_all_paramstest()
+    base = Path(page._default_save_path(".instr.txt"))
+    for n in (1, 2, 3, 4):
+        assert hydra_calib_page_mod._panel_tagged_path(base, n).is_file()
 
     with h5py.File(proj_path, "r") as f:
         for n in (1, 2, 3, 4):

@@ -92,6 +92,7 @@ test_data/out_temp.txt
 /test_data/s1ide_bc/
 /test_data/test_out/
 /test_data/projects/
+/test_data/s20idd_tz14/
 /test_data_bc/
 
 # Internal-only documentation (kept local, not published to GitHub)

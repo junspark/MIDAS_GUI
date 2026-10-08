@@ -829,6 +829,14 @@ def test_fitted_tilt_reaches_the_overlay_with_the_seed_card_on(app):
         _d_list=sorted([58.380 / n for n in range(1, 11)], reverse=True),
         im_trans=[])
     tab._result = tilted
+    # _seed_from_result only promotes parameters the last run actually
+    # refined (see DECISIONS); this test bypasses _run_manual_fit() entirely,
+    # so set the precondition it would otherwise have set. AgBH's default
+    # d-spacing refine state is BC-only (ty off), so tick ty explicitly —
+    # modelling a fit that *did* refine the tilt, which is what this test is
+    # about — same pattern as test_calibrate_panel_save.py.
+    tab._ref_ty.setChecked(True)
+    tab._last_refine_flags = tab._refine_flags()
     tab._seed_from_result(tilted)
     tab._draw_rings(tilted)
 

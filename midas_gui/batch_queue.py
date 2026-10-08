@@ -139,18 +139,21 @@ class CorrectionsNode:
     dark: Optional[str] = None
     bright: Optional[str] = None
     background: Optional[str] = None
+    background_scale: float = 1.0
     bright_mode: str = "divide"
     samples: list = field(default_factory=list)
 
     def to_json(self) -> dict:
         return {"name": self.name, "dark": self.dark, "bright": self.bright,
-                "background": self.background, "bright_mode": self.bright_mode,
+                "background": self.background, "background_scale": self.background_scale,
+                "bright_mode": self.bright_mode,
                 "samples": [s.to_json() for s in self.samples]}
 
     @classmethod
     def from_json(cls, d: dict) -> "CorrectionsNode":
         return cls(name=d.get("name", "Corrections"), dark=d.get("dark"),
                    bright=d.get("bright"), background=d.get("background"),
+                   background_scale=float(d.get("background_scale", 1.0)),
                    bright_mode=d.get("bright_mode", "divide"),
                    samples=[Sample.from_json(s) for s in d.get("samples") or []])
 

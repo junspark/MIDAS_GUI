@@ -3,6 +3,7 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+
 ## 2026-10-08 (latest) — A profile that maps to no hutch writes no CSV at all
 
 ``ion_csv._PROFILE_HUTCH`` listed only 20-ID-E and 20-ID-D. On any other
@@ -37,6 +38,146 @@ alignment is right) but every entry is identical — IC1 reads exactly 4866
 on all 64. That looks latched rather than sampled per frame. The CSV
 reports it faithfully; whether the DAQ should be updating it is a beamline
 question, and matters before anyone normalises against these.
+
+## 2026-10-08 (later) — Hydra calibration gets a page-level "Save All", one file per panel
+
+**Problem.** The single-detector Calibrate tab has an always-visible Save
+footer (Save .json / Save paramstest.txt). Hydra's equivalent existed —
+each `HydraCalibPanelCard` already had its own Save .json/paramstest.txt
+buttons — but they lived inside that panel's Results tab, which only shows
+the currently-*active* panel. Saving all 4 panels meant: switch to ge1,
+open Results, click Save, fill in a path; switch to ge2; repeat ×4. Reported
+as "there is no option to save the calibration results" — true in spirit,
+since nothing surfaced it at the page level the way the single-detector tab
+does.
+
+**Decision.** Add a page-level "Save All" row to the Run card (same place
+as the single-detector tab's footer), enabled once ANY panel has a fitted
+result, that writes one file per *fitted* panel in one click:
+- `_save_all_json`: one `QFileDialog.getExistingDirectory` picks a folder,
+  then `<stem>_ge<N>.instr.json` is written for every panel with a result.
+- `_save_all_paramstest`: one `_SaveParamstestDialog` (template optional)
+  picks a base output path, then each panel's file is derived from it via
+  `_panel_tagged_path()`.
+
+Kept the existing per-panel buttons rather than removing them — saving just
+one panel after re-seeding it is still a real use case, and they're now
+implemented in terms of the same `write_json`/`write_paramstest` methods
+Save All calls, so there is exactly one code path per format, not two.
+
+**Why `_panel_tagged_path()` exists at all.** The obvious one-liner —
+`base.with_name(f"{base.stem}_ge{n}{base.suffix}")` — is wrong for this
+app's own filenames. `Path.stem`/`.suffix` split on the *last* dot only, so
+for `run.instr.txt` that gives stem=`run.instr`, suffix=`.txt`, and the
+one-liner produces `run.instr_ge1.txt` — the `_ge1` tag lands in the middle
+of `instr.txt`, not before it. Every save path in this codebase
+(`CalibrationTab`/Hydra alike) uses the two-part `.instr.json`/`.instr.txt`
+suffix, so this was going to bite on the very first real save, not an edge
+case. `_panel_tagged_path()` special-cases those two suffixes (plus plain
+`.txt`/`.json`) before falling back to `Path`'s own split. Caught by a test
+that uses the real default suffix (`.instr.txt`), not a sanitized `.txt` —
+an earlier draft of the test independently re-derived the (also wrong)
+expected name with the same one-liner and passed despite the bug; fixed by
+asserting against `_panel_tagged_path()` itself instead of reimplementing
+its logic in the test.
+
+**Not done:** no attempt to merge all 4 panels into one combined file —
+the user asked for the opposite ("we should get one separate file for each
+ge panel"), and a combined paramstest.txt has no meaning for 4 independent
+detectors with no shared panel_layout (unlike the single-detector tab's
+*internal* multi-panel grid, which this is not).
+
+## 2026-10-08 — "Feed result back to seed" was silently promoting unrefined parameters into a locked manual seed; fixed in both Calibrate tabs, Hydra's seed state made visible
+
+Root-caused a real failure: a Hydra calibration on `connoly_oct26` data
+(project `hydra_8oct2026.h5`) produced garbage geometry on every panel —
+rings nowhere near the data, basin-escape/strain-cap diagnostics failing
+across the board. The saved project showed each panel's `tx` locked at a
+different, non-physical value (180°, 27.3°, 117.8°, 180°) despite `tx` not
+being in that run's Refine list — it couldn't have come from this fit, so it
+was carried forward from an earlier exploratory run (plausibly one with `tx`
+and the full 15-term anisotropic distortion set free, on data with only
+~80° (22%) azimuthal ring coverage per panel — the backend's own diagnostics
+say outright this is too narrow to determine the anisotropic terms, a
+textbook setup for a degenerate/basin-escape fit).
+
+**Mechanism**: `seed_from_result()` (`hydra_calib_widgets.py`'s
+`HydraCalibPanelCard` and `tab_calibrate.py`'s `CalibrationTab`, identical
+pattern in both) runs after every completed fit when "Feed result back to
+seed" is checked (default **on**), and used to unconditionally call
+`self._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)` —
+regardless of which parameters were actually free in that run. An unrefined
+parameter's value in the result is just whatever was fed in as a fixed
+constant, not new information, so promoting it silently converted "held
+fixed this one time" into "locked seed for every future run," with no
+visible sign it happened. Hydra compounds this: `_sync_seed_checkbox()`
+mirrors each `_seed_en_*` enable flag across all 4 panels by design ("one
+shared choice across all 4 GE panels," only the seed *values* stay
+independent), so one panel's bad promotion spreads the *enabled* state to
+all three siblings — consistent with every panel showing the same five
+flags on, with four different (and in ge1/ge4's case, identical-but-still-
+nonsense 180°) tx values.
+
+**Fix**: both `_seed_from_result` (`tab_calibrate.py`) and `seed_from_result`
+(`hydra_calib_widgets.py`) now gate each parameter's promotion on whether it
+was actually in that run's `refine` flags (`self._last_refine_flags` for the
+single-detector tab, already captured at run-launch time; a new `refine`
+argument threaded through Hydra's `HydraCalibPanelCard.on_result()` from
+`HydraCalibrationPage._on_panel_done`'s `self._last_cfgs[n]["refine"]`).
+Critically, `on_result()`'s `refine` defaults to `None`, and seed promotion
+is skipped entirely when it is — so `display_stored_result()` (project
+restore / panel-switch redraw, which calls `on_result(result)` with no
+`refine`) can never silently turn a historical result into tomorrow's seed.
+This mirrors the single-detector tab's existing `_display_stored_result`,
+which already only restores Distortion coefficients inline and never calls
+the full `_seed_from_result` for exactly this reason — Hydra didn't have
+that same restraint until now.
+
+**Visibility** (requested alongside the fix): `_update_seed_summary()`'s
+existing per-card label now colors itself `S.ACCENT` (orange) when any
+parameter is seeded instead of blending into the muted help text, and a new
+always-visible one-line banner (`HydraCalibrationPage._seed_status_lbl`,
+above the per-panel card stack) shows the shared seed state regardless of
+which of the 4 panels is currently displayed — "Seed: automatic" or
+"Seed (manual, shared across panels): BC, Lsd, …" — so a manual seed can
+never again go unnoticed without opening the "Manual seed…" dialog. Driven
+by a new `HydraCalibPanelCard.seedStateChanged` signal.
+
+**Confirmed, not changed**: Hydra's per-panel "Manual seed…" dialog already
+existed before this fix (verified headlessly via screenshot) — each
+`HydraCalibPanelCard` builds and owns its own `ManualSeedDialog` instance
+over its own checkboxes/spinboxes, and `CalibrationTab` holds one
+`HydraCalibrationPage` with 4 independent cards, none of which share a
+widget or any other state with the single-detector tab's own seed controls.
+The bug was never cross-tab contamination — it was within-Hydra, across
+different runs/datasets in the same live session.
+
+**Standing rule** (tripwire for future widgets, not a fix to an existing
+leak — the above confirms this already holds everywhere checked today): a
+control's value or enabled state must never be read from, or silently
+written into, the other Calibrate mode (single-detector ↔ Hydra) unless
+that same control is independently present and was explicitly set *in that
+mode*. Feeding a result back into a panel's own seed, and
+`_sync_seed_checkbox`'s mirroring across Hydra's own 4 panels, are both
+fine — crossing between the two Calibrate *modes* is not.
+
+New tests: `tests/test_calibrate_panel_save.py` (`test_seed_from_result_skips_unrefined_tx`,
+`test_seed_from_result_with_nothing_refined_leaves_seed_untouched`),
+`tests/test_hydra_calib_ui.py` (extended `test_hydra_calib_page_wiring_and_pick_isolation`
+with the gated-promotion + no-`refine` + status-banner assertions, same one-page-per-test-function
+pattern as the rest of that file).
+`tests/test_manual_dspacing_calib_ui.py::test_fitted_tilt_reaches_the_overlay_with_the_seed_card_on`
+updated: it calls `_seed_from_result` directly without going through
+`_run_manual_fit()`, so it now sets `_last_refine_flags` itself (ticking
+`ref_ty` explicitly, since AgBH's default d-spacing refine state is
+BC-only) — same precedent `test_calibrate_panel_save.py` already used for
+other `_last_refine_flags`-dependent direct calls.
+**Verified**: all touched/new test files green per-file on a clean `HOME`;
+`pyflakes` unchanged (same pre-existing warnings only, confirmed by diffing
+against unmodified HEAD); the pre-existing `test_apply_project_calibration_single_detector`
+pyqtgraph-teardown SIGABRT reproduced identically on unmodified HEAD (not a
+regression); headless screenshots confirm the new banner renders correctly
+in both states.
 
 ## 2026-10-07 — The CSV says which dark was subtracted
 
@@ -201,7 +342,379 @@ its "no image loaded" premise was false (the constructor loads the bundled
 demo frame); the empty overlay came from the missing d-list, not the missing
 image. Two bugs cancelling.
 
-## 2026-10-06 — One output rebin, two units; Q and 2θ are not backend modes
+## 2026-10-07 (latest) — Calibration moved from an in-process QThread to a subprocess (calib_cli.py), both single-detector and Hydra
+
+Requested directly: "the separate qt processes are not stable with the gui"
+for calibration specifically, with Batch Integrate's "Run as background job"
+(`batch_cli.py`) cited as existing precedent. Followed a same-day,
+unattended investigation (user unavailable) that had already shown the
+*apparent* Hydra ge2 "hang" wasn't actually a hang (see the ge1/ge2 timing
+entries this same day in STATE's history) — but that investigation also
+surfaced real, independent reasons `CalibrationWorker` running in-process was
+worth moving regardless: a calibration pipeline call is one uninterruptible
+native torch/scipy call that can run for minutes, so `QThread.terminate()`
+inside one risks corrupting the whole GUI process — the old `_abort()`/
+`_abort_all()` could therefore only *detach* (orphan the thread, discard its
+result), never actually stop the work. Hydra's Parallel mode also had to
+disable per-panel log capture (`capture_stdout=False`) to avoid several
+concurrent QThreads racing on one process-global `sys.stdout`.
+
+**Design**: new `midas_gui/calib_cli.py` (`python -m midas_gui.calib_cli
+--job-dir <dir>`), the calibration counterpart of `batch_cli.py` but
+simpler — no detached `screen` session (job_queue.py's mechanism, built so a
+batch job can outlive the GUI); calibration stays tied to the GUI's
+lifetime exactly like the old QThread did, just via a `QProcess` the GUI
+waits on and streams from instead of waiting on a thread. No PyQt import in
+`calib_cli.py` at all — unlike `BatchWorker`, `calib.run_pipeline`/
+`normalize_result` are plain functions, not a QThread subclass, so no
+`QApplication` instance is needed to construct anything.
+
+Hand-off is two files in the run's own scratch leaf (same directory
+`residual_corr.bin`/`calibration.json` already land in, so nothing new to
+clean up): `calib_job.json` (mode + the same cfg dict `run_pipeline` has
+always taken, JSON-safe — `workers._json_default` turns the one non-native
+value, `refine["distortion_coeffs"]`'s `set`, into a sorted list; `calib.
+_distortion_coeffs` already accepts either) and `calib_job.npz` (image +
+whichever of dark/bright/background/mask apply — `mask` moves out of cfg
+into the npz since it's an array). On success, `calib_cli.py` pickles the
+normalized result to `calib_result.pkl` — plain pickle, not a JSON
+sanitizer, since the result is a real `AutoCalibrationResult` (numpy arrays,
+a `residual_corr_map` torch tensor, dynamically-attached fields like
+`_calibrant_name`/`panel_shifts_path`) that downstream code needs at full
+fidelity, not a lossy flattened copy. The one thing `calib_cli.py` does
+before pickling that the old in-process worker never had to: `residual_corr_
+map.detach().cpu()` — it must leave the process CPU-resident and off the
+autograd graph, since the GUI process may not share a CUDA context (or have
+a GPU at all).
+
+`workers.CalibrationWorker` is now a `QtCore.QObject`, not a `QThread` —
+duck-types `start()`/`isRunning()`/`requestInterruption()` plus the same
+`log_line`/`finished`/`failed` signals, so neither `tab_calibrate.py` nor
+`hydra_calib_page.py` needed to change their wiring, only drop the now-
+meaningless `capture_stdout` kwarg from both the single-detector call site
+(never passed it) and Hydra's `_start_panel_worker`/`_run_all`/
+`_start_next_sequential` (always passed it). `requestInterruption()` is now
+a real `QProcess.kill()` — both tabs' abort methods needed only a docstring/
+log-message update ("aborted" instead of "aborted — may still be winding
+down"), not a behavior change, since they already just call
+`requestInterruption()` + disconnect + orphan.
+
+**Verified directly against real `test_data/s1ide` ge1/ge2 data** (not just
+mocked): a real ~147s successful single-detector-style run through the new
+worker (BC/Lsd matching known-good truth), a real failure path (unknown
+pipeline mode, traceback streamed live via `log_line` and surfaced in
+`failed`), a real `requestInterruption()` kill mid-run, and — the capability
+this change actually unlocks — **two real ge1+ge2 calibrations run
+concurrently through two genuinely separate OS processes, each returning its
+own full captured log (17 lines each) and correct, non-cross-contaminated
+result**, something Hydra's Parallel mode could never do before (it had to
+give up captured logs to avoid the stdout race). New `tests/
+test_calibration_subprocess.py` (10 tests): `_write_calib_job`'s JSON/npz
+round-trip (including the set→list distortion-coeffs conversion and that it
+doesn't mutate the caller's cfg), `calib_cli.main()`'s success/failure paths
+with the backend mocked (fast), and the worker's real-subprocess contract
+(spawn, live log streaming, failure signal, kill) using a fast-failing
+unknown-mode job rather than a multi-minute real fit.
+
+`helpers._LogStream` (the `sys.stdout`/`stderr`-redirecting class the old
+worker used) is now dead code — deleted, along with the `import io` it was
+the only user of; nothing else in the repo ever referenced it.
+
+**Verified no regression**: pyflakes diff is +1 over baseline (exactly the
+one expected `midas_gui._paths imported but unused` warning on the new CLI
+file — the same accepted pattern `batch_cli.py` already carries). Every
+test file touching `workers.py` passes individually; a combined run of 17 of
+them showed the same pre-existing `--forked`-races-with-many-tests failures
+STATE.md already documents (confirmed identical on unmodified HEAD, not
+introduced by this change — see the "trust per-file isolated runs" rule).
+
+## 2026-10-07 (later) — Threshold curve editor popped into a dialog; log Y-axis; X locked to detector range
+
+Requested change (same day as the drag-point-curve entry below): the
+embedded curve editor took up too much of the narrow card column and was
+cramped to work with precisely. Moved `RadialThresholdEditor` out of the
+inline card into a non-modal `QDialog` (`Qt.Window` flags, so it has its own
+title bar/min/max), opened via a new "Adjust curve…" button; the card itself
+now holds just the checkbox and that button. The dialog is never `.exec_()`'d
+(`.show()`/`.raise_()`/`.activateWindow()` only), so the rest of the tab
+stays interactive and the main image preview keeps updating live while it's
+open — the existing `pointsChanged → _on_threshold_points_changed →
+_show_calib_image()/_refresh_display()` wiring needed no changes at all,
+since it's the same long-lived `RadialThresholdEditor` instance, just
+reparented into the dialog's layout instead of the card's. Closing the
+dialog's window (✕) just hides it (default `QDialog` behaviour, no
+`WA_DeleteOnClose`); the button reopens the same instance with its points
+intact.
+
+**Y-axis is now log-scaled, floored at intensity 1 (not 0).** Per
+clarification: "the y min can be 1 i.e. 0 on log scale" — `log10(1) == 0`,
+so 1 count stands in for "zero" on the log display; no value below it is
+representable. Key implementation fact, confirmed empirically before
+writing any code: pyqtgraph's `PlotWidget.setLogMode(y=True)` auto-transforms
+`PlotDataItem`s (our `self._curve`, built via `.plot()`) for display, but
+does **NOT** transform arbitrary items like `pg.TargetItem` — a `TargetItem`
+positioned at real-valued `(r, y)` under a log-mode `ViewBox` lands at the
+wrong scene position entirely. So every `TargetItem`'s position is now
+stored and read back as `(r, log10(real_y))` manually via two tiny
+classmethods (`_log_y`/`_real_y`); the *public* API (`points()`,
+`set_points()`, `pick_state()`) is untouched and still deals purely in real
+intensity units — the log transform is purely an internal rendering detail,
+confirmed by `test_y_values_round_trip_through_log_display`.
+`_on_target_moved`/`_add_point` clamp the **real** value to
+`[_Y_FLOOR=1.0, _Y_CEIL=1e9]` before converting back to log for display/
+storage — the ceiling just blocks pathological values, it's not a usability
+limit (see below).
+
+**X-axis hard-locked to `[0, r_domain]`, Y-axis user-zoomable — this was
+the actual "max Y changeable, max X not" requirement.** `vb.setMouseEnabled(x=False,
+y=True)` plus `vb.setLimits(xMin=0, xMax=r_domain)` in `set_domain()`: X
+genuinely cannot be panned/zoomed by the user (matches "limit the x-axis to
+a minimum of R=0 and maximum equal to the max R in the image range," with no
+exception). Y keeps native mouse pan/zoom; a new `set_y_view(y_max_real)`
+sets only the *default/starting* view (`[1, y_max_real]` in log space, via
+`setYRange`) whenever the curve's defaults are (re)computed — not on every
+drag, so a mid-session manual zoom is never clobbered. Y autorange was
+turned off (`enableAutoRange(YAxis, False)`) so this explicit view sticks.
+
+**Default Y ceiling = median intensity within r<=10px of BC, not the raw
+image max.** New `helpers.median_intensity_near_bc(img, bc_y, bc_z, r_max)`
+— outlier-resistant (a single saturated/hot pixel, which the raw
+`np.nanmax` the curve's defaults used until today, would otherwise dominate
+the whole default view and curve shape). This reference is now used for
+BOTH the default curve's top point (`default_radial_threshold_points`'s
+`hi` argument — signature unchanged, only what both tabs pass in changed)
+and the Y-view's default ceiling, so the default curve is always fully
+visible within its own default view. Wired into both
+`tab_calibrate.py::_reset_threshold_defaults` and
+`hydra_calib_page.py::_reset_threshold_defaults_for_active_panel`.
+
+New tests in `tests/test_radial_threshold_editor.py` (floor-at-1 not 0, log/
+real round-trip, X mouse-disabled/Y mouse-enabled, `set_domain` locks
+`xLimits`) and `tests/test_helpers.py` (`median_intensity_near_bc`: uses
+only pixels within `r_max`, falls back to `nanmax` when the mask is empty).
+Existing threshold tests needed only a floor-value comment fix (`0.0` →
+`1.0`) since the behavior they check (far corner pixel value 5.0 survives
+thresholding) is numerically unchanged by the floor.
+
+**Verified:** all touched/new test files green per-file on a clean `HOME`;
+`pyflakes` unchanged (39 warnings, same list); `get_state()`/`set_state()`
+round-trip of `thr_points` re-confirmed on both tab classes (values now
+correctly floor to 1.0 on restore); offscreen screenshots confirm the
+card is now compact (checkbox + button only) and the popped-out dialog
+renders a proper log Y-axis (10, 100, 1000 tick labels) with the curve
+correctly bottoming out at 1.
+
+## 2026-10-07 — Power-law threshold superseded by an interactive drag-point curve (no formula at all)
+
+Requested change: spinbox-driven parametric curves (first Gaussian, then a
+4-knob power-law step, both landed the day before) weren't effective for the
+user to actually shape a threshold by feel — "I instead want something
+wherein I can actually see the plot and control it clearly... drag the graph
+as I want and parameters are calculated automatically." Asked to choose
+between fitting the existing power-law formula to dragged points, or a
+free-form spline with no underlying parametric family at all: **chose
+free-form**. Also explicitly chose to allow a dragged point to sit above its
+neighbour (a non-monotonic "bump"), rather than clamping the curve to only
+decay outward — fully free-form, matching "drag however you want" literally.
+
+Replaced the whole 4-spinbox (peak/floor/r0/steepness) UI with a new
+`widgets.RadialThresholdEditor`: a `pg.PlotWidget` (x = radius px, y =
+intensity) holding 2–10 draggable `pg.TargetItem` control points connected by
+a monotone-cubic (PCHIP) spline that passes exactly through every point, flat
+beyond the first/last knot (clip-then-interpolate — no extrapolation
+overshoot). `helpers.radial_power_threshold_map` is gone; new
+`helpers.radial_spline_values`/`radial_spline_threshold_map` are the one
+implementation the widget's drawn curve and the actual per-pixel mask both
+call, so they can never disagree. `apply_radial_threshold` keeps its name,
+now takes `(radii, values)` arrays instead of 4 scalars.
+
+**Why `pg.TargetItem` over a hand-rolled drag implementation**: nothing in
+this codebase had a draggable-point pattern before (confirmed by grep —
+every existing `movable=True`-capable pyqtgraph item in this repo is
+constructed `movable=False`); `TargetItem` gives `sigPositionChanged` (live,
+during drag) / `sigPositionChangeFinished` and a plain `.movable` attribute
+for free, which is far more robust than manually hit-testing mouse events on
+a `ScatterPlotItem`.
+
+**Interaction design**: dragging clamps a point's radius between its
+immediate neighbours (can't cross or collide) and its y to `>= 0`, but
+**never clamps y against a neighbour** — bumps are allowed, per the explicit
+choice above. Double-click on empty plot space adds a point at the clicked
+(r, y); double-click an existing point removes it (floor of
+`MIN_POINTS = 2`, ceiling `MAX_POINTS = 10`). `set_editable(False)` disables
+the whole widget (blocking drag/pan/zoom/double-click for free via
+`QWidget.setEnabled`) and recolors the curve/points to gray — custom
+`QGraphicsView` painting doesn't pick up Qt's native disabled palette, so
+this is the only way the off state is actually visible.
+
+**Defaults**: `helpers.default_radial_threshold_points(hi, rmax)` places 4
+points at r-fractions `(0, 0.10, 0.25, 0.60)` of the corner radius and
+y-fractions `(1.0, 0.5, 0.1, 0.0)` of the image max — a steep-drop-then-flat
+starting shape to drag from, reusing the exact same two scalars
+(`rmax_corner_px`, `np.nanmax`) every earlier version's defaults used.
+
+**State**: the 4 widget-backed keys (`thr_peak/thr_floor/thr_r0/thr_order`)
+are gone from both tabs' `_state_widgets()`; the curve's points have no
+widget of their own, so they round-trip via a new `thr_points` top-level key
+in `get_state()`/`set_state()`, following `PickableImageViewer.pick_state()`/
+`set_pick_state()`'s exact precedent (`widgets.py`) — same shape already
+used for `dist_coeffs`. An old saved project missing `thr_points` just keeps
+the freshly-computed defaults (`set_pick_state` is a no-op on falsy input),
+same tolerance already established for `dist_coeffs`. One real fix found
+while wiring this up: `hydra_calib_page.py`'s "Apply threshold" is a plain
+`QCheckBox` (unlike `tab_calibrate.py`'s checkable `QGroupBox`, which gets a
+native enable-cascade for free), so its `set_state()` needed an explicit
+`self._on_threshold_toggled(self._thr_check.isChecked())` call after
+restoring fields, or a restored checked-but-blocked-signals state would
+leave the editor looking/behaving disabled until manually re-toggled.
+
+New `tests/test_radial_threshold_editor.py` (10 tests) drives the widget via
+its public methods and by calling `TargetItem.setPos()` directly (fires the
+real `sigPositionChanged` handler) — this codebase has no `QTest`-based
+mouse-event simulation anywhere, so the double-click add/remove scene-hit-
+test plumbing itself is checked only via an offscreen screenshot, the same
+tier of coverage already accepted for `PickableImageViewer`'s own
+click-to-pick wiring. `tests/test_helpers.py`, `tests/test_calib_radial_
+threshold.py`, `tests/test_hydra_calib_ui.py` updated for the new
+function/widget.
+
+**Verified:** all touched/new test files green per-file on a clean `HOME`;
+`pyflakes` unchanged (39 warnings, same list, before/after); `get_state()`/
+`set_state()` round-trip of `thr_points` confirmed by direct script on both
+`CalibrationTab` and `HydraCalibrationPage`; offscreen screenshots confirm
+the plot renders with labeled draggable points, and the disabled state is
+visibly dimmed (gray curve/points) on both tabs.
+
+## 2026-10-06 (later) — Radial Gaussian threshold superseded by a 4-knob power-law step (peak/floor/r0/steepness)
+
+Requested change (same day as the Gaussian entry below, before it had settled
+in): the Gaussian gave no independent control over how fast it decays, what
+value it flattens out to, or at what radius — it only had amplitude/
+location/scale, and a Gaussian's tail always decays toward 0, never to a
+settable floor. Replaced with
+`thr(r) = floor + (peak - floor) / (1 + (r/r0)**(2*order))` — a
+Butterworth-filter-style power-law roll-off, in new
+`helpers.radial_power_threshold_map` (same call sites, replacing
+`radial_gaussian_threshold_map` wholesale; `apply_radial_threshold` keeps its
+name but takes the new 4 params).
+
+Why this family over a plain logistic/sigmoid or a piecewise flat-ramp-flat:
+a sigmoid only has 2 effective degrees of freedom (location, width) and
+always produces the same symmetric S-curve shape, just stretched/shifted — it
+can't vary the *shape* of the roll-off itself, only its scale. The power-law
+form's `order` exponent is a genuine shape knob: `order≈1` gives a gentle,
+wide, Lorentzian-like decay spread over a broad radius range; `order≈8+`
+collapses the transition into an almost rectangular step right at `r0`. One
+number sweeps from "soft blob" to "hard cutoff" — the widest variety of
+curves achievable from a minimal, interactive knob set — while staying a
+single smooth formula (no piecewise clamping, same `np.hypot`/vectorized
+style as the Gaussian it replaces). `r0` is exactly the radius where
+`thr(r0) == (peak+floor)/2`, which is what "flattens out at this radius"
+means in practice (within a few `r0`-widths either side it's visually flat
+at `peak` or `floor`).
+
+Widget/state rename to match: `_thr_amp/_thr_loc/_thr_scale` →
+`_thr_peak/_thr_floor/_thr_r0/_thr_order` in both `tab_calibrate.py` and
+`hydra_calib_page.py` (saved-state keys `thr_amp/thr_loc/thr_scale` →
+`thr_peak/thr_floor/thr_r0/thr_order` — `apply_dict_to_widgets` restores
+field-by-field with per-key try/except, so an old project missing the new
+keys just keeps the fresh-image defaults rather than erroring). Defaults on
+a new image: `peak`=image max, `floor`=0 (reproduces the old Gaussian's
+decay-to-0 default behaviour), `r0`=0.15×corner-radius-from-BC (same
+heuristic constant the old `scale` default used), `order`=2.0 (moderate,
+not aggressively sharp). Requested separately: every threshold spinbox (and
+its form label, via a small `_lbl()` helper building a tooltipped
+`S.LabelRight`) now carries a tooltip explaining what that specific knob
+does, so hovering any one of peak/floor/r0/steepness explains it in place —
+not just the card-level tooltip the Gaussian version had.
+
+New tests replace the Gaussian ones in `tests/test_helpers.py`
+(peak-at-r=0/decay-to-floor, `r0` is literally the half-max radius, higher
+`order` is a sharper transition, non-positive `r0`/`order` don't raise) and
+`tests/test_calib_radial_threshold.py` (4 spinboxes enable/disable, same
+BC-origin behaviour). `tests/test_hydra_calib_ui.py`'s existing wiring test
+updated in place (still capped at 2 test functions for the pyqtgraph-
+teardown-crash reason documented in that file).
+
+**Verified:** all touched/new test files green per-file on a clean `HOME`;
+`pyflakes` unchanged (same pre-existing warnings only, byte-identical list
+before/after); offscreen screenshots of both cards confirm the 2×2 field
+layout, the live formula label, and non-empty per-field tooltips.
+
+## 2026-10-06 — Calibrate threshold replaced with a radial Gaussian; Pick BC/Ring no longer auto-activates Manual seed
+
+Requested change: the scalar "pixels below X → 0" threshold on both the
+single-detector Calibrate tab and the Hydra multi-panel page is too blunt for
+a real detector frame, where the direct-beam/near-centre region is much
+brighter than the periphery. Replaced with a per-pixel floor that is a
+Gaussian in radius from the beam centre: `thr(r) = amplitude *
+exp(-0.5*((r-location)/scale)**2)`, with `location=0` (peak at BC) by
+default. New shared helpers `helpers.radial_gaussian_threshold_map` /
+`apply_radial_threshold` — the one piece of code genuinely shared between the
+two otherwise-independent (duplicated) Calibrate/Hydra threshold
+implementations.
+
+BC source: always the *current* seed BC spinbox value
+(`CalibrationTab._seed_bcy/_bcz`, or each `HydraCalibPanelCard`'s own), read
+regardless of whether that panel's "Beam centre" manual-seed checkbox is
+ticked — the same fields Pick BC/Pick Ring/typing/project-restore all write
+into. This is what makes "the threshold's origin comes from Pick BC/Pick
+Ring" true without reactivating manual seed (see next paragraph). On Hydra,
+BC is per-panel, so `_calib_image_for(img, n)` gained an explicit panel
+argument (it previously relied on `self._active_card`, which doesn't exist
+at every one of its 3 call sites — `_start_panel_worker`/`_run_integration`
+already had `n` in scope regardless).
+
+Separately: `_on_bc_picked`/`_on_ring_fit_bc` (both single-detector and
+per-panel Hydra versions) used to call `self._enable_seed(BC=True)`, ticking
+("turning green") the Manual-seed BC checkbox as a side effect of a pick.
+Requested behaviour: a pick should only populate the BC value; the user must
+tick Manual seed themselves to use it in a fit. Removed the `_enable_seed`
+call from all four handlers (tab_calibrate.py ×2, hydra_calib_widgets.py
+×2); no test asserted the old auto-enable behaviour (confirmed by grep), so
+this was a clean removal with reworded note/log text.
+
+Bug found and fixed while wiring the Hydra side: `HydraCalibrationPage
+._refresh_display()` used to unconditionally recompute `_thr_min`/`_thr_max`
+from the active panel's raw image on *every* call — including from
+`_on_threshold_changed`, i.e. the handler fired by the user editing those
+very fields. Editing them was a no-op: the value snapped back to the raw
+image's min/max on the next event-loop tick. Harmless-ish for 2 fields where
+the slider was the only thing that actually varied, but fatal for the new
+3-parameter design (amplitude/location/scale all stomped on every edit,
+making the feature non-interactive). Fixed by extracting
+`_reset_threshold_defaults_for_active_panel()` and calling it only where the
+underlying raw image actually changes (new data, new frame, panel switch,
+frame-mean range) — never from the threshold fields' own `valueChanged`.
+Verified with a direct repro (set amplitude/location/scale, confirm they
+hold) before and after.
+
+Project-file compatibility: `_state_widgets()` keys `"thr_min"/"thr_max"`
+replaced with `"thr_amp"/"thr_loc"/"thr_scale"` in both tabs. Confirmed safe
+via `apply_dict_to_widgets` (iterates the widget dict, not the saved data,
+and wraps each restore in `try/except: pass`) — an old project file's
+retired keys are silently ignored, no crash; the threshold on/off state
+survives, amplitude/location/scale are regenerated rather than restored. No
+compatibility shim needed.
+
+New tests: `tests/test_helpers.py` (+6, the two new pure-numpy helpers),
+`tests/test_calib_radial_threshold.py` (new file, 5 tests, single-detector
+tab, `pytest.mark.forked` per the pyqtgraph-teardown-on-2nd-CalibrationTab
+crash), and assertions folded into `tests/test_hydra_calib_ui.py`'s existing
+wiring test (that file is hard-capped at 2 test functions — see its module
+docstring — so new coverage goes into the existing ones, not new functions).
+**Verified:** all touched/new test files green per-file on a clean `HOME`
+(`test_helpers.py` 79, `test_calib_radial_threshold.py` 5,
+`test_hydra_calib_ui.py` 2, plus `test_calib_manual_seed.py`,
+`test_calibrate_panel_save.py`, `test_calibrate_state_restore.py`,
+`test_calib_file_load_fidelity.py`, `test_calibrate_distortion_state.py`,
+`test_calib_tilt_seed.py`, `test_manual_dspacing_calib_ui.py`, `test_smoke.py`
+— all unaffected); `pyflakes` identical to baseline (same pre-existing
+warnings only, confirmed via `git stash`); offscreen screenshots of both new
+threshold cards confirmed the 3-spinbox layout renders correctly.
+
+## 2026-10-06 (latest) — One output rebin, two units; Q and 2θ are not backend modes
+
 
 Two asks: "Q-uniform bins aren't wired into background jobs yet" (a guard in
 ``_run_as_job``) and "I think we also want even 2theta case."

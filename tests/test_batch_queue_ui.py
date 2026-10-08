@@ -348,6 +348,17 @@ def test_edit_selected_on_a_sample_opens_a_dataset_dialog(tab):
     assert sample.dataset == "exchange/data"
 
 
+def test_corrections_dialog_background_scale_defaults_to_one_and_round_trips(tab):
+    from midas_gui.batch_queue import CorrectionsNode
+    from midas_gui.tab_queue import CorrectionsDialog
+    corr = CorrectionsNode(background="/d/bg.tif")
+    dlg = CorrectionsDialog(corr, parent=tab)
+    assert dlg._bg_scale.value() == 1.0
+    dlg._bg_scale.setValue(2.5)
+    dlg.apply_to(corr)
+    assert corr.background_scale == 2.5
+
+
 def test_edit_selected_on_a_folder_sample_has_no_dataset_combo(tab):
     from midas_gui.batch_queue import Sample
     from midas_gui.tab_queue import SampleDialog

@@ -337,3 +337,59 @@ def test_save_paramstest_dialog_prefills_the_suggested_name(app):
     dlg = _SaveParamstestDialog(default_out="/tmp/park_may26_ceo2.instr.txt")
     assert dlg.out_path() == "/tmp/park_may26_ceo2.instr.txt"
     assert _SaveParamstestDialog().out_path() == ""
+
+
+# ── "Feed result back to seed" only promotes refined parameters ──────────────
+
+def _feedback_result(**over):
+    base = dict(Lsd=3_227_008.5, BC_y=2265.66, BC_z=2080.73,
+                tx=180.0, ty=-5.2542, tz=24.4086, distortion={},
+                wavelength_A=0.15381)
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_seed_from_result_skips_unrefined_tx(app):
+    """An unrefined parameter's value in the result is a fixed constant the
+    fit was given, not something it determined — feeding it back would
+    silently lock a future run to whatever that constant happened to be
+    (the connoly_oct26 Hydra bug: tx held fixed at a different nonsense
+    value per panel, see .context/DECISIONS.md)."""
+    from midas_gui.tab_calibrate import CalibrationTab
+
+    tab = CalibrationTab()
+    tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
+    tab._feedback_check.setChecked(True)
+    assert not tab._seed_en_tx.isChecked()
+    stale_tx = tab._seed_tx.value()
+
+    tab._ref_tx.setChecked(False)
+    tab._last_refine_flags = tab._refine_flags()   # Lsd/BC/ty/tz True, tx False by default
+    tab._seed_from_result(_feedback_result())
+
+    assert tab._seed_en_tx.isChecked() is False
+    assert tab._seed_tx.value() == pytest.approx(stale_tx)
+    assert tab._seed_en_lsd.isChecked() and tab._seed_en_bc.isChecked()
+    assert tab._seed_lsd.value() == pytest.approx(3227.0085, rel=1e-6)
+    assert "tx" not in tab._seed_note.text()
+
+    # Refine tx this time — now it's real new information and should be fed back.
+    tab._ref_tx.setChecked(True)
+    tab._last_refine_flags = tab._refine_flags()
+    tab._seed_from_result(_feedback_result(tx=12.5))
+    assert tab._seed_en_tx.isChecked() is True
+    assert tab._seed_tx.value() == pytest.approx(12.5)
+
+
+def test_seed_from_result_with_nothing_refined_leaves_seed_untouched(app):
+    from midas_gui.tab_calibrate import CalibrationTab
+
+    tab = CalibrationTab()
+    tab._last_refine_flags = {"Lsd": False, "BC": False, "tx": False,
+                              "ty": False, "tz": False, "Wavelength": False,
+                              "Distortion": False, "distortion_coeffs": set()}
+    tab._seed_from_result(_feedback_result())
+    assert not any(cb.isChecked() for cb in
+                   (tab._seed_en_lsd, tab._seed_en_bc, tab._seed_en_tx,
+                    tab._seed_en_ty, tab._seed_en_tz))
+    assert "no seedable parameters" in tab._seed_note.text()

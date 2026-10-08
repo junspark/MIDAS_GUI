@@ -1,12 +1,11 @@
 """Module-level helpers: image IO, transforms, ring prediction, spec building,
-log stream, and the no-scroll spinbox / two-column layout widgets used everywhere.
+and the no-scroll spinbox / two-column layout widgets used everywhere.
 
 These are ported verbatim from midas_workflow_gui_v3.py (the frozen template) so
 the established conventions in context/design_rules.md are preserved exactly.
 """
 from __future__ import annotations
 
-import io
 import math
 import re
 from pathlib import Path
@@ -2076,6 +2075,70 @@ def rmax_edge_px(bc_y: float, bc_z: float, ny: int, nz: int) -> float:
     return float(max(bc_y, ny - 1 - bc_y, bc_z, nz - 1 - bc_z))
 
 
+def radial_spline_values(r, radii, values):
+    """Evaluate the free-form monotone-cubic (PCHIP) spline through the
+    ``(radii, values)`` control points at ``r`` (scalar or array), flat
+    beyond the first/last knot (clip then interpolate — no extrapolation
+    overshoot). ``radii``/``values`` need not be pre-sorted; requires at
+    least 2 knots after sorting (``PchipInterpolator``'s own minimum)."""
+    from scipy.interpolate import PchipInterpolator
+    radii = np.asarray(radii, dtype=float)
+    values = np.asarray(values, dtype=float)
+    order = np.argsort(radii)
+    radii_s, values_s = radii[order], values[order]
+    r_arr = np.asarray(r, dtype=float)
+    interp = PchipInterpolator(radii_s, values_s, extrapolate=False)
+    return interp(np.clip(r_arr, radii_s[0], radii_s[-1]))
+
+
+def radial_spline_threshold_map(shape, bc_y: float, bc_z: float, radii, values):
+    """Per-pixel threshold floor: the free-form spline through ``(radii,
+    values)`` (see :func:`radial_spline_values`) evaluated at each pixel's
+    radius from (bc_y, bc_z). ``shape`` is (NZ, NY), matching every raw
+    detector frame in this codebase."""
+    nz, ny = shape[:2]
+    zz, yy = np.indices((nz, ny))
+    r = np.hypot(yy - bc_y, zz - bc_z)
+    return radial_spline_values(r, radii, values)
+
+
+def median_intensity_near_bc(img, bc_y: float, bc_z: float, r_max: float = 10.0) -> float:
+    """Median pixel value within ``r_max`` px of (bc_y, bc_z) — an outlier-
+    resistant brightness reference near the beam centre (unlike the image's
+    raw max, which can be a single saturated/hot pixel), used to scale the
+    radial-threshold curve editor's default Y-axis view and default curve."""
+    nz, ny = img.shape[:2]
+    zz, yy = np.indices((nz, ny))
+    r = np.hypot(yy - bc_y, zz - bc_z)
+    mask = r <= r_max
+    if not np.any(mask):
+        return float(np.nanmax(img)) if img.size else 1.0
+    return float(np.nanmedian(img[mask]))
+
+
+def default_radial_threshold_points(hi: float, rmax: float):
+    """Default knots for a freshly loaded image: a steep drop across the
+    inner ~quarter of the corner radius down to zero, then flat. ``hi`` is
+    normally :func:`median_intensity_near_bc` (an outlier-resistant
+    brightness reference), ``rmax`` the corner radius from the current BC."""
+    hi = max(0.0, float(hi))
+    rmax = max(1.0, float(rmax))
+    r_fracs = (0.0, 0.10, 0.25, 0.60)
+    y_fracs = (1.0, 0.5, 0.1, 0.0)
+    radii = np.array([f * rmax for f in r_fracs])
+    values = np.array([f * hi for f in y_fracs])
+    return radii, values
+
+
+def apply_radial_threshold(img, bc_y: float, bc_z: float, radii, values):
+    """Copy of ``img`` with pixels below the radial spline threshold
+    (see :func:`radial_spline_threshold_map`) zeroed."""
+    thr_map = radial_spline_threshold_map(img.shape, bc_y, bc_z, radii, values)
+    out = img.copy()
+    out[img < thr_map] = 0.0
+    return out
+
+
 def max_two_theta_deg(bc_y: float, bc_z: float, ny: int, nz: int,
                       lsd_um: float, pxY_um: float, pxZ_um: float = None) -> float:
     """True maximum 2theta reached anywhere on the detector frame — the
@@ -2725,22 +2788,6 @@ def render_calib_value_grid(grid: "QtWidgets.QGridLayout", note_label: "QtWidget
         grid.addWidget(kl, row, col * 2, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         grid.addWidget(vl, row, col * 2 + 1, QtCore.Qt.AlignVCenter)
     grid.setColumnStretch(ncols * 2 + 1, 1)
-
-
-# ── Log stream (redirect verbose stdout to a Qt signal) ─────────────────────────
-
-class _LogStream(io.TextIOBase):
-    def __init__(self, sig):
-        super().__init__()
-        self._sig = sig
-
-    def write(self, s):
-        if s.strip():
-            self._sig.emit(s.rstrip())
-        return len(s)
-
-    def flush(self):
-        pass
 
 
 # ── GUI-state serialization (Save/Load GUI State) ────────────────────────────────
