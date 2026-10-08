@@ -998,7 +998,8 @@ class BatchCorrectionWorker(QtCore.QThread):
         self._cancel = False
 
     def _collect_monitor_rows(self, acc: dict, path, tree, ranges, *,
-                              n_light: int, n_dark: int) -> None:
+                              n_light: int, n_dark: int,
+                              subtracted_dark: str = "") -> None:
         """Add one file's per-frame monitor rows to its froot's bucket.
 
         Grouped by froot rather than per file because a froot is the unit a
@@ -1018,7 +1019,8 @@ class BatchCorrectionWorker(QtCore.QThread):
             pass
         rows, note = ion_csv.rows_from_tree(
             csv_tree, hutch, frame_ranges=ranges, n_light=n_light,
-            n_dark=n_dark, source=Path(path).name)
+            n_dark=n_dark, source=Path(path).name,
+            subtracted_dark=subtracted_dark)
         froot = split_scan_name(Path(path).name).froot or Path(path).stem
         bucket = acc.setdefault(froot, {"rows": [], "notes": []})
         bucket["rows"].extend(rows)
@@ -1179,7 +1181,10 @@ class BatchCorrectionWorker(QtCore.QThread):
                 try:
                     self._collect_monitor_rows(
                         metadata_rows, path, tree, ranges, n_light=n_raw,
-                        n_dark=n_dark_frames)
+                        n_dark=n_dark_frames,
+                        # The dark the IMAGES were corrected with, which the
+                        # resolver may well have taken from a sibling file.
+                        subtracted_dark=why)
                 except Exception:
                     # A sidecar must never cost the user the reduction that
                     # already succeeded.

@@ -23,7 +23,8 @@ from midas_gui.helpers import (_fspin, _NoScrollSpinBox, _NoScrollComboBox,
                          widgets_to_dict, apply_dict_to_widgets, _apply_im_trans,
                          pixel_readout_text,
                          load_profile_file, profile_file_axis_kind,
-                         native_axis_to_r_px, PROFILE_FILE_FILTER)
+                         native_axis_to_r_px, PROFILE_FILE_FILTER,
+                         browse_start_dir)
 from midas_gui.widgets import (ProfileViewer, DataLoaderPanel, CakeViewer,
                               OriginToolButton, build_lab_frame_axes_items)
 from midas_gui.dialogs import show_error
@@ -131,6 +132,46 @@ class DataViewerTab(QtWidgets.QWidget):
     def _im_trans_codes(self) -> list:
         """Ordered MIDAS ImTransOpt codes from the Transforms checkboxes."""
         return self._geom_card.im_trans_codes()
+
+    # -- Default names for saved calibrations --------------------------
+    # Deliberately the same shape as CalibrationTab._default_save_stem /
+    # _default_save_path: a geometry saved here and one saved there describe
+    # the same detector, so they should not be named by different rules.
+
+    def set_expid_provider(self, provider) -> None:
+        """Wired by app.py's MainWindow; ``provider()`` is the header's Exp
+        ID. Used only to name saved calibrations."""
+        self._expid_provider = provider
+
+    def _default_save_stem(self) -> str:
+        """``<expid>_<data file stem>``, degrading to whichever half exists.
+
+        Both halves are best-effort: a blank Exp ID or no loaded data drops
+        that half rather than producing a name like ``_.instr.txt``.
+        """
+        parts = []
+        try:
+            provider = getattr(self, "_expid_provider", None)
+            expid = (provider() or "").strip() if provider else ""
+        except Exception:
+            expid = ""
+        if expid:
+            parts.append(expid)
+        data_path = self._loader.data_path()
+        if data_path:
+            # One suffix off, so a doubled extension (".ge3.h5") keeps the
+            # half that distinguishes it.
+            stem = Path(data_path).name.rsplit(".", 1)[0]
+            if stem:
+                parts.append(stem)
+        return "_".join(parts) if parts else "calibration"
+
+    def _default_save_path(self, suffix: str) -> str:
+        """Full path for a Save dialog, so it opens beside the data rather
+        than wherever the app was launched from."""
+        start = browse_start_dir(self._loader.data_path())
+        name = self._default_save_stem() + suffix
+        return str(Path(start) / name) if start else name
 
     def _sync_lab_rotation(self):
         """Draw the frame as the detector is mounted, per the card's tx.
@@ -353,6 +394,7 @@ class DataViewerTab(QtWidgets.QWidget):
 
         # ── Ring simulation + calibration load/save (extracted, reusable) ──
         self._geom_card = DetectorGeometryCard()
+        self._geom_card.set_save_name_provider(self._default_save_path)
         self._geom_card.pushGeometry.connect(self.pushGeometry.emit)
         self._geom_card.pullGeometry.connect(self.pullGeometry.emit)
         self._geom_card.imTransChanged.connect(self._on_im_trans_changed)

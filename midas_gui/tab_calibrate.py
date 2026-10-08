@@ -463,6 +463,15 @@ class CalibrationTab(QtWidgets.QWidget):
         self._avg_note.setStyleSheet("color:#9a9a9a;font-size:10px"); self._avg_note.setWordWrap(True)
         avgc.body.addWidget(self._avg_note)
         self._avg_card = avgc
+        # An empty frame renders as a correct picture of nothing, which reads
+        # as a failed load. Warned here, beside the control that fixes it.
+        self._blank_note = QtWidgets.QLabel("")
+        self._blank_note.setStyleSheet(
+            f"color:{S.WARN};font-size:10px" if hasattr(S, "WARN")
+            else "color:#e0a030;font-size:10px")
+        self._blank_note.setWordWrap(True)
+        self._blank_note.setVisible(False)
+        lv.addWidget(self._blank_note)
         self._avg_check.toggled.connect(self._on_avg_toggled)
         for w in (self._avg_start, self._avg_end):
             w.valueChanged.connect(self._on_avg_changed)
@@ -2004,7 +2013,45 @@ class CalibrationTab(QtWidgets.QWidget):
             img = self._loader.corrected(self._calib_image())
             self._img_view.set_raw_frame(img, self._im_trans_codes(),
                                           autorange=autorange, reset_levels=autorange)
+        self._update_blank_frame_note()
         self._redraw_lab_axes_if_on()
+
+    def _update_blank_frame_note(self):
+        """Say so when the frame on screen is entirely empty.
+
+        A Pixirad arms one frame before it starts counting, so frame 1 of
+        every ``.pixi.h5`` is all zeros. Calibrate opens on that frame and
+        renders a correct, black picture of nothing, which reads as "this
+        file will not load" — reported from 1-ID, where the same file looked
+        fine in the Data Viewer only because its projection was set to skip
+        one frame. The file is intact; it is the first frame that is not.
+
+        Pointed at the control that fixes it rather than just naming the
+        problem, since the frame slider and the frame-mean card are at
+        opposite ends of the tab.
+        """
+        lbl = getattr(self, "_blank_note", None)
+        if lbl is None:
+            return
+        img = self._image
+        blank = img is not None and img.size and not np.any(img)
+        lbl.setVisible(bool(blank))
+        if not blank:
+            return
+        n = self._loader.n_frames()
+        if self._avg_check.isChecked():
+            lbl.setText(
+                f"This frame average is entirely zero — every frame in "
+                f"start…end is empty. Try start=1.")
+        elif n > 1:
+            lbl.setText(
+                f"Frame {self._loader.frame_index() + 1} of {n} is entirely "
+                f"zero — nothing to calibrate against. Some detectors "
+                f"(Pixirad) leave their first frame blank: step the frame "
+                f"slider on, or tick 'Mean of frames' with start=1.")
+        else:
+            lbl.setText("This frame is entirely zero — nothing to calibrate "
+                        "against.")
 
     # ── Lab-frame axes overlay ───────────────────────────────────────
     # Same overlay as the Data Viewer tab (see tab_view.py / widgets.py

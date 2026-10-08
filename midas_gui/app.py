@@ -306,7 +306,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # suggestions reads it live via this callback rather than keeping its
         # own copy — Batch Integrate names its output folder from it, Calibrate
         # names the files it saves.
-        for tab in (self._batch_tab, self._cal_tab, self._bcorr_tab):
+        for tab in (self._batch_tab, self._cal_tab, self._bcorr_tab,
+                    self._view_tab):
             set_provider = getattr(tab, "set_expid_provider", None)
             if set_provider is not None:
                 try:

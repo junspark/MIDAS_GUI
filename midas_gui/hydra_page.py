@@ -24,6 +24,7 @@ panel overlap and mix registration error into the profile).
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -36,7 +37,9 @@ from midas_gui.helpers import (_load_image, _apply_im_trans, _fspin, apply_field
 from midas_gui.hydra_geometry_card import DetectorGeometryCard
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
-from midas_gui.widgets import _convert_radial, OriginToolButton
+from midas_gui.helpers import browse_start_dir
+from midas_gui.widgets import (_convert_radial, OriginToolButton,
+                               build_lab_frame_axes_items)
 from midas_gui import style as S
 
 #: Decimation factor for the composite built for the Data Viewer.
@@ -121,6 +124,21 @@ class HydraViewerPage(QtWidgets.QWidget):
         inner_lv = QtWidgets.QVBoxLayout(inner)
         inner_lv.setContentsMargins(0, 0, 0, 0); inner_lv.setSpacing(8)
         inner_lv.addWidget(self._loader.projection_card())
+        # Per-panel calibration is the whole point of the composite, and the
+        # only way to set it was to switch panel, browse, load, four times
+        # over -- with the card showing one panel at a time, so you could not
+        # see what the other three were on. One pick, matched by filename.
+        self._load4_btn = QtWidgets.QPushButton("Load 4 panel calibrations…")
+        self._load4_btn.setToolTip(
+            "Pick the calibration files for ge1-ge4 in one go. Each file is "
+            "matched to a panel by 'ge<n>' in its name; anything unmatched is "
+            "reported rather than guessed at.")
+        self._load4_btn.clicked.connect(self._load_four_calibrations)
+        inner_lv.addWidget(self._load4_btn)
+        self._load4_lbl = QtWidgets.QLabel("")
+        self._load4_lbl.setStyleSheet("color:#9a9a9a;font-size:10px")
+        self._load4_lbl.setWordWrap(True)
+        inner_lv.addWidget(self._load4_lbl)
         self._card_stack = QtWidgets.QStackedWidget()
         inner_lv.addWidget(self._card_stack, 1)
         scroll.setWidget(inner)
@@ -141,6 +159,11 @@ class HydraViewerPage(QtWidgets.QWidget):
         for key in ("ge1", "ge2", "ge3", "ge4", "composite"):
             card = DetectorGeometryCard(show_rotate=(key != "composite"))
             card.set_image_source(self._make_image_provider(key), None)
+            # Four panels plus a composite all saving "paramstest.txt" into
+            # the launch directory is four chances to overwrite the wrong
+            # one, so each proposes a name carrying which panel it is.
+            card.set_save_name_provider(
+                lambda suffix, k=key: self._default_save_path(k, suffix))
             if key == "composite":
                 # The "Composite" curve on the shared plot is the DERIVED
                 # resample-and-sum of ge1-4's own curves (see
@@ -179,6 +202,19 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._toolbar = HydraDetectorToolbar()
         self._toolbar.panelChanged.connect(self._on_panel_changed)
         self._viewer._toolbar_layout.addWidget(self._toolbar)
+        # Same overlay and the same control as the single-detector Data
+        # Viewer. It matters more here: the composite is built by rotating
+        # four panels about the beam, so "which way is the hutch" is the one
+        # thing a windmill picture makes hard to answer by eye.
+        self._axis_items: list = []
+        self._lab_axes_on = QtWidgets.QCheckBox("Lab-frame axes")
+        self._lab_axes_on.setToolTip(
+            "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction ⊗ "
+            "glyph, and an η sweep arc, anchored at the beam centre of "
+            "whichever panel (or the composite) is shown.")
+        self._lab_axes_on.toggled.connect(self._on_lab_axes_toggled)
+        self._viewer._toolbar_layout.addWidget(self._lab_axes_on)
+        self._viewer.originChanged.connect(self._redraw_lab_axes_if_on)
         self._roi_ribbon = ROIRibbon()
         self._viewer.set_ribbon(self._roi_ribbon)
         viewer_container = QtWidgets.QWidget()
@@ -225,6 +261,92 @@ class HydraViewerPage(QtWidgets.QWidget):
             return lambda: self._composite_img
         n = int(key[2])
         return lambda: self._raw_frames.get(n)
+
+    #: A panel number in a filename, e.g. "…_ge3.instr.txt" or "ge3/…".
+    _PANEL_IN_NAME = re.compile(r"ge\s*([1-4])\b", re.IGNORECASE)
+
+    @classmethod
+    def _panel_for_file(cls, path) -> Optional[int]:
+        """Which panel a calibration file belongs to, or None.
+
+        Read from the *last* ``ge<n>`` in the full path, so a per-panel
+        folder (``…/ge3/calib.txt``) and a per-panel filename
+        (``…_ge3.instr.txt``) both work, and a run folder that happens to
+        contain "ge1" does not out-vote the file's own name.
+        """
+        hits = cls._PANEL_IN_NAME.findall(str(path))
+        return int(hits[-1]) if hits else None
+
+    def _load_four_calibrations(self):
+        """Pick up to four panel calibrations at once and apply each to its
+        own card.
+
+        Matched by filename rather than by pick order: a file dialog returns
+        its selection sorted, not in the order they were clicked, so trusting
+        order would silently cross-assign panels -- and a calibration on the
+        wrong panel is a composite that looks plausible and is wrong.
+        Anything unmatched is reported, never guessed at.
+        """
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Select calibration files for ge1–ge4",
+            browse_start_dir(self._loader.data_path()
+                             if hasattr(self._loader, "data_path") else ""),
+            "Calibration (*.json *.poni *.txt);;All (*)")
+        if not paths:
+            return
+        chosen: dict = {}
+        unmatched, clashes = [], []
+        for p in paths:
+            n = self._panel_for_file(p)
+            if n is None:
+                unmatched.append(Path(p).name)
+            elif n in chosen:
+                clashes.append(f"ge{n}")
+            else:
+                chosen[n] = p
+        for n, p in sorted(chosen.items()):
+            card = self._cards.get(f"ge{n}")
+            if card is not None:
+                card.set_calib_path(p)
+        bits = []
+        if chosen:
+            bits.append("loaded " + ", ".join(f"ge{n}" for n in sorted(chosen)))
+        if unmatched:
+            bits.append("no ge1–4 in: " + ", ".join(unmatched))
+        if clashes:
+            bits.append("more than one file for " + ", ".join(sorted(set(clashes)))
+                        + " — kept the first")
+        missing = [f"ge{n}" for n in (1, 2, 3, 4) if n not in chosen]
+        if missing and chosen:
+            bits.append("unchanged: " + ", ".join(missing))
+        self._load4_lbl.setText("  ·  ".join(bits))
+
+    def _default_save_path(self, key: str, suffix: str) -> str:
+        """``<expid>_<data stem>_<panel><suffix>``, beside the data.
+
+        Same rule as ``CalibrationTab._default_save_path`` and the Data
+        Viewer's, with the panel key appended because these five cards
+        describe five different detectors and would otherwise all propose
+        the same filename.
+        """
+        from midas_gui.helpers import browse_start_dir
+        parts = []
+        try:
+            provider = getattr(self, "_expid_provider", None)
+            expid = (provider() or "").strip() if provider else ""
+        except Exception:
+            expid = ""
+        if expid:
+            parts.append(expid)
+        data_path = self._loader.data_path() if hasattr(self._loader, "data_path") else ""
+        if data_path:
+            stem = Path(data_path).name.rsplit(".", 1)[0]
+            if stem:
+                parts.append(stem)
+        parts.append(key)
+        name = "_".join(parts) + suffix
+        start = browse_start_dir(data_path) if data_path else ""
+        return str(Path(start) / name) if start else name
 
     def _ensure_states_for_siblings(self, siblings: dict):
         for n in siblings:
@@ -421,6 +543,21 @@ class HydraViewerPage(QtWidgets.QWidget):
         if src is None:
             return
         shared = src.get_shared_fields()
+        # Pixel size is NOT shared with the composite in either direction.
+        # The composite canvas is decimated by COMPOSITE_DISPLAY_STEP and its
+        # card's px is deliberately panel_px * step so that NrPixels * px --
+        # the physical extent -- stays the same (see
+        # _reseed_composite_card_if_needed). Mirroring that number onto the
+        # panels tells each one its pixels are `step` times larger than they
+        # are; mirroring a panel's back over it undoes the scaling the
+        # decimated canvas depends on. Wavelength and max 2theta are genuinely
+        # common to every panel, so those still propagate.
+        #
+        # This was latent until the panel cards' own geometry fields started
+        # being read (DetectorGeometryCard._export_geom no longer returns the
+        # loaded calibration wholesale), at which point the inflated px
+        # reached each panel's DetectorState and moved the composite.
+        shared_no_px = {k: v for k, v in shared.items() if k != "pxY"}
         self._syncing_shared = True
         try:
             for key in self._SHARED_FIELD_KEYS:
@@ -428,7 +565,9 @@ class HydraViewerPage(QtWidgets.QWidget):
                     continue
                 card = self._cards.get(key)
                 if card is not None:
-                    card.apply_shared_fields(shared)
+                    card.apply_shared_fields(
+                        shared_no_px
+                        if "composite" in (key, source_key) else shared)
         finally:
             self._syncing_shared = False
 
@@ -504,6 +643,47 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._viewer.set_image(img, autorange=fresh)
         if self._active_card is not None:
             self._active_card.refresh_rings_and_radial()
+        # The compass is anchored to the shown detector's beam centre, so a
+        # panel switch moves it even when nothing about the geometry changed.
+        self._redraw_lab_axes_if_on()
+
+    # ── Lab-frame axes overlay ───────────────────────────
+    # Port of the Data Viewer's overlay (tab_view._draw_lab_axes). The one
+    # difference is the anchor: this page shows a different detector
+    # depending on the toolbar, so the compass follows whichever card is
+    # active rather than a single geometry card.
+
+    def _on_lab_axes_toggled(self, checked: bool):
+        if checked:
+            self._draw_lab_axes()
+        else:
+            self._clear_lab_axes()
+
+    def _redraw_lab_axes_if_on(self, *_args):
+        if getattr(self, "_lab_axes_on", None) is not None \
+                and self._lab_axes_on.isChecked():
+            self._draw_lab_axes()
+
+    def _clear_lab_axes(self):
+        for it in self._axis_items:
+            self._viewer._iv.removeItem(it)
+        self._axis_items.clear()
+
+    def _draw_lab_axes(self):
+        self._clear_lab_axes()
+        img = getattr(self._viewer, "_data", None)
+        card = self._cards.get(self._toolbar.current())
+        if img is None or card is None:
+            return
+        geo = card.get_geometry() or {}
+        bcy, bcz = geo.get("BC_y"), geo.get("BC_z")
+        if bcy is None or bcz is None:
+            return
+        items = build_lab_frame_axes_items(
+            self._viewer._iv, img.shape, float(bcy), float(bcz))
+        for it in items:
+            self._viewer._iv.addItem(it)
+        self._axis_items.extend(items)
 
     # ── Export (Calibrate tab's Hydra "← Data Viewer" import) ───────
 

@@ -303,6 +303,9 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         super().__init__(parent)
         self._show_rotate = show_rotate
         self._materials: list = []
+        #: What a calibration load wrote into the geometry boxes; see
+        #: _snapshot_calib_baseline.
+        self._calib_widget_baseline: Optional[dict] = None
         self._ring_items: list = []
         self._label_items: list = []
         self._pick_ring_item = None
@@ -324,6 +327,9 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._profile_view = None
         self._cake_view = None
         self._image_provider: Callable[[], Optional[np.ndarray]] = lambda: None
+        #: ``fn(suffix) -> full path`` for the Save dialogs; see
+        #: set_save_name_provider.
+        self._save_name_provider: Optional[Callable[[str], Optional[str]]] = None
         self._mask_provider: Optional[Callable[[np.ndarray], Optional[np.ndarray]]] = None
         self._rad_r_bin: Optional[QtWidgets.QDoubleSpinBox] = None
         self._rad_auto: Optional[QtWidgets.QCheckBox] = None
@@ -339,6 +345,21 @@ class DetectorGeometryCard(QtWidgets.QWidget):
                           mask_provider: Optional[Callable[[np.ndarray], Optional[np.ndarray]]] = None):
         self._image_provider = image_provider
         self._mask_provider = mask_provider
+
+    def set_save_name_provider(self, fn: Optional[Callable[[str], Optional[str]]]):
+        """Supply ``fn(suffix) -> full default path`` for the Save dialogs.
+
+        Without it the dialogs open on bare names (``paramstest.txt``) in
+        whatever directory the app was launched from, so every save is a
+        navigate-and-type. The Calibrate tab has named its files
+        ``<expid>_<data stem><suffix>`` beside the data for a while
+        (``CalibrationTab._default_save_path``); this lets the Data Viewer and
+        the Hydra panels do the same instead of each inventing one.
+
+        Optional, and failures fall back to the bare name, so a card with no
+        provider behaves exactly as before.
+        """
+        self._save_name_provider = fn
 
     def set_profile_view(self, profile_view):
         self._profile_view = profile_view
@@ -554,8 +575,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             return
         for w, key, scale in ((self._wl, "wavelength_A", 1.0), (self._px, "pxY", 1.0),
                               (self._lsd, "Lsd", 0.001), (self._bcy, "BC_y", 1.0),
-                              (self._bcz, "BC_z", 1.0), (self._ty, "ty", 1.0),
-                              (self._tz, "tz", 1.0)):
+                              (self._bcz, "BC_z", 1.0), (self._tx, "tx", 1.0),
+                              (self._ty, "ty", 1.0), (self._tz, "tz", 1.0)):
             v = g.get(key)
             if v is not None:
                 w.blockSignals(True); w.setValue(float(v) * scale); w.blockSignals(False)
@@ -571,6 +592,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             or (g.get("NrPixelsY") and g.get("NrPixelsZ"))
         if has_full:
             self._apply_full_geometry_dict(g)
+            self._snapshot_calib_baseline()
         self._after_geometry_change()
 
     def _apply_full_geometry_dict(self, g: dict):
@@ -1772,6 +1794,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             self._calib_lbl.setText(
                 f"Loaded {Path(path).suffix or 'file'} — " + "  ".join(parts)
                 + f"  ·  {mode}")
+            self._snapshot_calib_baseline()
             self._after_geometry_change()
         except Exception:
             import traceback
@@ -1786,25 +1809,69 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return self._export_geom()
 
     def _export_geom(self) -> Optional[dict]:
-        """Full geometry dict for calibration export: the loaded calibration's
-        geometry if present (carries tilts/distortion/detector size from the
-        file), otherwise one built from the current manual / Ring-simulation
-        fields (tx=0, distortion empty)."""
-        if self._calib_geom is not None:
-            geom = dict(self._calib_geom)
-            geom["im_trans"] = self.im_trans_codes()   # current checkboxes win
-            return geom
+        """Full geometry dict for calibration export and for whoever owns this
+        card (the Hydra page syncs it into a ``hydra.DetectorState``).
+
+        A loaded calibration supplies what no widget can -- distortion
+        coefficients and the detector size -- and the **live fields win over
+        it**, because the fields are what the user can see and edit.
+
+        This used to return ``self._calib_geom`` wholesale, which made every
+        geometry box on the card inert the moment a calibration was loaded.
+        On the Hydra page that is always: each panel loads a bundled
+        ``ps_ge{n}.txt`` at startup, so editing tx/ty/tz or the beam centre
+        there changed nothing at all and the boxes displayed values the
+        composite was not using. Measured before the fix: panel 1's box read
+        0.00 while the composite placed it at 296.885 deg, and typing 138 into
+        the box left both numbers untouched.
+
+        Loading writes the file's values into those same widgets (see
+        :meth:`set_geometry` and :meth:`_load_calibration`), so straight after
+        a load the override is a no-op and only a deliberate edit diverges.
+        """
+        base = dict(self._calib_geom) if self._calib_geom is not None else None
         img = self._image_provider()
-        if img is None:
+        if base is None and img is None:
             return None
-        nz, ny = img.shape
         px = self._px.value()
-        return {
+        live = {
             "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
             "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
             "tx": self._tx.value(), "ty": self._ty.value(), "tz": self._tz.value(),
-            "pxY": px, "pxZ": px, "NrPixelsY": ny, "NrPixelsZ": nz,
-            "distortion": {}, "im_trans": self.im_trans_codes(),
+            "pxY": px, "im_trans": self.im_trans_codes(),
+        }
+        if base is None:
+            nz, ny = img.shape
+            return {**live, "pxZ": px, "NrPixelsY": ny, "NrPixelsZ": nz,
+                    "distortion": {}}
+        # Override only the fields the user has actually MOVED since the
+        # calibration was loaded, compared against what the load itself wrote
+        # into each box -- not against the file's value. The boxes are
+        # fixed-decimal (tx has 2), so a file's 296.885 displays as 296.88 and
+        # "the widget always wins" would quietly round a calibrated roll by
+        # 0.005 deg, about 0.15 px out at the edge of a Hydra panel. Comparing
+        # against the baseline makes an untouched box mean exactly nothing.
+        baseline = self._calib_widget_baseline or {}
+        geom = dict(base)
+        for key, val in live.items():
+            if key not in baseline or baseline[key] != val:
+                geom[key] = val
+        # One px box against a file that may carry a non-square pair: only a
+        # changed box means "square pixels, this size". An untouched one must
+        # not flatten pxZ onto pxY behind the user's back.
+        if "pxY" in geom and abs(float(base.get("pxY") or px) - px) > 1e-9:
+            geom["pxZ"] = px
+        return geom
+
+    def _snapshot_calib_baseline(self) -> None:
+        """Remember what a calibration load just put into each geometry box,
+        so :meth:`_export_geom` can tell an untouched box from an edited one
+        without fighting the boxes' display precision."""
+        self._calib_widget_baseline = {
+            "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
+            "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
+            "tx": self._tx.value(), "ty": self._ty.value(), "tz": self._tz.value(),
+            "pxY": self._px.value(), "im_trans": self.im_trans_codes(),
         }
 
     def _save_calibration(self, kind: str):
@@ -1815,11 +1882,19 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "No geometry", "Load data first.")
             return
         specs = {
-            "json": ("Save calibration.json", "calibration.json", "JSON (*.json)"),
-            "paramstest": ("Save MIDAS parameter file", "paramstest.txt", "Text (*.txt)"),
-            "poni": ("Save calibration.poni", "calibration.poni", "PONI (*.poni)"),
+            "json": ("Save calibration.json", "calibration.json",
+                     ".instr.json", "JSON (*.json)"),
+            "paramstest": ("Save MIDAS parameter file", "paramstest.txt",
+                           ".instr.txt", "Text (*.txt)"),
+            "poni": ("Save calibration.poni", "calibration.poni",
+                     ".poni", "PONI (*.poni)"),
         }
-        title, default_name, filt = specs[kind]
+        title, default_name, suffix, filt = specs[kind]
+        if self._save_name_provider is not None:
+            try:
+                default_name = self._save_name_provider(suffix) or default_name
+            except Exception:
+                pass      # naming is a convenience; never block a save
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, title, default_name, filt)
         if not path:
             return

@@ -3,7 +3,35 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
-## 2026-10-07 (latest) — One parameter table on the single-detector Calibrate tab
+## 2026-10-07 (latest) — The CSV says which dark was subtracted
+
+Closes the follow-up left open when the beam-monitor dark became a row
+(2026-10-06, below): the CSV's ``kind="dark"`` row is the dark block
+*inside the file it describes*, while the dark actually subtracted from the
+images is whatever ``frame_correct.resolve_dark``'s ladder picked — usually
+the nearest ``_dark_before`` sibling, i.e. a different acquisition.
+
+Both are real and they are **different measurements**, so the fix is not to
+choose one. The monitor readings genuinely are this file's own
+shutter-closed block; the images genuinely were corrected with something
+else. Writing only the first and calling it "the dark" invited a reader to
+compare a chunk against a baseline that was never subtracted.
+
+``rows_from_tree`` now takes ``subtracted_dark`` — the resolver's own
+``why`` string, already computed a few lines earlier in
+``BatchCorrectionWorker`` and already logged — and writes it as a
+``subtracted_dark`` column **on the dark row only**. On the dark row,
+because it is a statement about what the baseline is; repeating it per
+chunk would be the width-doubling the ``<channel>_dark`` companion columns
+were removed for. And, like ``kind``, the column appears only when some row
+carries one, so the Batch Integrate path (``rows_from_metas``, which has no
+dark row and no resolver) does not grow a column of blanks that would read
+as a missing value rather than an absent concept.
+
+No change to how the dark is chosen or applied — only to whether the CSV
+admits which one it was.
+
+## 2026-10-07 — One parameter table on the single-detector Calibrate tab
 
 "I don't understand what the manual seed window actually adds. All that
 functionality can be done through the refine parameters panel."
@@ -262,6 +290,8 @@ different acquisition entirely — the ladder prefers the nearest
 is describing the file's own dark, not the one that was subtracted. The
 subtracted one is named in the Log and in the output's ``midas_gui_dark``
 attribute. Reconciling the two is a real follow-up, not an oversight.
+
+*Closed 2026-10-07 — see "The CSV says which dark was subtracted" below.*
 
 ---
 

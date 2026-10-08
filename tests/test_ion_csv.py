@@ -259,3 +259,68 @@ def test_batch_integrates_csv_has_no_kind_column(tmp_path):
     header = open(out).readline().strip()
     assert not header.startswith("kind")
     assert header.startswith("frame,source_file")
+
+
+# ── which dark was actually subtracted ───────────────────────────────────
+
+def test_the_dark_row_names_the_dark_that_was_subtracted():
+    """Left open when the dark became a row (DECISIONS 2026-10-06):
+
+        "The CSV's dark row is the dark block *inside the same file*. Batch
+        Correction's SUBTRACTED dark may be a different acquisition
+        entirely... Reconciling the two is a real follow-up."
+
+    Both things are true and they are different measurements, so the file
+    has to state both rather than pick one. The monitor readings are this
+    file's own shutter-closed block; the images were corrected with
+    whatever ``frame_correct.resolve_dark``'s ladder chose, usually the
+    nearest ``_dark_before`` sibling. A reader comparing a chunk against
+    the baseline row was otherwise comparing it against a dark that may
+    never have been subtracted.
+    """
+    tree = _tree([1000.0] * 4, [100.0] * 4)
+    rows, _ = IC.rows_from_tree(
+        tree, "E", frame_ranges=[(0, 3)], n_light=4, n_dark=4,
+        source="s_00001.ge3.h5",
+        subtracted_dark="s_dark_before_00000.ge3.h5")
+    dark = [r for r in rows if r.get("kind") == "dark"]
+    assert len(dark) == 1
+    assert dark[0]["subtracted_dark"] == "s_dark_before_00000.ge3.h5"
+    # The monitor readings themselves are still this file's own dark block,
+    # which is what makes the two columns worth distinguishing.
+    assert dark[0]["source_file"] == "s_00001.ge3.h5"
+
+
+def test_only_the_dark_row_carries_it():
+    """It is a statement about the baseline, not about each chunk. Putting
+    it on every row is the width-doubling the companion columns were
+    removed for."""
+    tree = _tree([1000.0] * 4, [100.0] * 4)
+    rows, _ = IC.rows_from_tree(
+        tree, "E", frame_ranges=[(0, 1), (2, 3)], n_light=4, n_dark=4,
+        source="s.h5", subtracted_dark="elsewhere.h5")
+    for r in rows:
+        if r.get("kind") == "chunk":
+            assert "subtracted_dark" not in r
+
+
+def test_the_column_is_absent_when_nothing_reported_a_dark():
+    """A blank column reads as a missing value rather than an absent
+    concept -- the same reason `kind` only appears when some row has one."""
+    tree = _tree([1000.0] * 4, [100.0] * 4)
+    rows, _ = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 3)],
+                                n_light=4, n_dark=4, source="s.h5")
+    assert all("subtracted_dark" not in r for r in rows)
+    headers = [h for _k, h in IC._columns(rows, ())]
+    assert "subtracted_dark" not in headers
+
+
+def test_the_column_is_written_out_when_present():
+    tree = _tree([1000.0] * 4, [100.0] * 4)
+    rows, _ = IC.rows_from_tree(
+        tree, "E", frame_ranges=[(0, 3)], n_light=4, n_dark=4,
+        source="s.h5", subtracted_dark="d.h5")
+    headers = [h for _k, h in IC._columns(rows, ())]
+    assert "subtracted_dark" in headers
+    # Index columns keep their fixed order; this one trails them.
+    assert headers.index("subtracted_dark") < headers.index("US_IC")

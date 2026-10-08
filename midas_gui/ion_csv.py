@@ -302,7 +302,8 @@ def rows_from_metas(metas) -> list:
 
 
 def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
-                   n_light: int, n_dark: int = 0, source: str = "") -> tuple:
+                   n_light: int, n_dark: int = 0, source: str = "",
+                   subtracted_dark: str = "") -> tuple:
     """``(rows, note)`` straight from an unaligned :func:`h5_metadata.read_tree`.
 
     Does its own slicing and chunk-averaging rather than taking
@@ -325,6 +326,17 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
     gets one row, ``kind="dark"``, carrying the mean over the whole dark
     block under the SAME column names the lights use — directly comparable,
     and the table stays half as wide.
+
+    ``subtracted_dark`` closes the gap that entry left open. The dark row is
+    a monitor measurement of the dark block **inside this file**; the dark
+    actually subtracted from the images is picked by
+    ``frame_correct.resolve_dark``, whose ladder prefers the nearest
+    ``_dark_before`` sibling and so is often a different acquisition. The
+    two were both called "the dark" and only one of them was in the CSV, so
+    a reader comparing a chunk against the baseline row could be comparing
+    it against a dark that was never subtracted. Passing the resolver's own
+    ``why`` string writes it into a ``subtracted_dark`` column on the dark
+    row, so the file states both facts instead of implying they are one.
     """
     light_off, dark_off, note = split_light_dark(
         tree, n_light=n_light, n_dark=n_dark, hutch=hutch)
@@ -385,6 +397,11 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
             v is not None for v in dark_values.values()):
         row = {"kind": "dark", "source_file": source,
                "frame_start": 0, "frame_end": n_dark - 1}
+        if subtracted_dark:
+            # Named on the dark row only: it is a statement about what the
+            # baseline is, and repeating it on every chunk row would be the
+            # same width-doubling the companion columns were removed for.
+            row["subtracted_dark"] = subtracted_dark
         row.update({key: dark_values.get(key) for key in series})
         rows.append(row)
     # A row is identified by its file and the raw sub-frame range it was
@@ -415,7 +432,8 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
 #:   It has one row per output frame and no raw range to report.
 _INDEX_COLUMNS = (("kind", "kind"), ("frame", "frame"),
                   ("source_file", "source_file"),
-                  ("frame_start", "frame_start"), ("frame_end", "frame_end"))
+                  ("frame_start", "frame_start"), ("frame_end", "frame_end"),
+                  ("subtracted_dark", "subtracted_dark"))
 
 
 def _columns(rows, extras) -> list:
