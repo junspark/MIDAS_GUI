@@ -119,7 +119,7 @@ def chunk_ranges(n_raw: int, *, chunk_size: Optional[int] = None,
 def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
                        bright_mode: str = "divide", background=None,
                        clip_negatives: bool = True,
-                       skip_blank: bool = True, stats: Optional[dict] = None) -> dict:
+                       skip_blank: bool = False, stats: Optional[dict] = None) -> dict:
     """``{op: frame}`` for several ops over ONE pass of ``frames``.
 
     Correcting a sub-frame is the same work whichever op consumes it, and
@@ -150,8 +150,17 @@ def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
 
     ``sum`` and ``max`` are unaffected either way (adding or maximising
     against zero changes nothing), so this only moves ``mean`` and
-    ``median`` -- but it moves them to the right answer, which is why it is
-    on by default rather than opt-in. A chunk that is ENTIRELY blank keeps
+    ``median``.
+
+    **Off by default, and that is a retraction.** It shipped on by default
+    and was wrong to: an all-zero raw frame is NOT reliably an arming frame.
+    It broke three ``test_batch_correction_tab`` cases whose synthetic stack
+    ramps ``base + i`` from 0, so sub-frame 0 is legitimately all-zero data
+    and dropping it moved a mean from 1.5 to 2.0. Nothing in the pixel values
+    distinguishes "the detector had not started counting" from "this exposure
+    really was zero" -- position does not either, since the Pixirad's dud and
+    that ramp's first frame are both frame 0. The caller has to say, from
+    something outside the array (the detector, or the user). A chunk that is ENTIRELY blank keeps
     its frames: there is no good answer there, and raising "no frames to
     combine" for a run that legitimately contains a dead chunk would be
     worse than returning the zeros the detector actually produced.
@@ -244,7 +253,7 @@ def reduce_chunk_multi(frames, ops, *, dark=None, bright=None,
 def reduce_chunk(frames, op: str = "mean", *, dark=None, bright=None,
                  bright_mode: str = "divide", background=None,
                  clip_negatives: bool = True,
-                 skip_blank: bool = True, stats: Optional[dict] = None) -> np.ndarray:
+                 skip_blank: bool = False, stats: Optional[dict] = None) -> np.ndarray:
     """Correct every frame, combine them with ``op``, clip once. Returns float32.
 
     See the module docstring for why that order, and why it is the same order
