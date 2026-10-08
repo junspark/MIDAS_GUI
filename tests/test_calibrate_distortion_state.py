@@ -59,9 +59,9 @@ class TestWorkspaceRoundTrip:
         fired and the caption contradicted the tick beside it."""
         state = _saved(make_tab, False, {"iso_R2", "a1", "phi1"})
         t = make_tab()
-        assert t._ref_dist.text() == "Distortion (15/15)"
+        assert t._dist_btn.text() == "15/15"
         t.set_state(state)
-        assert t._ref_dist.text() == "Distortion (0/15)"
+        assert t._dist_btn.text() == "0/15"
 
     def test_a_project_saved_before_this_key_existed_keeps_its_default(self, make_tab):
         state = _saved(make_tab, True, {"iso_R2"})
@@ -69,7 +69,7 @@ class TestWorkspaceRoundTrip:
         t = make_tab()
         t.set_state(state)
         assert len(t._dist_coeffs) == 15
-        assert t._ref_dist.text() == "Distortion (15/15)"
+        assert t._dist_btn.text() == "15/15"
 
 
 _ATTEMPT = {"cfg": {"refine": {"Lsd": True, "BC": True, "Distortion": True,
@@ -82,7 +82,7 @@ class TestAttemptReplay:
         t.apply_project_calibration({"single": _ATTEMPT})
         assert t._ref_dist.isChecked()
         assert t._dist_coeffs == {"iso_R2", "a1", "phi1"}
-        assert t._ref_dist.text() == "Distortion (3/15)"
+        assert t._dist_btn.text() == "3/15"
 
     def test_a_restored_workspace_wins_over_the_staler_attempt(self, make_tab):
         """The workspace was saved at Ctrl+S; the attempt was recorded when the
@@ -122,6 +122,9 @@ class TestHydraPage:
         b.set_state(state)
         assert b._dist_coeffs == {"iso_R2", "a1"}
         assert not b._ref_dist.isChecked()
+        # Hydra still captions the checkbox; only the single-detector tab
+        # moved the count onto its button, where the parameter table names
+        # the row in column 0.
         assert b._ref_dist.text() == "Distortion (0/15)"
 
 
@@ -157,9 +160,9 @@ class TestRealProjectFile:
         # The caption counts what the *run* would refine, so an unticked row
         # reads (0/15) while still holding the three underneath — re-tick it
         # and the selection is there, which is the whole point of saving it.
-        assert b._ref_dist.text() == "Distortion (0/15)"
+        assert b._dist_btn.text() == "0/15"
         b._ref_dist.setChecked(True)
-        assert b._ref_dist.text() == "Distortion (3/15)"
+        assert b._dist_btn.text() == "3/15"
 
     def test_a_ticked_subset_survives_too(self, make_tab, tmp_path):
         """The unticked case can pass for the wrong reason — nothing to refine
@@ -179,6 +182,6 @@ class TestRealProjectFile:
         b.set_state(project.read_workspace_tab(proj, "Calibrate")[0])
         assert b._ref_dist.isChecked()
         assert b._dist_coeffs == {"iso_R2", "iso_R4"}
-        assert b._ref_dist.text() == "Distortion (2/15)"
+        assert b._dist_btn.text() == "2/15"
         # and the run would honour it, not silently widen back out to 15
         assert b._refine_flags()["distortion_coeffs"] == {"iso_R2", "iso_R4"}

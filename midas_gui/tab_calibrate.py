@@ -37,8 +37,9 @@ from midas_gui.widgets import (
     ring_azimuth_residual)
 from midas_gui.workers import CalibrationWorker, IntegrationWorker, ManualDspacingCalibWorker
 from midas_gui.dialogs import (_SaveParamstestDialog, DistortionRefineDialog,
-                                DistortionSeedDialog, ManualSeedDialog,
+                                DistortionSeedDialog,
                                 PARAMETER_LIMIT_ROWS, limit_window, show_error)
+from midas_gui.calib_param_table import CalibrationParameterTable
 from midas_gui.hydra_widgets import HydraModeRibbon
 from midas_gui.hydra_calib_page import HydraCalibrationPage
 from midas_gui import project
@@ -72,6 +73,10 @@ class CalibrationTab(QtWidgets.QWidget):
         self._last_refine_flags: Optional[dict] = None  # refine flags used for the last run
         self._last_fit_sigma: Optional[dict] = None     # per-parameter 1σ from the last manual fit
         self._last_at_limit: set = set()                # params that hit a limit last run
+        # What the last crystalline run's windows were actually taken around.
+        # Kept because "Feed result back to seed" rewrites the seed boxes
+        # before the at-limit check reads them; see _crystalline_at_limit.
+        self._last_limit_ctx: Optional[dict] = None
         # The Refine checkboxes are shared by the crystalline and manual fits,
         # but their sensible defaults are not. A crystalline CeO2 pattern fills
         # the detector and constrains Lsd and tilt well; a d-spacing calibrant
@@ -468,7 +473,6 @@ class CalibrationTab(QtWidgets.QWidget):
         # on/off convenience — see `_on_seed_master_toggled`/
         # `_on_seed_enable_changed` — for project-file backward compatibility
         # and the Hydra cross-panel sync (hydra_calib_page._sync_seed_checkbox).
-        seed = S.make_card("Initial seed  (Pick tools on image)")
         self._manual_seed_check = QtWidgets.QCheckBox("Use manual seed")
         self._manual_seed_check.setTristate(True)
         self._manual_seed_check.setVisible(False)   # superseded by the dialog; kept as internal/legacy state only
@@ -564,6 +568,10 @@ class CalibrationTab(QtWidgets.QWidget):
         # 13868, which reads as Send having been dropped or halved.
         for w in (self._seed_bcy, self._seed_bcz, self._seed_lsd, *self._seed_tilts):
             w.valueChanged.connect(self._update_seed_summary)
+            # The overlay follows the geometry that is current. Without this
+            # the tab kept showing rings from an older fit after the seed was
+            # replaced -- see _draw_seed_rings.
+            w.valueChanged.connect(self._draw_seed_rings)
             w.valueChanged.connect(self._update_limits_label)
             w.valueChanged.connect(self._refresh_pixel_readout)
         self._wl.valueChanged.connect(self._update_limits_label)
@@ -589,25 +597,9 @@ class CalibrationTab(QtWidgets.QWidget):
             "back into these seed fields so the next run starts from them.")
         self._seed_note = QtWidgets.QLabel("")
         self._seed_note.setStyleSheet(f"color:{S.ACCENT};font-size:10px"); self._seed_note.setWordWrap(True)
-        self._seed_dialog = ManualSeedDialog(
-            en_bc=self._seed_en_bc, bcy=self._seed_bcy, bcz=self._seed_bcz,
-            en_lsd=self._seed_en_lsd, lsd=self._seed_lsd,
-            en_tx=self._seed_en_tx, tx=self._seed_tx,
-            en_ty=self._seed_en_ty, ty=self._seed_ty,
-            en_tz=self._seed_en_tz, tz=self._seed_tz,
-            en_dist=self._seed_en_dist, dist_btn=self._seed_dist_btn,
-            feedback_check=self._feedback_check, note=self._seed_note, parent=self)
-        self._seed_btn = QtWidgets.QPushButton("Manual seed…")
-        self._seed_btn.setToolTip(
-            "Choose which of BC / Lsd / tx / ty / tz / Distortion to seed "
-            "the fit's starting point from. Use Pick BC / Pick Ring on the "
-            "image to populate BC while this is open.")
-        self._seed_btn.clicked.connect(self._open_seed_dialog)
-        seed.body.addWidget(self._seed_btn)
         self._seed_summary_lbl = QtWidgets.QLabel("")
         self._seed_summary_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._seed_summary_lbl.setWordWrap(True)
-        seed.body.addWidget(self._seed_summary_lbl)
         # BC without Lsd is a known-bad combination — Lsd/BC/tilt are near-
         # degenerate at small 2theta (see the Refine card / DECISIONS
         # 2026-09-09), so flag it rather than let a half-seeded geometry run away.
@@ -615,29 +607,16 @@ class CalibrationTab(QtWidgets.QWidget):
         self._seed_bc_lsd_warn.setStyleSheet("color:#d7861f;font-weight:bold;font-size:10px")
         self._seed_bc_lsd_warn.setWordWrap(True)
         self._seed_bc_lsd_warn.setVisible(False)
-        seed.body.addWidget(self._seed_bc_lsd_warn)
-        self._update_seed_dist_label()
-        self._sync_seed_enabled()
-        self._update_seed_summary()
-        self._update_seed_bc_lsd_warning()
-        self._update_seed_btn_style()
-        lv.addWidget(seed)
 
         # ── Refine parameters ──
-        refc = S.make_card("Refine parameters")
+        refc = S.make_card("Parameters  (Pick tools on image)")
         self._refine_summary_lbl = QtWidgets.QLabel("")
         self._refine_summary_lbl.setStyleSheet(f"color:{S.ACCENT};font-size:10px")
         self._refine_summary_lbl.setWordWrap(True)
         refc.body.addWidget(self._refine_summary_lbl)
-        # Three compact rows — the geometry scalars, the tilts, then the two
-        # whole-image refinements. Each of these used to own a line of its own
-        # (a hangover from the ± limits column that ran alongside them), which
-        # made this the tallest card in a column that has to hold six.
-        # Rows 0-1 (the scalars + tilts) get their own grid, separate from row
-        # 2's (Distortion/Residual map need a wider "…" button column) — a
-        # single shared grid ties every row's column widths together, which
-        # is why row 2 stayed unchanged while rows 0-1 can go tighter here.
-        rfl = QtWidgets.QGridLayout(); rfl.setHorizontalSpacing(2); rfl.setVerticalSpacing(4)
+        # Distortion and Residual map keep a grid of their own below the
+        # table: both need a wider "…" button column, and a single shared
+        # grid would tie their column widths to the parameter rows'.
         rfl_bottom = QtWidgets.QGridLayout(); rfl_bottom.setSpacing(4)
         self._ref_lsd = QtWidgets.QCheckBox("Lsd"); self._ref_lsd.setChecked(True)
         self._ref_bc = QtWidgets.QCheckBox("BC"); self._ref_bc.setChecked(True)
@@ -650,145 +629,89 @@ class CalibrationTab(QtWidgets.QWidget):
         for w in (self._ref_lsd, self._ref_bc, self._ref_ty, self._ref_tz,
                   self._ref_tx, self._ref_wl):
             w.toggled.connect(self._on_refine_flags_changed)
-        # Let each Manual seed row say what the fit will actually do with
-        # that parameter. The two panels are deliberately NOT wired together
-        # — seeding something you are not refining is how you pin it to a
-        # measured value — but without this they only look like they
-        # disagree. Done here because this card is built after the dialog.
-        self._seed_dialog.set_refine_boxes(
-            {"BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
-             "ty": self._ref_ty, "tz": self._ref_tz,
-             "Distortion": self._ref_dist})
-
-        # One row per parameter: the "refine?" checkbox on the left, and on the
-        # right the ± window that bounds it — the two decisions about the same
-        # parameter read together instead of living in separate blocks.
-        # Column 1 is the limits column. Both calibrant kinds bound their fit,
-        # but at different granularity and with different semantics — see
-        # _LIMIT_ROWS_XTAL / _sync_limits_mode. The header says which is in
-        # force, since "± window" means an opt-in bound for the manual fit and
-        # an always-applied one for the crystalline backend.
-        hdr = QtWidgets.QLabel("")
-        hdr.setStyleSheet(f"color:{S.MUTED};font-size:10px"); hdr.setWordWrap(True)
-        rfl.addWidget(hdr, 0, 0, 1, 5)
-        self._limits_hdr = hdr
-        #: limit slot -> (refine checkbox, sub-label). The single "BC" checkbox
-        #: frees both centre coordinates, so it spans the BC_y/BC_z rows and
-        #: those two rows carry their own sub-label; every other row is already
-        #: named by its refine checkbox, so its limit checkbox has no text.
-        #: "distortion" has no refine checkbox of its own here — the Distortion
-        #: refine box lives in its own row below the grid — so it carries a
-        #: sub-label too.
-        limit_layout = {"Lsd": (self._ref_lsd, ""), "BC_y": (self._ref_bc, "BC_y"),
-                        "BC_z": (None, "BC_z"), "ty": (self._ref_ty, ""),
-                        "tz": (self._ref_tz, ""), "tx": (self._ref_tx, ""),
-                        "wavelength_A": (self._ref_wl, ""),
-                        "distortion": (None, "Distortion")}
-        # Taken from PARAMETER_LIMIT_ROWS rather than restated, so this card,
-        # the Manual seed dialog and _REFINE_BOXES cannot drift into three
-        # different orders again (they had: this card ran ty, tz, tx and the
-        # seed dialog led with BC).
-        order = tuple(row[0] for row in PARAMETER_LIMIT_ROWS)
-        #: slot -> (unit0, win0, abs_unit, decimals), dropping the label and
-        #: fallback columns the dialog form of this block used.
-        rows = {r[0]: (r[2], r[3], r[4], r[5]) for r in PARAMETER_LIMIT_ROWS}
-        self._limit_widgets: dict = {}
-        #: slot -> the QLabel naming the row (empty for rows already named by
-        #: their refine checkbox in column 0).
-        self._limit_name_lbls: dict = {}
-        #: slot -> its manual-fit sub-label (see _XTAL_ROW_LABEL for the
-        #: crystalline one, which differs because the rows merge).
-        self._limit_row_sub: dict = {}
-        self._limit_cells: list = [hdr]
-        #: slot -> its own cells, so a row can be hidden on its own. The
-        #: crystalline windows are coarser than the manual fit's (one for both
-        #: centre coordinates, one for both tilts), so the surplus rows are
-        #: hidden rather than shown as controls that would silently do nothing.
-        self._limit_row_cells: dict = {}
-        self._limit_row_index: dict = {}
-        self._refine_grid = rfl
-        for r, name in enumerate(order, start=1):
-            unit0, win0, abs_unit, dec = rows[name]
-            ref_box, sub = limit_layout[name]
-            if ref_box is not None:
-                # BC owns two rows; centring its box across them keeps it read
-                # as the parent of both sub-rows rather than a peer of BC_y.
-                span = 2 if name == "BC_y" else 1
-                rfl.addWidget(ref_box, r, 0, span, 1)
-            # The row's name is a QLabel beside the opt-in box, never the
-            # box's own text. Crystalline rows hide the box (their window
-            # always applies), and a checkbox kept visible only to caption
-            # the row reads as a live control: it renders in the accent fill
-            # whether or not it is enabled, so it looks ticked and clickable
-            # while doing nothing. Held in one cell so the row still hides,
-            # spans and aligns as a unit.
-            cb = QtWidgets.QCheckBox("")
-            lbl = QtWidgets.QLabel(sub)
-            name_cell = QtWidgets.QWidget()
-            nrow = QtWidgets.QHBoxLayout(name_cell)
-            nrow.setContentsMargins(0, 0, 0, 0); nrow.setSpacing(4)
-            nrow.addWidget(cb); nrow.addWidget(lbl); nrow.addStretch(1)
-            spin = _fspin(0.0, 1e6, dec, win0, "")
-            combo = _NoScrollComboBox()
-            # A percentage of the seed is meaningless for the distortion
-            # coefficients (they seed at 0), so that row is absolute-only.
-            combo.addItems([u for u in ("%", abs_unit) if u])
-            combo.setCurrentText(unit0 or abs_unit)
-            spin.setEnabled(False); combo.setEnabled(False)
-            cb.toggled.connect(spin.setEnabled)
-            cb.toggled.connect(combo.setEnabled)
-            cb.toggled.connect(self._on_limits_changed)
-            spin.valueChanged.connect(self._on_limits_changed)
-            combo.currentTextChanged.connect(self._on_limits_changed)
-            # Placed straight into the outer grid rather than in a per-row
-            # container, so the ± / value / unit columns line up down the card
-            # even though the BC rows carry an extra sub-label.
-            cells = (name_cell, QtWidgets.QLabel("±"), spin, combo)
-            for c, w in enumerate(cells, start=1):
-                rfl.addWidget(w, r, c)
-            self._limit_widgets[name] = (cb, spin, combo)
-            self._limit_name_lbls[name] = lbl
-            self._limit_row_sub[name] = sub
-            self._limit_row_cells[name] = list(cells)
-            self._limit_row_index[name] = r
-            self._limit_cells.extend(cells)
-        self._limits_note = QtWidgets.QLabel("")
-        self._limits_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
-        self._limits_note.setWordWrap(True)
-        rfl.addWidget(self._limits_note, len(order) + 1, 0, 1, 5)
-        self._limit_cells.append(self._limits_note)
-
-
-        # Distortion gets a companion "…" button opening the per-coefficient dialog.
-        # Held in a container widget (not a bare layout) so the whole row can be
-        # hidden as one unit for calibrants that don't support distortion refinement.
+        # One card, one row per parameter. Seed value, seed tick, refine
+        # tick and +/- window are four decisions about the same parameter,
+        # and they used to live in two places that could not be seen at
+        # once -- the values behind a non-modal "Manual seed..." dialog, the
+        # rest down here. The dialog never owned its widgets (it reparented
+        # these same objects), so merging is a layout change: every
+        # _state_widgets() key still points at the same box.
+        #
+        # The pairing is the part that is not obvious, so each row says what
+        # the fit will do with it. Seeding something you are NOT refining is
+        # how you pin a parameter to a measured value, which is exactly what
+        # tx is for -- a panel's installation azimuth is an input the powder
+        # fit must not touch, and nothing else on this tab said so.
+        # Distortion's companion "…" button, opening the per-coefficient
+        # dialog. Held in a container widget (not a bare layout) so the whole
+        # thing can be hidden as one unit for calibrants with no distortion
+        # refinement. Built before the table, which places it.
         self._dist_btn = QtWidgets.QToolButton(); self._dist_btn.setText("…")
         self._dist_btn.setToolTip("Choose which distortion coefficients to refine "
                                   "(η-fold presets available).")
         self._dist_btn.clicked.connect(self._edit_distortion_coeffs)
         self._dist_row = QtWidgets.QWidget()
-        drow = QtWidgets.QHBoxLayout(self._dist_row); drow.setContentsMargins(0, 0, 0, 0); drow.setSpacing(4)
-        drow.addWidget(self._ref_dist); drow.addWidget(self._dist_btn); drow.addStretch(1)
+        drow = QtWidgets.QHBoxLayout(self._dist_row)
+        drow.setContentsMargins(0, 0, 0, 0); drow.setSpacing(4)
+        drow.addWidget(self._ref_dist); drow.addWidget(self._dist_btn)
+        drow.addStretch(1)
 
-        # Distortion needs two cells for its "…" button; Residual map takes the third.
-        rfl_bottom.addWidget(self._dist_row, 0, 0, 1, 2)
-        rfl_bottom.addWidget(self._build_rc, 0, 2)
-        rfl_bottom.setColumnStretch(0, 1)
-        rfl_bottom.setColumnStretch(1, 0)
-        rfl_bottom.setColumnStretch(2, 1)
-        # Spare width in the limits grid goes to an empty 5th column, not to
-        # the unit combo — stretching a two-item combo across half the card
-        # reads as an input you are meant to type into.
-        rfl.setColumnStretch(4, 1)
-        self._refine_grid = rfl
+        self._param_table = CalibrationParameterTable(
+            seed_ticks={"BC": self._seed_en_bc, "Lsd": self._seed_en_lsd,
+                        "tx": self._seed_en_tx, "ty": self._seed_en_ty,
+                        "tz": self._seed_en_tz, "Distortion": self._seed_en_dist},
+            seed_values={"BC_y": self._seed_bcy, "BC_z": self._seed_bcz,
+                         "Lsd": self._seed_lsd, "tx": self._seed_tx,
+                         "ty": self._seed_ty, "tz": self._seed_tz},
+            refine_ticks={"BC": self._ref_bc, "Lsd": self._ref_lsd,
+                          "tx": self._ref_tx, "ty": self._ref_ty,
+                          "tz": self._ref_tz, "Wavelength": self._ref_wl},
+            # "Distortion" intentionally absent: its tick travels inside
+            # dist_refine_row, with the selector that belongs to it.
+            dist_seed_btn=self._seed_dist_btn,
+            dist_refine_row=self._dist_row,
+            on_limits_changed=self._on_limits_changed, parent=self)
+        self._param_table.set_refine_boxes(
+            {"BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
+             "ty": self._ref_ty, "tz": self._ref_tz,
+             "Distortion": self._ref_dist})
+        # Same dict objects the table built, so the limits machinery
+        # (_sync_limits_mode / _sync_seed_steps / _update_limits_label /
+        # _limits / _apply_limit_state) goes on working against them
+        # unchanged.
+        self._limit_widgets = self._param_table.limit_widgets
+        self._limit_name_lbls = self._param_table.limit_name_lbls
+        self._limit_row_sub = self._param_table.limit_row_sub
+        self._limit_row_cells = self._param_table.limit_row_cells
+        self._limit_row_index = self._param_table.limit_row_index
+        self._limit_cells = self._param_table.limit_cells
+        self._limits_hdr = self._param_table._limits_hdr
+        self._hard_cap = self._param_table._hard_cap
+        self._hard_cap.toggled.connect(self._update_limits_label)
+        self._limits_note = self._param_table._limits_note
+
+
+        # Residual map is all that is left down here: the distortion refine
+        # row moved up into the table's own Distortion row.
+        rfl_bottom.addWidget(self._build_rc, 0, 0)
+        rfl_bottom.setColumnStretch(1, 1)
+        self._refine_grid = self._param_table.grid
         self._refine_grid_bottom = rfl_bottom
         self._ref_dist.toggled.connect(lambda _=0: self._update_dist_label())
         self._ref_dist.toggled.connect(self._on_refine_flags_changed)
-        refc.body.addLayout(rfl)
+        refc.body.addWidget(self._param_table)
         refc.body.addLayout(rfl_bottom)
+        refc.body.addWidget(self._seed_summary_lbl)
+        refc.body.addWidget(self._seed_bc_lsd_warn)
+        refc.body.addWidget(self._feedback_check)
+        refc.body.addWidget(self._seed_note)
 
         lv.addWidget(refc)
         self._refc_card = refc
+        self._update_seed_dist_label()
+        self._sync_seed_enabled()
+        self._update_seed_summary()
+        self._update_seed_bc_lsd_warning()
         self._update_dist_label()
         self._update_limits_label()
         self._update_refine_summary()
@@ -799,6 +722,9 @@ class CalibrationTab(QtWidgets.QWidget):
         av = QtWidgets.QVBoxLayout(grp_adv); av.setContentsMargins(8, 6, 8, 6); av.setSpacing(5)
         self._n_iter = _NoScrollSpinBox(); self._n_iter.setRange(1, 1_000_000); self._n_iter.setValue(4)
         self._n_iter.setFixedWidth(53)    # ~50% narrower than the default sizeHint
+        # The crystalline note quotes n_iter x tol as the real envelope, so it
+        # is stale the moment this changes.
+        self._n_iter.valueChanged.connect(self._update_limits_label)
         self._lm_iter = _NoScrollSpinBox(); self._lm_iter.setRange(1, 1_000_000); self._lm_iter.setValue(200)
         self._lm_iter.setFixedWidth(63)   # ~40% narrower than the default sizeHint
         self._device = _NoScrollComboBox(); self._device.addItems(["cpu", "cuda"])
@@ -1320,8 +1246,16 @@ class CalibrationTab(QtWidgets.QWidget):
             self._update_dist_label()
 
     def _update_dist_label(self):
+        """How many coefficients the fit may move, on the button that picks
+        them. The count used to be the checkbox's caption, but column 0 of
+        the parameter table already names the row, and a caption that long
+        in the Refine column set the minimum width of every other row."""
         n = len(self._dist_coeffs) if self._ref_dist.isChecked() else 0
-        self._ref_dist.setText(f"Distortion ({n}/15)")
+        self._ref_dist.setText("")
+        self._dist_btn.setText(f"{n}/15")
+        self._dist_btn.setToolTip(
+            f"Refining {n} of 15 distortion coefficients — click to choose "
+            "which (η-fold presets available).")
         self._update_refine_summary()
 
     def _on_refine_flags_changed(self, *_args):
@@ -1405,7 +1339,10 @@ class CalibrationTab(QtWidgets.QWidget):
     #: Crystalline sub-labels. Only ``distortion`` needs one: every other
     #: crystalline row is named by the refine checkbox in column 0, and the
     #: manual fit's "BC_y"/"BC_z" would misname a window that covers both.
-    _XTAL_ROW_LABEL = {"distortion": "Distortion"}
+    #: Crystalline captions for the ± cell. Empty because the parameter
+    #: table's column 0 names every row; a second copy inside the window
+    #: cell only ate width.
+    _XTAL_ROW_LABEL: dict = {}
 
     def _limit_rows_for_mode(self, is_dsp: bool) -> tuple:
         return self._LIMIT_ROWS_DSP if is_dsp else self._LIMIT_ROWS_XTAL
@@ -1431,9 +1368,8 @@ class CalibrationTab(QtWidgets.QWidget):
             else:
                 self._limit_state_xtal = snap
         want = set(self._limit_rows_for_mode(is_dsp))
-        for name, cells in self._limit_row_cells.items():
-            for w in cells:
-                w.setVisible(name in want)
+        for name in self._limit_row_cells:
+            self._param_table.set_limit_row_visible(name, name in want)
         for name, (cb, _spin, _combo) in self._limit_widgets.items():
             # Crystalline: the window always applies, so the opt-in box is
             # meaningless — hide it outright and hold it checked so _limits()
@@ -1445,24 +1381,26 @@ class CalibrationTab(QtWidgets.QWidget):
             lbl.setText(self._limit_row_sub[name] if is_dsp
                         else self._XTAL_ROW_LABEL.get(name, ""))
             lbl.setVisible(name in want and bool(lbl.text()))
-        # The crystalline tilt window is one value for ty and tz (tolTilts), so
-        # span it across both rows the way the BC refine box already spans its
-        # pair — parked on the ty row alone it reads as bounding only ty.
-        for w, col in zip(self._limit_row_cells["ty"], (1, 2, 3, 4)):
-            self._refine_grid.removeWidget(w)
-            self._refine_grid.addWidget(w, self._limit_row_index["ty"], col,
-                                        1 if is_dsp else 2, 1)
+        # The crystalline tilt window is one value for ty and tz (tolTilts).
+        # Said in the row's caption rather than by spanning the cell: a
+        # parameter owns three lines here, so a span would reach across tz's
+        # own value box and draw over it.
+        self._param_table.covers_following_row("ty", not is_dsp)
         incoming = self._limit_state_dsp if is_dsp else self._limit_state_xtal
         if incoming is None:
             incoming = (self._dsp_default_limit_state() if is_dsp
                         else self._xtal_default_limit_state())
         self._apply_limit_state(incoming, force_on=not is_dsp, rows=want)
+        # The manual d-spacing fit is one bounded LM solve: its window really
+        # does bound the answer, so there is nothing to cap.
+        self._hard_cap.setVisible(not is_dsp)
         self._limits_hdr.setText(
             "Limits — bound a refined parameter to ± a window around its seed "
             "value:" if is_dsp else
-            "Limits — the MIDAS backend always bounds the fit to a ± window "
-            "around the seed. These are the windows in force; edit to tighten "
-            "or loosen them.")
+            "Limits — the MIDAS backend always applies a ± window, but "
+            "re-centres it on each E-M iterate rather than on the seed, so a "
+            "fit that rails can walk one window per iteration. These are the "
+            "widths in force; edit to tighten or loosen them.")
         self._limits_mode_is_dsp = is_dsp
         self._update_limits_label()
         self._sync_seed_steps()
@@ -1570,20 +1508,59 @@ class CalibrationTab(QtWidgets.QWidget):
                        ("tolWavelength", "λ", 1.0, "Å", ".3g"),
                        ("tolDistortion", "distortion", 1.0, "", ".3g"))
 
+    #: Prefixes of the crystalline note, by hard-cap state. Split out because
+    #: the run log strips them to re-use the window list on its own "Limits:"
+    #: line.
+    _XTAL_NOTE_PREFIX = "Always applied, re-centred every E-M iteration: "
+    _XTAL_CAP_PREFIX = "Hard cap on the whole run: "
+
+    @property
+    def _xtal_note_prefixes(self):
+        return (self._XTAL_CAP_PREFIX, self._XTAL_NOTE_PREFIX)
+
     def _update_limits_label(self, *_args):
         if self._limits_mode_is_dsp is False:
-            # The crystalline windows are always applied and are centred on
-            # whatever seed the fit starts from, so the manual fit's
+            # The crystalline windows are always applied, so the manual fit's
             # "unbounded"/"needs a manual seed" wording would both be wrong.
+            #
+            # They are NOT a bound on the answer. midas_calibrate_v2
+            # pipelines/single.py re-centres each window on that iteration's
+            # result before the next LM call ("Bounds move with the value"),
+            # so a fit that rails at the window walks one full width per
+            # E-M iteration. Measured at the beamline on CeO2: Lsd ±2 mm with
+            # 4 iterations converged 8.000 mm below the seed, to the µm.
+            # The note said "centred on the seed", which is why that read as
+            # the limits being ignored.
             from midas_gui.calib import tol_defaults
             tols = self._crystalline_tols() or {}
             eff = {**tol_defaults(), **tols}
-            bits = [f"{lbl} ±{eff[f] * sc:{fmt}}{(' ' + u) if u else ''}"
-                    for f, lbl, sc, u, fmt in self._XTAL_NOTE_ROWS if f in eff]
+            # _build_ui calls this before the Advanced group exists.
+            spin = getattr(self, "_n_iter", None)
+            n = max(1, spin.value() if spin is not None else 4)
+            capped = self._hard_cap.isChecked()
+            # Under a cap the backend was handed tol/n, so multiply back to
+            # quote the number the user typed -- the bound on the answer.
+            shown = {f: v * (n if capped else 1) for f, v in eff.items()}
+            bits = [f"{lbl} ±{shown[f] * sc:{fmt}}{(' ' + u) if u else ''}"
+                    for f, lbl, sc, u, fmt in self._XTAL_NOTE_ROWS if f in shown]
+            if capped and n > 1 and "tolLsd" in eff:
+                drift = (f"  — the backend is handed 1/{n} of each, so "
+                         f"{n} re-centred iterations cannot carry the answer "
+                         f"past the cap (Lsd ±{eff['tolLsd'] * 1e-3:.4g} mm "
+                         f"per iteration).")
+            elif not capped and n > 1 and "tolLsd" in eff:
+                drift = (f"  — the window moves with the fit, so over "
+                         f"{n} iterations the answer can drift {n}× this "
+                         f"from the seed (Lsd ±"
+                         f"{eff['tolLsd'] * 1e-3 * n:.4g} mm); tick the cap "
+                         f"below to bound the run instead.")
+            else:
+                drift = ""
             tail = ("" if tols else
                     "  — backend defaults; edit any to tighten or loosen")
-            self._limits_note.setText(
-                "Always applied, centred on the seed: " + "   ".join(bits) + tail)
+            prefix = (self._XTAL_CAP_PREFIX if capped
+                      else self._XTAL_NOTE_PREFIX)
+            self._limits_note.setText(prefix + "   ".join(bits) + tail + drift)
             return
         bounds, skipped = self._limit_bounds()
         if not bounds and not skipped:
@@ -1605,6 +1582,42 @@ class CalibrationTab(QtWidgets.QWidget):
                       "tolWavelength": (("wavelength_A", "wavelength_A",
                                          "Wavelength"),)}
 
+    def _at_limit_explanation(self) -> str:
+        """Why an at-limit parameter is the limit's answer, not the data's.
+
+        Reads differently under a hard cap, where railing on an individual
+        iteration is expected and only the cap itself is a verdict.
+        """
+        if (self._last_limit_ctx or {}).get("cap_n", 1) > 1:
+            return (" reached the hard cap — the data wanted to go further "
+                    "than the geometry allows, so that value is the cap, not "
+                    "a measurement.")
+        return (" ended at least one full ± window away from the seed — the "
+                "fit was railing against its limit, so that value was set by "
+                "the limit, not measured from the data. The window is "
+                "re-centred every E-M iteration, so railing lets it walk one "
+                "window per iteration and the distance from the seed can be "
+                "several windows; tick the hard cap to bound the run instead.")
+
+    def _capture_limit_ctx(self, tols):
+        """Freeze what this run's ± windows are taken around.
+
+        Separate from :meth:`_crystalline_at_limit` so the ordering it exists
+        to defend is testable without driving a whole calibration.
+        """
+        # ``cap_n`` scales the at-limit threshold. Uncapped, one window away
+        # from the seed means the fit railed at least once, which is the
+        # signal worth raising. Capped, the backend was handed tol/n on
+        # purpose and railing a round or two is how the fit crosses the
+        # allowed span -- only reaching n windows, i.e. the cap itself, says
+        # the answer was set by the limit.
+        self._last_limit_ctx = {
+            "centre": self._limit_seed_values(),
+            "tols": tols,
+            "seeded": self._manual_seed_check.isChecked(),
+            "cap_n": (max(1, self._n_iter.value())
+                      if self._hard_cap.isChecked() else 1)}
+
     def _crystalline_at_limit(self, result) -> set:
         """Which crystalline parameters came back sitting on their window.
 
@@ -1618,11 +1631,16 @@ class CalibrationTab(QtWidgets.QWidget):
         """
         if self._limits_mode_is_dsp is not False:
             return set()
-        if not self._manual_seed_check.isChecked():
+        # Prefer the run's own snapshot over the live card, which _on_done may
+        # already have overwritten with this very result. Falling back to the
+        # widgets keeps the check usable before any run has happened.
+        ctx = self._last_limit_ctx or {}
+        if not ctx.get("seeded", self._manual_seed_check.isChecked()):
             return set()
         from midas_gui.calib import tol_defaults
-        eff = {**tol_defaults(), **(self._crystalline_tols() or {})}
-        seed = self._limit_seed_values()
+        tols = ctx["tols"] if "tols" in ctx else self._crystalline_tols()
+        eff = {**tol_defaults(), **(tols or {})}
+        seed = ctx.get("centre") or self._limit_seed_values()
         refine = self._last_refine_flags or self._refine_flags()
         out = set()
         for field, pairs in self._XTAL_AT_LIMIT.items():
@@ -1639,7 +1657,8 @@ class CalibrationTab(QtWidgets.QWidget):
                 if centre is None or got is None:
                     continue
                 # Lsd is seeded in µm here and returned in µm, so no scaling.
-                if abs(float(got) - float(centre)) >= tol * (1.0 - 1e-6):
+                span = tol * ctx.get("cap_n", 1)
+                if abs(float(got) - float(centre)) >= span * (1.0 - 1e-6):
                     out.add(slot)
         return out
 
@@ -1665,6 +1684,16 @@ class CalibrationTab(QtWidgets.QWidget):
             centre = seed.get(name, 0.0)
             lo, hi = limit_window(name, centre, spin.value(), combo.currentText())
             out[field] = abs(hi - lo) / 2.0
+        if out and self._hard_cap.isChecked():
+            # Each E-M iteration re-centres the window on that iteration's
+            # result, so the run's total excursion from the seed is at most
+            # n_iter windows. Handing the backend tol/n_iter makes the number
+            # on the card the bound on the ANSWER, which is what a
+            # mechanically constrained geometry needs: four Hydra panels share
+            # one frame, so a panel's Lsd cannot wander, and "±5 mm" has to
+            # mean 5 mm total rather than 5 mm per iteration.
+            n = max(1, self._n_iter.value())
+            out = {k: v / n for k, v in out.items()}
         return None if tols_are_default(out) else out
 
     #: Limit rows whose ± window is centred on a manual-seed field. Without
@@ -1717,11 +1746,6 @@ class CalibrationTab(QtWidgets.QWidget):
 
     # ── Per-parameter manual seed: enable flags, dialog, sparse dict ──
 
-    def _open_seed_dialog(self):
-        self._seed_dialog.show()
-        self._seed_dialog.raise_()
-        self._seed_dialog.activateWindow()
-
     def _on_seed_enable_changed(self, *_args):
         """A granular enable flag changed — resync the derived master
         tri-state (used for legacy project state + Hydra's cross-panel sync)
@@ -1740,7 +1764,6 @@ class CalibrationTab(QtWidgets.QWidget):
         self._sync_seed_enabled()
         self._update_seed_summary()
         self._update_seed_bc_lsd_warning()
-        self._update_seed_btn_style()
 
     def _sync_seed_enabled(self):
         """A seed value box is editable exactly when its tick is on.
@@ -1752,12 +1775,6 @@ class CalibrationTab(QtWidgets.QWidget):
             on = cb.isChecked()
             for w in widgets:
                 w.setEnabled(on)
-
-    def _update_seed_btn_style(self):
-        """Green "Manual seed..." once at least one parameter is ticked, so an
-        active (and easily forgotten) seed is visible without opening the dialog."""
-        active = any(cb.isChecked() for cb in self._seed_enables)
-        self._seed_btn.setStyleSheet(S.SUCCESS_BTN_QSS if active else "")
 
     def _update_seed_bc_lsd_warning(self):
         bad = self._seed_en_bc.isChecked() and not self._seed_en_lsd.isChecked()
@@ -1871,8 +1888,14 @@ class CalibrationTab(QtWidgets.QWidget):
             self._update_seed_dist_label()
 
     def _update_seed_dist_label(self):
+        """How many coefficients carry a starting value, on the button that
+        edits them — the seed counterpart of _update_dist_label."""
         n = len(self._seed_dist)
-        self._seed_en_dist.setText(f"Distortion ({n}/15)" if n else "Distortion")
+        self._seed_en_dist.setText("")
+        self._seed_dist_btn.setText(f"{n}/15" if n else "…")
+        self._seed_dist_btn.setToolTip(
+            f"{n} of 15 distortion coefficients have a starting value — "
+            "click to enter them (iso_R2/4/6, per-fold amplitude/phase).")
         # _seed_dist has no widget of its own, so this is the one place its
         # size changes — and the summary line quotes that count.
         self._update_seed_summary()
@@ -2085,12 +2108,31 @@ class CalibrationTab(QtWidgets.QWidget):
         if g.get("tz") is not None:
             self._seed_tz.setValue(float(g["tz"]))
             self._enable_seed(tz=True)
+        # Distortion rides along when the sender actually has coefficients
+        # (a loaded calibration file). Without this the Data Viewer could
+        # hold 13 refined coefficients, show them in its summary, and hand
+        # over a geometry with none -- so the fit restarted from an
+        # undistorted detector and the transfer looked like it had done
+        # nothing.
+        if g.get("distortion"):
+            self._seed_dist = dict(g["distortion"])
+            self._enable_seed(Distortion=True)
+            self._update_seed_dist_label()
+        # Every seed tick above was set through _enable_seed, which does not
+        # fire the outcome labels when the value was already in that state.
+        self._param_table.sync_status()
+        self._calib_result = None     # the fit on screen described the old geometry
+        self._draw_seed_rings()
+        n_dist = len(g.get("distortion") or {})
         self._seed_note.setText(
             f"Geometry from Data Viewer: λ={g.get('wavelength_A', 0):.5f} Å, "
             f"px={g.get('pxY', 0):.2f} µm, "
             f"BC=({g.get('BC_y', 0):.2f}, {g.get('BC_z', 0):.2f}), "
             f"Lsd={g.get('Lsd', 0)/1000:.3f} mm, "
-            f"tx={g.get('tx', 0):.3f}°, ty={g.get('ty', 0):.3f}°, tz={g.get('tz', 0):.3f}°.")
+            + (f"tx={g['tx']:.3f}°, " if g.get("tx") is not None
+               else "tx not supplied, ")
+            + f"ty={g.get('ty', 0):.3f}°, tz={g.get('tz', 0):.3f}°"
+            + (f", distortion {n_dist} coeff." if n_dist else "."))
         self._log.append("Geometry pulled from Data Viewer tab.")
 
     def _on_bc_picked(self, bc_y, bc_z):
@@ -2386,12 +2428,14 @@ class CalibrationTab(QtWidgets.QWidget):
         self._log.append("─" * 40 + f"\nStarting calibration ({mode})…")
         self._log.append(self._refine_summary_text())
         self._log.append(self._mask_log_line())
-        # The windows bound the answer, so they belong in the run's own record
+        # The windows shape the answer, so they belong in the run's own record
         # next to what was refined — not only on the card, which shows whatever
         # is set now rather than what this run used.
         if self._limits_mode_is_dsp is False:
-            self._log.append("Limits: " + self._limits_note.text()
-                             .replace("Always applied, centred on the seed: ", ""))
+            line = self._limits_note.text()
+            for pre in self._xtal_note_prefixes:
+                line = line.replace(pre, "")
+            self._log.append("Limits: " + line)
         if mode == "frozen_point":
             self._log.append(
                 "ℹ Frozen-point (high-tilt) always refines Lsd/BC/ty/tz; "
@@ -2436,6 +2480,14 @@ class CalibrationTab(QtWidgets.QWidget):
         }
         self._last_dist_coeffs = cfg["refine"]["distortion_coeffs"]
         self._last_refine_flags = cfg["refine"]
+        # Freeze what the windows are being taken around, before the run can
+        # disturb it. "Feed result back to seed" rewrites the seed boxes in
+        # _on_done *before* _crystalline_at_limit reads them, so asking the
+        # widgets afterwards compares the result against itself — the
+        # difference is 0 and the at-limit warning can never fire. That is how
+        # a run that walked 8 mm past a ±2 mm window reached the beamline with
+        # a clean log.
+        self._capture_limit_ctx(cfg["tols"])
         manual = self._manual_seed_kwargs()   # sparse: only ticked parameters
         if manual:
             cfg["manual_seed"] = manual
@@ -2622,9 +2674,9 @@ class CalibrationTab(QtWidgets.QWidget):
         if self._last_at_limit:
             self._log.append(
                 "\nWARNING: " + ", ".join(sorted(self._last_at_limit)) +
-                " came back on the edge of the allowed window — that value was "
-                "set by the limit, not measured from the data. Widen the limit "
-                "if the true value may lie outside it, or check the seed.")
+                self._at_limit_explanation() +
+                " Widen the limit if the true value may lie outside it, or "
+                "check the seed.")
         try:
             self._populate_param_grid(
                 paramstest_pairs(result, selected=self._last_dist_coeffs),
@@ -2748,6 +2800,91 @@ class CalibrationTab(QtWidgets.QWidget):
             note += "  · residual map not drawn"
         return note
 
+    def _seed_namespace(self):
+        """The current seed as a ring-drawable geometry, or ``None`` if the
+        detector size is not known yet (no image loaded)."""
+        from types import SimpleNamespace
+        img = self._image
+        if img is None:
+            return None
+        nz, ny = img.shape[-2], img.shape[-1]
+        pxY = float(self._pxY.value())
+        pxZ = float(self._pxZ_spin.value()) if self._pxZ_check.isChecked() else pxY
+        return SimpleNamespace(
+            Lsd=self._seed_lsd.value() * 1000.0,
+            BC_y=self._seed_bcy.value(), BC_z=self._seed_bcz.value(),
+            tx=self._seed_tx.value(), ty=self._seed_ty.value(),
+            tz=self._seed_tz.value(),
+            distortion=dict(self._seed_dist or {}),
+            pxY=pxY, pxZ=pxZ, NrPixelsY=ny, NrPixelsZ=nz,
+            wavelength_A=self._wl.value(),
+            _calibrant_name=self._cal.currentText(),
+            # A d-spacing calibrant has no hkl table to fall back on, so
+            # without this the preview computes zero rings and silently shows
+            # nothing -- exactly the "my geometry was dropped" reading the
+            # preview exists to prevent. Empty for a crystalline calibrant,
+            # which _predict_ring_radii then resolves from the name instead.
+            _d_list=self._manual_d_list() or None,
+        )
+
+    def _draw_seed_rings(self):
+        """Preview the rings the *seed* predicts, until a fit replaces them.
+
+        This tab used to draw fitted rings only, on the reasoning that the
+        seed card is an input and rings that sit off the data should mean the
+        fit is bad rather than the preview being stale. In practice the
+        opposite happened: the geometry is roughed out in the Data Viewer --
+        which does preview its seed -- and sent over, and the Calibrate tab
+        went on showing rings from an older fit at a different Lsd and beam
+        centre, with nothing saying they were stale. They read as the new
+        geometry having been dropped.
+
+        So the overlay follows whatever geometry is current, and the status
+        line says which one it is. A fit still replaces this the moment it
+        lands (see :meth:`_draw_rings`).
+        """
+        if not getattr(self, "_img_view", None):
+            return          # called while the UI is still being built
+        ns = self._seed_namespace()
+        for item in self._ring_items:
+            self._img_view._iv.removeItem(item)
+        self._ring_items.clear()
+        if ns is None:
+            self._ring_status.setText("")
+            return
+        try:
+            max_r = rmax_corner_px(ns.BC_y, ns.BC_z, ns.NrPixelsY, ns.NrPixelsZ)
+            radii = [r for r in _predict_ring_radii(ns) if 0 < r <= max_r]
+            curves = self._ring_curves(ns, radii)
+        except Exception:
+            self._ring_status.setText("")
+            return
+        if not curves:
+            # No ring of this calibrant reaches this detector at this
+            # geometry — usually the placeholder frame before any data is
+            # loaded. A lone beam-centre marker and "0 ring(s)" is clutter
+            # that reads as a preview having failed.
+            self._ring_status.setText("")
+            return
+        visible = self._show_rings_check.isChecked()
+        pen = pg.mkPen("lime", width=1.2, style=QtCore.Qt.DashLine)
+        img_shape = (ns.NrPixelsZ, ns.NrPixelsY)
+        for ys, zs in curves:
+            on = ring_on_image_mask(ys, zs, img_shape)
+            item = pg.PlotDataItem(np.where(on, ys, np.nan),
+                                   np.where(on, zs, np.nan),
+                                   pen=pen, connect="finite")
+            item.setVisible(visible)
+            self._img_view._iv.addItem(item); self._ring_items.append(item)
+        bc = pg.ScatterPlotItem([ns.BC_y], [ns.BC_z], symbol="o", size=10,
+                                pen=pg.mkPen("yellow", width=2),
+                                brush=pg.mkBrush("red"))
+        bc.setVisible(visible)
+        self._img_view._iv.addItem(bc); self._ring_items.append(bc)
+        self._ring_status.setText(
+            f"{len(curves)} ring(s) from the seed — not yet fitted"
+            + self._ring_model_note(ns))
+
     def _draw_rings(self, result):
         """Overlay ``result``'s predicted rings — the only rings this tab draws.
 
@@ -2757,6 +2894,7 @@ class CalibrationTab(QtWidgets.QWidget):
         from a project attempt), so rings that sit off the measured ones mean
         the fit, not the drawing."""
         self._calib_result = result
+        self._ring_status_is_seed = False
         # The readout switches from the seed geometry to this one (and drops
         # its "(seed)" tag) the moment it lands, with the cursor stationary.
         self._img_view._refresh_coord_bar()
@@ -3044,6 +3182,7 @@ class CalibrationTab(QtWidgets.QWidget):
             "seed_ty": self._seed_ty,
             "seed_tz": self._seed_tz,
             "feedback_check": self._feedback_check,
+            "limits_hard_cap": self._hard_cap,
             "ref_lsd": self._ref_lsd,
             "ref_bc": self._ref_bc,
             "ref_ty": self._ref_ty,
@@ -3129,6 +3268,8 @@ class CalibrationTab(QtWidgets.QWidget):
     def _set_state(self, state: dict, sidecar_stem: Optional[str] = None) -> None:
         fields = state.get("fields", {})
         apply_dict_to_widgets(self._state_widgets(), fields)
+        # Signals are blocked during that, so nothing recomputed the rows.
+        self._param_table.sync_status()
         # A restored working directory is the user's stored choice, so it is
         # never silently rewritten to the current default — but it can have
         # gone stale (project opened on a host without that mount), and

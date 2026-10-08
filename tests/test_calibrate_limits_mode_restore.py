@@ -19,7 +19,7 @@ import pytest
 
 pytestmark = pytest.mark.forked
 
-_XTAL_HDR = "the MIDAS backend always bounds"
+_XTAL_HDR = "the MIDAS backend always applies"
 _DSP_HDR = "bound a refined parameter"
 
 

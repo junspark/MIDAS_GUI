@@ -479,10 +479,26 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return self._calib_geom is not None
 
     def get_geometry(self) -> dict:
-        """Current manual geometry — λ (Å), pixel (µm), Lsd (µm), beam centre (px).
+        """Current geometry — λ (Å), pixel (µm), Lsd (µm), beam centre (px).
 
-        Lsd is entered in mm (display) but always returned/used in µm."""
-        return {
+        Lsd is entered in mm (display) but always returned/used in µm.
+
+        ``tx`` and the distortion coefficients have no field on this card, so
+        they come from the loaded calibration file if there is one. They used
+        to be dropped here, which meant "Send →" quietly delivered a geometry
+        missing the panel's installation azimuth: load a Hydra paramstest at
+        tx=300 with 13 refined coefficients, press Send, and the Calibrate
+        tab received neither. The values were on screen in the summary line
+        the whole time, which is what made it read as Send having done
+        nothing.
+
+        A key is included only when it is actually known. The receiver
+        (``tab_calibrate.apply_geometry``) treats a present key as a value to
+        seed and tick, so sending a fabricated 0 would pin the fit to the
+        wrong azimuth -- the same failure that erased tx on result feedback.
+        Absent means unknown, and the auto-seeder handles it.
+        """
+        g = {
             "wavelength_A": self._wl.value(),
             "pxY": self._px.value(),
             "Lsd": self._lsd_um(),
@@ -492,6 +508,11 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             "tz": self._tz.value(),
             "im_trans": self.im_trans_codes(),
         }
+        g["tx"] = self._tx.value()
+        cal = self._calib_geom or {}
+        if cal.get("distortion"):
+            g["distortion"] = dict(cal["distortion"])
+        return g
 
     def _lsd_um(self) -> float:
         """Lsd in µm (internal unit) from the mm display field."""
@@ -691,10 +712,24 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._bc_auto.toggled.connect(lambda c: (self._bcy.setEnabled(not c), self._bcz.setEnabled(not c)))
         ring.body.addLayout(S.Form().row(("BC_y:", self._bcy), ("BC_z:", self._bcz)))
 
+        # tx is the panel's installation azimuth ABOUT THE BEAM, not a small
+        # alignment tilt like ty/tz -- hence the full circle, and hence it
+        # does not bend the rings at all: rotating about the beam maps a ring
+        # (a circle centred on the beam) onto itself. What it does set is
+        # where the panel sits in the lab frame, so the image is drawn
+        # rotated by it and the eta readout agrees with the integration.
+        # Without it the display was a detector-plane view labelled with lab
+        # axes, and every eta was out by exactly tx.
+        self._tx = _fspin(-360.0, 360.0, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
+        self._tx.setToolTip(
+            "Installation azimuth of the panel about the beam (0-360°). "
+            "Rotates the displayed image into the lab frame; the ring "
+            "radii are unchanged by it.")
         self._ty = _fspin(-180.0, 180.0, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
         self._tz = _fspin(-180.0, 180.0, 2, 0.0, "°", step=DEFAULT_STEP_TILT)
         self._ty.setToolTip("Detector tilt about the Y axis — bends the simulated rings.")
         self._tz.setToolTip("Detector tilt about the Z axis — bends the simulated rings.")
+        ring.body.addLayout(S.Form().row(("tx:", self._tx)))
         ring.body.addLayout(S.Form().row(("ty:", self._ty), ("tz:", self._tz)))
 
         # Two-way geometry hand-off with the Calibrate tab.
@@ -1325,7 +1360,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return {
             "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
             "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
-            "tx": 0.0, "ty": ty, "tz": tz,
+            "tx": self._tx.value(), "ty": ty, "tz": tz,
             "pxY": px, "pxZ": px,
             "NrPixelsY": ny, "NrPixelsZ": nz, "distortion": {},
             "im_trans": list(self.im_trans_codes()),
@@ -1362,7 +1397,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return {
             "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
             "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
-            "tx": 0.0, "ty": self._ty.value(), "tz": self._tz.value(),
+            "tx": self._tx.value(), "ty": self._ty.value(), "tz": self._tz.value(),
             "pxY": px, "pxZ": px,
             "NrPixelsY": ny, "NrPixelsZ": nz, "distortion": {},
             "im_trans": list(self.im_trans_codes()),
@@ -1716,7 +1751,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
             try:
                 self._calib_geom = geometry_fields_from_file(path)
                 d = self._calib_geom
-                for w, key in ((self._ty, "ty"), (self._tz, "tz")):
+                for w, key in ((self._tx, "tx"), (self._ty, "ty"), (self._tz, "tz")):
                     v = d.get(key)
                     if v is not None:
                         w.blockSignals(True); w.setValue(float(v)); w.blockSignals(False)
@@ -1761,7 +1796,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         return {
             "wavelength_A": self._wl.value(), "Lsd": self._lsd_um(),
             "BC_y": self._bcy.value(), "BC_z": self._bcz.value(),
-            "tx": 0.0, "ty": self._ty.value(), "tz": self._tz.value(),
+            "tx": self._tx.value(), "ty": self._ty.value(), "tz": self._tz.value(),
             "pxY": px, "pxZ": px, "NrPixelsY": ny, "NrPixelsZ": nz,
             "distortion": {}, "im_trans": self.im_trans_codes(),
         }

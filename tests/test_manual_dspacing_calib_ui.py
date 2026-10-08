@@ -489,8 +489,10 @@ def test_limits_column_is_shaped_per_calibrant_kind(app):
     tab = tab_calibrate_mod.CalibrationTab()
 
     def shown():
+        # cells[0] is the window group (opt-in box, ±, value); the unit
+        # combo is cells[1]. They hide together.
         return {n for n, cells in tab._limit_row_cells.items()
-                if not cells[2].isHidden()}
+                if not cells[0].isHidden()}
 
     tab._cal.setCurrentIndex(tab._cal.findText("CeO2"))
     assert shown() == {"Lsd", "BC_y", "ty", "wavelength_A", "distortion"}
@@ -500,8 +502,12 @@ def test_limits_column_is_shaped_per_calibrant_kind(app):
     # visible purely to caption itself and so read as a live, ticked control.
     assert all(tab._limit_widgets[n][0].isHidden()
                for n in ("Lsd", "BC_y", "ty", "wavelength_A", "distortion"))
-    assert tab._limit_name_lbls["distortion"].text() == "Distortion"
-    assert not tab._limit_name_lbls["distortion"].isHidden()
+    # The row is named once, in the table's column 0 — the window cell used
+    # to caption itself as well, and that second copy set the card's width.
+    assert tab._param_table.row_name_lbls["distortion"].text() == "Distortion"
+    # The crystalline tilt window is one value for ty AND tz, so the row
+    # says so rather than appearing to bound ty alone.
+    assert tab._limit_name_lbls["ty"].text() == "ty + tz"
     assert all(tab._limit_widgets[n][0].isChecked()
                for n in ("Lsd", "BC_y", "ty", "wavelength_A", "distortion"))
 
@@ -511,7 +517,10 @@ def test_limits_column_is_shaped_per_calibrant_kind(app):
     # The manual fit's own rows do get a live box, and BC_y/BC_z keep the
     # sub-labels that tell the two apart under the single "BC" refine box.
     assert not tab._limit_widgets["BC_y"][0].isHidden()
-    assert tab._limit_name_lbls["BC_y"].text() == "BC_y"
+    assert tab._param_table.row_name_lbls["BC_y"].text() == "Beam centre"
+    assert tab._param_table.row_name_lbls["BC_z"].text() == "BC_z"
+    # ty bounds only ty again once each parameter has its own window.
+    assert tab._limit_name_lbls["ty"].text() == ""
     # ...and opt-in again, so an untouched card leaves the manual fit unbounded.
     assert not any(cb.isChecked() for cb, _s, _c in tab._limit_widgets.values())
     assert tab._limit_bounds() == (None, [])
@@ -739,24 +748,44 @@ def _curve_extents(tab, result):
     return [(float(np.ptp(ys)), float(np.ptp(zs))) for ys, zs in tab._ring_curves(result, radii)]
 
 
-def test_seed_card_never_draws_rings(app):
-    """The Calibrate tab overlays calibration results only. Previewing a
-    hand-dialled geometry belongs to the Data Viewer's Ring simulation card;
-    doing it here too meant ticking "Use manual seed" painted rings no
-    calibration had endorsed, which reads as a calibrated overlay."""
+def test_the_overlay_follows_whichever_geometry_is_current(app):
+    """The overlay used to draw fitted results only, so that rings sitting
+    off the data always meant a bad fit rather than a stale preview. In
+    practice the geometry is roughed out in the Data Viewer -- which does
+    preview its seed -- and sent over, and this tab went on showing rings
+    from an older fit at a different Lsd and beam centre with nothing saying
+    so. They read as the sent geometry having been dropped.
+
+    So the overlay follows the current geometry and the status line names
+    which one it is. That distinction is the whole safeguard, and it is what
+    this test pins."""
     import midas_gui.tab_calibrate as tab_calibrate_mod
+    import numpy as np
     tab = tab_calibrate_mod.CalibrationTab()
     tab._cal.setCurrentIndex(tab._cal.findText("AgBH (silver behenate)"))
     tab._wl.setValue(0.1730); tab._pxY.setValue(55.0)
     tab._show_rings_check.setChecked(True)
     tab._manual_seed_check.setChecked(True)
+    # Without a detector size there is nothing to preview against. The
+    # constructor loads the bundled demo frame, so this has to be cleared
+    # deliberately -- the assertion below read as true for a while only
+    # because the seed preview was computing zero rings for every d-spacing
+    # calibrant (_seed_namespace passed no d-list), which hid the preview
+    # entirely rather than gating it on the image.
+    tab._image = None
     tab._seed_lsd.setValue(13500.0)
-    tab._seed_bcy.setValue(129.0); tab._seed_bcz.setValue(124.0)
+    tab._draw_seed_rings()
     assert tab._ring_items == []
     assert tab._ring_status.text() == ""
 
-    # Only a result puts rings on the image — and editing the seed afterwards
-    # leaves them where the fit put them.
+    tab._image = np.zeros((512, 3072), dtype=float)
+    tab._seed_bcy.setValue(129.0); tab._seed_bcz.setValue(124.0)
+    assert "from the seed" in tab._ring_status.text(), \
+        "a seeded geometry with an image should preview"
+    assert "not yet fitted" in tab._ring_status.text(), \
+        "a preview must not be mistakable for a calibrated overlay"
+
+    # A fit outranks the preview, and says so.
     result = SimpleNamespace(
         Lsd=13500e3, BC_y=129.0, BC_z=124.0, tx=0.0, ty=0.0, tz=0.0,
         distortion={}, pxY=55.0, pxZ=55.0, NrPixelsY=3072, NrPixelsZ=512,
@@ -773,8 +802,13 @@ def test_seed_card_never_draws_rings(app):
     for y_ext, z_ext in _curve_extents(tab, result):
         assert y_ext == pytest.approx(z_ext, rel=1e-3)
 
+    assert tab._ring_status.text().startswith(f"{len(rendered)} ring(s) from the fitted")
+
+    # Editing the seed after a fit goes back to previewing the seed: the fit
+    # on screen described a geometry that has just been replaced.
     tab._seed_ty.setValue(-82.0)
-    assert _ring_extents(tab) == pytest.approx(rendered, rel=1e-9)
+    assert "from the seed" in tab._ring_status.text()
+    assert _ring_extents(tab) != pytest.approx(rendered, rel=1e-9)
 
 
 def test_fitted_tilt_reaches_the_overlay_with_the_seed_card_on(app):
@@ -885,53 +919,65 @@ def _grid_rows(grid):
     return {r: [w for _c, w in sorted(cells)] for r, cells in rows.items()}
 
 
-def test_refine_card_interleaves_each_flag_with_its_window(app):
-    """One row per parameter: the "refine?" checkbox in column 0 and the +/-
-    window bounding that same parameter on the rest of the line, so the two
-    decisions about one parameter read together.
+def test_each_parameter_reads_on_one_line(app):
+    """Seed tick, refine tick, start value and ± window all sit on the one
+    line that column 0 names, so the decisions about a parameter read
+    together.
 
-    This replaces an earlier compact 2x3 refine grid with the limits in a
-    separate block below it. That block had nowhere to hang a per-parameter
-    window, and it captioned the crystalline case "the MIDAS calibrate backend
-    takes no bounds arguments" -- which is false: CalibrationParams.tol* become
-    hard box constraints in midas_calibrate/param_vector.py:bounds().
+    This began as a compact 2x3 refine grid with the limits in a separate
+    block, then became a refine grid with the ± window interleaved, and now
+    also carries the seed value and seed tick that used to live behind the
+    "Manual seed…" dialog. Each step removed a place the same parameter
+    could be described twice and disagree.
     """
     import midas_gui.tab_calibrate as tab_calibrate_mod
-    tab = tab_calibrate_mod.CalibrationTab()
-    rows = _grid_rows(tab._refine_grid)
-    # Derived, not restated: this card builds its rows from
-    # PARAMETER_LIMIT_ROWS so that it, the Manual seed dialog and
-    # _REFINE_BOXES cannot drift into different orders (they had). A fourth
-    # hand-written copy here would just be the same trap one level out --
-    # what this test is about is the INTERLEAVING, not the order, which
-    # test_calibrate_seed_summary pins directly.
     from midas_gui.dialogs import PARAMETER_LIMIT_ROWS
+    tab = tab_calibrate_mod.CalibrationTab()
+    table = tab._param_table
+    rows = _grid_rows(table.grid)
     order = tuple(row[0] for row in PARAMETER_LIMIT_ROWS)
-    # Header, one row per parameter, then the trailing note.
-    assert sorted(rows) == list(range(len(order) + 2)), f"got {sorted(rows)}"
-    assert rows[0] == [tab._limits_hdr]
-    assert rows[len(order) + 1] == [tab._limits_note]
 
-    for r, name in enumerate(order, start=1):
-        assert tab._limit_row_index[name] == r, f"{name} on row {r}?"
-        _cb, spin, combo = tab._limit_widgets[name]
-        assert spin in rows[r] and combo in rows[r], \
-            f"{name}'s window is not on its own row"
+    # Derived, not restated: the table builds its rows from
+    # PARAMETER_LIMIT_ROWS so it cannot drift from _REFINE_BOXES.
+    assert [n for n in sorted(order, key=lambda n: table.limit_row_index[n])] \
+        == list(order)
 
-    # The refine flag leads its parameter's row. BC's single box frees both
-    # centre coordinates, so it spans the pair and anchors on BC_y; distortion
-    # and BC_z have no box of their own in this grid.
-    for name, box in (("Lsd", tab._ref_lsd), ("BC_y", tab._ref_bc),
-                      ("ty", tab._ref_ty), ("tz", tab._ref_tz),
-                      ("tx", tab._ref_tx), ("wavelength_A", tab._ref_wl)):
-        assert rows[tab._limit_row_index[name]][0] is box, f"{name} unflagged"
+    for name in order:
+        r = table.limit_row_index[name]
+        _cb, spin, combo = table.limit_widgets[name]
+        assert combo in rows[r], f"{name}'s unit is off its own line"
+        assert table.row_name_lbls[name] in rows[r], f"{name} is unnamed"
+        # the ± spin is inside the window cell, not a direct grid child
+        assert any(spin in w.findChildren(type(spin)) for w in rows[r]
+                   if hasattr(w, "findChildren")), \
+            f"{name}'s window is not on its own line"
 
-    # Distortion's refine box stays below the grid: it carries the "..."
-    # button for the per-coefficient dialog, and Residual map is an output,
-    # not a fit parameter, so neither belongs on a parameter row.
+    # Both ticks share the line with the value they describe. BC's single
+    # seed tick gates the pair and anchors on BC_y; BC_z and the wavelength
+    # have no seed tick of their own.
+    for name, seed_box, ref_box in (
+            ("Lsd", tab._seed_en_lsd, tab._ref_lsd),
+            ("BC_y", tab._seed_en_bc, tab._ref_bc),
+            ("tx", tab._seed_en_tx, tab._ref_tx),
+            ("ty", tab._seed_en_ty, tab._ref_ty),
+            ("tz", tab._seed_en_tz, tab._ref_tz)):
+        r = table.limit_row_index[name]
+        assert seed_box in rows[r], f"{name}'s seed tick is off its line"
+        assert ref_box in rows[r], f"{name}'s refine tick is off its line"
+
+    # Distortion is ONE row carrying both of its decisions: the seed values
+    # button in the start-value cell, the refine tick and its coefficient
+    # selector together. Two identically captioned "Distortion (n/15) …"
+    # blocks in one card read as a duplicate, which is what they were taken
+    # for.
+    r = table.limit_row_index["distortion"]
+    assert tab._seed_dist_btn in rows[r]
+    assert tab._dist_row in rows[r]
+    assert tab._ref_dist.parentWidget() is tab._dist_row
+
+    # Residual map is an output, not a fit parameter, so it stays below.
     bottom_rows = _grid_rows(tab._refine_grid_bottom)
-    assert len(bottom_rows) == 1, f"expected 1 row, got {sorted(bottom_rows)}"
-    assert bottom_rows[0] == [tab._dist_row, tab._build_rc]
+    assert bottom_rows[0] == [tab._build_rc]
 
 
 def _row_of(w):
@@ -1003,21 +1049,49 @@ def test_advanced_card_packs_three_controls_per_row(app):
     assert _layout_of(tab._device) is not _layout_of(tab._n_iter)
 
 
-def test_manual_seed_dialog_lays_out_one_row_per_parameter(app):
-    """The per-parameter seed panel (ManualSeedDialog, behind the "Manual
-    seed…" button): BC_y and BC_z share the "Beam centre" row (the backend
-    only takes them as a pair — see calib._resolve_seed); Lsd/tx/ty/tz each
-    get their own row so each can be ticked independently."""
+def test_the_parameter_table_lays_out_one_row_per_parameter(app):
+    """BC_y and BC_z share the "Beam centre" row (the backend only takes them
+    as a pair — see calib._resolve_seed); Lsd/tx/ty/tz each get their own row
+    so each can be ticked independently.
+
+    These boxes used to live in ManualSeedDialog, behind a "Manual seed…"
+    button, where the refine ticks and ± windows for the same eight
+    parameters were two cards away. They are one table now, so the seed box
+    belongs to it — the layout claim is otherwise unchanged.
+    """
     import midas_gui.tab_calibrate as tab_calibrate_mod
     tab = tab_calibrate_mod.CalibrationTab()
 
-    assert tab._seed_bcy.parentWidget() is tab._seed_dialog
-    assert _row_of(tab._seed_bcy) == _row_of(tab._seed_bcz)
-    for w in (tab._seed_lsd, tab._seed_tx, tab._seed_ty, tab._seed_tz):
-        assert _row_of(w) not in (_row_of(tab._seed_bcy),)
+    assert tab._seed_bcy.parentWidget() is tab._param_table
+
+    # One grid line per value, so BC_y and BC_z are adjacent rather than
+    # sharing a cell -- the merged table also carries a refine tick and a ±
+    # window per line, which two boxes on one row could not line up against.
+    # Asserted as "nothing between them" rather than row n+1, because each
+    # parameter also owns a muted sub-row for its outcome text.
+    seed_rows = sorted(_row_of(w) for w in
+                       (tab._seed_lsd, tab._seed_bcy, tab._seed_bcz,
+                        tab._seed_tx, tab._seed_ty, tab._seed_tz))
+    i = seed_rows.index(_row_of(tab._seed_bcy))
+    assert seed_rows[i + 1] == _row_of(tab._seed_bcz)
+
+    # The pairing is now carried by the tick, which is the part that has to
+    # hold: _resolve_seed takes BC_y and BC_z together or not at all, so one
+    # of them being seedable alone would be a seed the backend cannot honour.
+    assert tab._seed_enable_for_slot("BC_y") is tab._seed_enable_for_slot("BC_z")
+    tab._seed_en_bc.setChecked(False)
+    assert not tab._seed_bcy.isEnabled() and not tab._seed_bcz.isEnabled()
+    tab._seed_en_bc.setChecked(True)
+    assert tab._seed_bcy.isEnabled() and tab._seed_bcz.isEnabled()
+
     rows = {_row_of(w) for w in
             (tab._seed_lsd, tab._seed_tx, tab._seed_ty, tab._seed_tz)}
     assert len(rows) == 4, "Lsd/tx/ty/tz must each get their own row"
+    assert _row_of(tab._seed_bcy) not in rows
+    assert _row_of(tab._seed_bcz) not in rows
+    # ...and each of those four is ticked on its own.
+    ticks = [tab._seed_enable_for_slot(n) for n in ("Lsd", "tx", "ty", "tz")]
+    assert len(set(map(id, ticks))) == 4
 
 
 def test_rings_account_for_distortion_with_no_toggle_to_find(app):
