@@ -145,9 +145,9 @@ def test_every_hutch_channel_is_written_under_its_own_name():
     rows, _note = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 1)],
                                     n_light=2, n_dark=2)
     chunk = next(r for r in rows if r["kind"] == "chunk")
-    assert chunk["US_IC"] == pytest.approx(11.0)
-    assert chunk["DS_IC"] == pytest.approx(8.5)
-    assert chunk["D2PD"] == pytest.approx(71.0)
+    assert chunk["E:US_IC"] == pytest.approx(11.0)
+    assert chunk["E:DS_IC"] == pytest.approx(8.5)
+    assert chunk["E:D2PD"] == pytest.approx(71.0)
     assert "transmission" not in chunk and "I0" not in chunk
 
 
@@ -159,8 +159,8 @@ def test_the_dark_gets_one_row_not_a_column_on_every_chunk():
     rows, _ = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 1)],
                                 n_light=2, n_dark=2)
     assert [r["kind"] for r in rows] == ["dark", "chunk"]
-    assert rows[0]["US_IC"] == pytest.approx(2.0)     # mean of 1.0, 3.0
-    assert rows[1]["US_IC"] == pytest.approx(11.0)    # mean of 10.0, 12.0
+    assert rows[0]["E:US_IC"] == pytest.approx(2.0)     # mean of 1.0, 3.0
+    assert rows[1]["E:US_IC"] == pytest.approx(11.0)    # mean of 10.0, 12.0
     # The companion column is gone: one reading must not be repeated per
     # chunk as though it varied.
     assert not any(k.endswith("_dark") for r in rows for k in r)
@@ -174,8 +174,8 @@ def test_the_dark_is_averaged_over_its_whole_block_not_the_light_chunks():
     rows, _ = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 1), (2, 3)],
                                 n_light=4, n_dark=4)
     assert rows[0]["kind"] == "dark"
-    assert rows[0]["US_IC"] == pytest.approx(2.5)     # mean of all four
-    assert [r["US_IC"] for r in rows[1:]] == [pytest.approx(15.0),
+    assert rows[0]["E:US_IC"] == pytest.approx(2.5)     # mean of all four
+    assert [r["E:US_IC"] for r in rows[1:]] == [pytest.approx(15.0),
                                               pytest.approx(35.0)]
 
 
@@ -188,7 +188,7 @@ def test_no_dark_block_means_no_dark_row(tmp_path):
     assert [r.get("kind") for r in rows] == ["chunk"]
     out = IC.write_ion_csv(tmp_path / "m.csv", rows)
     assert open(out).readline().strip() == \
-        "kind,source_file,frame_start,frame_end,US_IC"
+        "kind,source_file,frame_start,frame_end,E:US_IC"
 
 
 def test_the_dark_row_leads_the_file(tmp_path):
@@ -197,7 +197,7 @@ def test_the_dark_row_leads_the_file(tmp_path):
                                 n_light=2, n_dark=2, source="s.h5")
     out = IC.write_ion_csv(tmp_path / "m.csv", rows)
     lines = [ln.strip() for ln in open(out)]
-    assert lines[0] == "kind,source_file,frame_start,frame_end,US_IC"
+    assert lines[0] == "kind,source_file,frame_start,frame_end,E:US_IC"
     assert lines[1].startswith("dark,s.h5,0,1,")
     assert lines[2].startswith("chunk,s.h5,0,1,")
 
@@ -206,7 +206,7 @@ def test_values_are_averaged_over_the_same_chunks_as_the_images():
     tree = {"instrument/Scalers/E/US_IC": np.array([10.0, 20.0, 30.0, 40.0])}
     rows, _ = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 1), (2, 3)],
                                 n_light=4, n_dark=0)
-    assert [r["US_IC"] for r in rows] == [pytest.approx(15.0), pytest.approx(35.0)]
+    assert [r["E:US_IC"] for r in rows] == [pytest.approx(15.0), pytest.approx(35.0)]
 
 
 def test_sensitivity_companions_are_not_per_frame_columns():
@@ -215,9 +215,27 @@ def test_sensitivity_companions_are_not_per_frame_columns():
     assert IC.scaler_channels(tree, "E") == ["instrument/Scalers/E/US_IC"]
 
 
-def test_an_unplaceable_source_writes_nothing(tmp_path):
+def test_an_unplaceable_source_still_writes_the_scalers_it_can_read(tmp_path):
+    """Changed deliberately. Scaler groups are now identified from the FILE
+    (instrument/Scalers/<G>) rather than from a hutch guessed off the path or
+    the profile, so an unresolved hutch no longer suppresses them -- it only
+    costs the sample-motor columns and the I0/I naming, which genuinely do
+    need to know the station.
+
+    The old behaviour wrote no CSV at all here, which is the same silent
+    omission that left 1-ID-E with no sidecar for weeks. Real monitor
+    readings in the file should reach the CSV whether or not the GUI can name
+    the hutch they belong to."""
     rows, _ = IC.rows_from_tree({"instrument/Scalers/E/US_IC": np.array([1.0, 2.0])},
                                 None, frame_ranges=[(0, 1)], n_light=2)
+    out = IC.write_ion_csv(tmp_path / "m.csv", rows)
+    assert out is not None
+    assert "E:US_IC" in open(out).readline()
+
+
+def test_a_source_with_no_scalers_at_all_still_writes_nothing(tmp_path):
+    """The litter guard that mattered is intact: nothing to report, no file."""
+    rows, _ = IC.rows_from_tree({}, None, frame_ranges=[(0, 1)], n_light=2)
     assert IC.write_ion_csv(tmp_path / "m.csv", rows) is None
     assert not list(tmp_path.iterdir())
 
@@ -234,7 +252,7 @@ def test_header_leads_with_the_index_columns(tmp_path):
                                 "E", frame_ranges=[(0, 1)], n_light=2, source="s.h5")
     out = IC.write_ion_csv(tmp_path / "m.csv", rows)
     assert open(out).readline().strip() == \
-        "kind,source_file,frame_start,frame_end,US_IC"
+        "kind,source_file,frame_start,frame_end,E:US_IC"
 
 
 def test_a_row_is_identified_by_its_file_and_raw_frame_range():
@@ -334,7 +352,7 @@ def test_the_column_is_written_out_when_present():
     headers = [h for _k, h in IC._columns(rows, ())]
     assert "subtracted_dark" in headers
     # Index columns keep their fixed order; this one trails them.
-    assert headers.index("subtracted_dark") < headers.index("US_IC")
+    assert headers.index("subtracted_dark") < headers.index("E:US_IC")
 
 
 # ── which station a profile means ────────────────────────────────────────
@@ -379,3 +397,79 @@ def test_channels_come_from_the_file_not_from_a_mapping():
             "instrument/Scalers/E/IC1_sensitivity": np.array([1.0])}
     got = [p.rsplit("/", 1)[-1] for p in IC.scaler_channels(tree, "E")]
     assert got == ["IC1", "IC2"], "sensitivities are scalars, not columns"
+
+
+# ── every hutch in the beam path, not just the one you are sitting in ────────
+# Asked for at 1-ID-E: "we write out all the ion chamber PVs instead of just
+# the E hutch ones." A 2026-10 .pixi.h5 carries three scaler groups -- B
+# (IC1-IC9, S1, S2, T), C (IC1-IC6) and E (IC1-IC8, S1, S2, T), all ten
+# samples long for a ten-frame scan -- and the CSV held only E's eleven of
+# those twenty-nine. Every hutch monitors the same beam, and you normalise
+# against whichever was live.
+
+def _three_groups(n=4):
+    tree = {}
+    for group, chans in (("B", 3), ("C", 2), ("E", 2)):
+        for i in range(1, chans + 1):
+            tree[f"instrument/Scalers/{group}/IC{i}"] = np.full(n, float(i))
+            tree[f"instrument/Scalers/{group}/IC{i}_sensitivity"] = np.array([float(i) * 10])
+    return tree
+
+
+def test_all_known_groups_are_written_not_just_the_resolved_hutch():
+    rows, _ = IC.rows_from_tree(_three_groups(), "E", frame_ranges=[(0, 3)], n_light=4)
+    chunk = next(r for r in rows if r["kind"] == "chunk")
+    for group, chans in (("B", 3), ("C", 2), ("E", 2)):
+        for i in range(1, chans + 1):
+            assert chunk[f"{group}:IC{i}"] == pytest.approx(float(i))
+
+
+def test_the_group_prefix_is_what_keeps_IC1_unambiguous():
+    """IC1 exists in B, C and E and is a different ion chamber in each, so a
+    bare name would collide and silently keep only one."""
+    assert IC.column_name("instrument/Scalers/B/IC1") == "B:IC1"
+    assert IC.column_name("instrument/Scalers/E/IC1") == "E:IC1"
+    chans = IC.scaler_channels(_three_groups())
+    names = [IC.column_name(p) for p in chans]
+    assert len(names) == len(set(names)) == 7
+
+
+def test_groups_come_out_in_declared_order():
+    names = [IC.column_name(p) for p in IC.scaler_channels(_three_groups())]
+    assert names == ["B:IC1", "B:IC2", "B:IC3", "C:IC1", "C:IC2", "E:IC1", "E:IC2"]
+
+
+def test_sensitivities_are_written_as_a_constant_down_the_column():
+    """One value per file, not per acquisition -- but the gain the counts
+    were taken at, so without it the counts cannot become a current."""
+    rows, _ = IC.rows_from_tree(_three_groups(), "E", frame_ranges=[(0, 1), (2, 3)],
+                                n_light=4)
+    chunks = [r for r in rows if r["kind"] == "chunk"]
+    assert len(chunks) == 2
+    for r in chunks:
+        assert r["B:IC1_sensitivity"] == pytest.approx(10.0)
+        assert r["E:IC2_sensitivity"] == pytest.approx(20.0)
+
+
+def test_a_sensitivity_is_not_mistaken_for_a_channel():
+    chans = [IC.column_name(p) for p in IC.scaler_channels(_three_groups())]
+    assert not any(n.endswith("_sensitivity") for n in chans)
+
+
+def test_station_A_stays_out():
+    """No sample sits in A's beam path, so however I0-suggestive its channel
+    names are, it is not a per-sample monitor."""
+    tree = {"instrument/Scalers/A/IC1": np.arange(4.0),
+            "instrument/Scalers/E/IC1": np.arange(4.0)}
+    assert [IC.column_name(p) for p in IC.scaler_channels(tree)] == ["E:IC1"]
+
+
+def test_an_undeclared_group_is_reported_rather_than_dropped_in_silence():
+    """SCALER_GROUPS is an explicit allow-list by choice, so a new station is
+    invisible until someone adds it -- which is exactly how 1-ID-E came to
+    have no CSV at all. It has to announce itself."""
+    tree = {"instrument/Scalers/E/IC1": np.arange(4.0),
+            "instrument/Scalers/Z/IC1": np.arange(4.0)}
+    assert IC.unknown_scaler_groups(tree) == ["Z"]
+    _rows, note = IC.rows_from_tree(tree, "E", frame_ranges=[(0, 3)], n_light=4)
+    assert "Z" in note and "not written" in note

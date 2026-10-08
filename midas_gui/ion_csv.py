@@ -109,6 +109,29 @@ DARK_SUFFIX = "_dark"
 
 _SCALERS_PREFIX = "instrument/Scalers/"
 
+#: Scaler groups written to the CSV, in header order. Every hutch in the beam
+#: path is a real monitor of the SAME beam, so a run is normalised against
+#: whichever one was live -- writing only the station you happen to be sitting
+#: in throws away the upstream readings you need to do that. A 2026-10 1-ID
+#: file carries B (IC1-IC9, S1, S2, T), C (IC1-IC6) and E (IC1-IC8, S1, S2, T),
+#: all ten samples long for a ten-frame scan; the CSV used to contain only E's
+#: eleven of those twenty-nine channels.
+#:
+#: Station A stays out, for the reason it always has: no sample sits in its
+#: beam path, so however I0/I1-suggestive its channel names are, it is not a
+#: per-sample monitor.
+#:
+#: An explicit list rather than "whatever groups the file has", by choice --
+#: but a group that is present and NOT listed here is reported in the note
+#: rather than dropped in silence. Silence is how 1-ID-E came to have no CSV
+#: at all for weeks (see _PROFILE_HUTCH).
+SCALER_GROUPS = ("B", "C", "D", "E")
+
+#: Separator between a scaler group and its channel: ``E:IC1``. Needed because
+#: the channel names collide -- IC1 exists in B, C and E and means a different
+#: ion chamber in each.
+GROUP_SEP = ":"
+
 
 #: Profiles that name a 20-ID station, and the hutch each one means. Used
 #: only as a fallback — and deliberately NOT a prefix match: "1-ID-E" ends in
@@ -191,26 +214,83 @@ def _fmt(v) -> str:
 
 # ── which acquisitions were the light frames ─────────────────────────────────
 
-def scaler_channels(tree: dict, hutch: Optional[str]) -> list:
-    """Every per-acquisition scaler channel for ``hutch``, in file order.
+def _group_of(path: str) -> Optional[str]:
+    """The scaler group letter in ``instrument/Scalers/<G>/<channel>``."""
+    if not path.startswith(_SCALERS_PREFIX):
+        return None
+    rest = path[len(_SCALERS_PREFIX):].split("/")
+    return rest[0] if len(rest) >= 2 else None
+
+
+def column_name(path: str) -> str:
+    """``E:IC1`` for ``instrument/Scalers/E/IC1`` -- group-qualified, because
+    IC1 exists in B, C and E and is a different ion chamber in each."""
+    group = _group_of(path)
+    leaf = path.rsplit("/", 1)[-1]
+    return f"{group}{GROUP_SEP}{leaf}" if group else leaf
+
+
+def scaler_channels(tree: dict, hutch: Optional[str] = None) -> list:
+    """Every per-acquisition scaler channel in every known group, in
+    :data:`SCALER_GROUPS` order then channel order.
 
     Read from the file rather than from a mapping, because no mapping would
     stay honest: the E group alone carries US/DS ion chambers, four blade
     readings each, a pin diode and a TetrAMM, and which of them is wired to
-    what changes between setups. The ``*_sensitivity`` companions are
-    scalars, not per-acquisition, so they are not columns here.
+    what changes between setups.
+
+    ``hutch`` is accepted and ignored for selection -- it used to restrict
+    this to one group, which is what limited the CSV to the station the user
+    happened to be sitting in. Every hutch along the beam path monitors the
+    same beam, and you normalise against whichever was live, so they all
+    belong in the file. The parameter stays so existing callers (and
+    :func:`split_light_dark`, which still uses the hutch to pick its probe)
+    need no change.
+
+    The ``*_sensitivity`` companions are scalars, not per-acquisition, so
+    they are not channels -- :func:`scaler_sensitivities` handles those.
     """
-    if not hutch:
-        return []
-    prefix = f"{_SCALERS_PREFIX}{hutch}/"
     out = []
-    for path, arr in tree.items():
-        if not path.startswith(prefix) or path.endswith("_sensitivity"):
-            continue
-        arr = np.atleast_1d(np.asarray(arr))
-        if arr.ndim == 1 and arr.dtype.kind in "fiub" and arr.size > 1:
-            out.append(path)
-    return sorted(out)
+    for group in SCALER_GROUPS:
+        prefix = f"{_SCALERS_PREFIX}{group}/"
+        found = []
+        for path, arr in tree.items():
+            if not path.startswith(prefix) or path.endswith("_sensitivity"):
+                continue
+            arr = np.atleast_1d(np.asarray(arr))
+            if arr.ndim == 1 and arr.dtype.kind in "fiub" and arr.size > 1:
+                found.append(path)
+        out.extend(sorted(found))
+    return out
+
+
+def scaler_sensitivities(tree: dict) -> list:
+    """The ``*_sensitivity`` scalars, in the same group order.
+
+    One value per file, not per acquisition, so they are written as a
+    constant repeated down the column. That is deliberate width: the
+    sensitivity is the gain the raw counts were taken at, so without it the
+    counts cannot be turned into a current and the CSV is not self-contained
+    for normalisation.
+    """
+    out = []
+    for group in SCALER_GROUPS:
+        prefix = f"{_SCALERS_PREFIX}{group}/"
+        found = [path for path in tree
+                 if path.startswith(prefix) and path.endswith("_sensitivity")]
+        out.extend(sorted(found))
+    return out
+
+
+def unknown_scaler_groups(tree: dict) -> list:
+    """Scaler groups present in the file but not in :data:`SCALER_GROUPS`.
+
+    Reported, never written. The list is deliberately explicit, but a group
+    nobody has declared must still announce itself -- a monitor silently
+    absent from the CSV is the 1-ID-E failure over again.
+    """
+    seen = {g for g in (_group_of(p) for p in tree) if g}
+    return sorted(seen - set(SCALER_GROUPS))
 
 
 def split_light_dark(tree: dict, *, n_light: int, n_dark: int,
@@ -387,9 +467,21 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
     series: dict = {}        # per-chunk light values
     dark_values: dict = {}   # one value per column, over the whole dark block
     for path in scaler_channels(tree, hutch):
-        name = path.rsplit("/", 1)[-1]
+        name = column_name(path)          # group-qualified: IC1 is not unique
         series[name] = chunked(path, light_off)
         dark_values[name] = block_mean(path, dark_off, n_dark)
+    # Gain settings: one value per file, repeated down the column so the raw
+    # counts beside them can be converted without opening the HDF5. Written
+    # on the dark row too -- the gain applied to the baseline is the same
+    # gain, and a blank there would read as "unknown" rather than "same".
+    for path in scaler_sensitivities(tree):
+        try:
+            value = float(np.atleast_1d(np.asarray(tree[path])).ravel()[0])
+        except (TypeError, ValueError, IndexError):
+            continue
+        name = column_name(path)
+        series[name] = np.full(len(ranges), value, dtype=np.float64)
+        dark_values[name] = value
     for key, _header in _ENV_COLUMNS:
         series[key] = chunked(METADATA_H5_PATHS[key], light_off)
         dark_values[key] = block_mean(METADATA_H5_PATHS[key], dark_off, n_dark)
@@ -429,6 +521,13 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
         for key, arr in series.items():
             row[key] = None if arr is None else arr[n]
         rows.append(row)
+    # A declared-but-unlisted scaler group is reported, not dropped quietly.
+    # SCALER_GROUPS is an explicit allow-list by choice, which means a new
+    # station is invisible until someone adds it -- so it has to say so.
+    extra = unknown_scaler_groups(tree)
+    if extra:
+        note = (f"{note}; scaler group(s) {', '.join(extra)} present but not "
+                f"written (add to ion_csv.SCALER_GROUPS)").lstrip("; ")
     return rows, note
 
 
