@@ -6356,6 +6356,25 @@ class StackedProfileViewer(QtWidgets.QWidget):
     _PUB_PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e",
                     "#8c564b", "#e377c2", "#17becf", "#bcbd22", "#7f7f7f"]
 
+    #: Y-axis scalings. SAXS is the case that forced these: an AgBeh profile
+    #: runs 12000 counts to ~0 inside the first 0.05 A^-1, so on a linear
+    #: axis the entire pattern is one spike against a flat line.
+    #:
+    #: Each entry carries its own default stack spacing and suffix, because
+    #: "spacing" means something different per scale: 500 counts is a
+    #: sensible linear offset and an absurd one in decades. Switching scale
+    #: swaps the spinbox over, remembering what each scale was last set to.
+    #:
+    #: The transform is applied to the profile BEFORE the stack offset is
+    #: added (see _restack). log10(I + offset) is not the same curve shifted
+    #: -- it compresses each successive frame more than the last, so a stack
+    #: would fan closed towards the top.
+    _Y_SCALES = {
+        "Linear":     dict(label="Intensity + offset",        spacing=500.0, suffix="  cts"),
+        "log₁₀(I)":   dict(label="log₁₀(Intensity) + offset", spacing=0.5,   suffix="  dec"),
+        "√I":         dict(label="√Intensity + offset",       spacing=10.0,  suffix="  √cts"),
+    }
+
     # Two saved plot configurations. "White (publication)" is the default; "Dark"
     # preserves the original on-screen look.
     _THEMES = {
@@ -6393,6 +6412,30 @@ class StackedProfileViewer(QtWidgets.QWidget):
                                      "Needs the run's calibration for the conversion.")
         self._xunit_combo.currentIndexChanged.connect(self._on_xunit_changed)
         bar.addWidget(self._xunit_combo)
+        self._logx_chk = QtWidgets.QCheckBox("log x")
+        self._logx_chk.setToolTip(
+            "Log-scale the x axis. Non-positive x (Q = 0, R = 0) has no "
+            "logarithm and is dropped from the curve rather than clamped "
+            "to something it is not.")
+        self._logx_chk.toggled.connect(self._on_logx_toggled)
+        bar.addWidget(self._logx_chk)
+        bar.addWidget(QtWidgets.QLabel("y:"))
+        self._yscale_combo = _NoScrollComboBox()
+        for name in self._Y_SCALES:
+            self._yscale_combo.addItem(name, name)
+        self._yscale_combo.setToolTip(
+            "Intensity scaling.\n\n"
+            "log₁₀ — the SAXS default: several decades of intensity in one "
+            "view.\n"
+            "√I — between linear and log. Lifts weak peaks without "
+            "flattening strong ones, and (counting statistics being "
+            "Poisson) gives roughly uniform noise, so scatter looks the "
+            "same everywhere instead of exploding at low signal.\n\n"
+            "Values with no image under the transform (I ≤ 0 for log, "
+            "I < 0 for √) are dropped, not clamped. Each scale keeps its "
+            "own stack spacing.")
+        self._yscale_combo.currentIndexChanged.connect(self._on_yscale_changed)
+        bar.addWidget(self._yscale_combo)
         bar.addWidget(QtWidgets.QLabel("theme:"))
         self._theme_combo = _NoScrollComboBox()
         self._theme_combo.addItems(list(self._THEMES.keys()))
@@ -6640,6 +6683,55 @@ class StackedProfileViewer(QtWidgets.QWidget):
 
     # ── internal ─────────────────────────────────────────────────────
 
+    def _y_display(self, p):
+        """Profile values under the selected y scaling.
+
+        Values with no image under the transform are returned as NaN rather
+        than clamped: pyqtgraph breaks the line there, which says "nothing
+        measurable here", where clamping to a floor would draw a plateau the
+        detector never saw. Background-subtracted SAXS goes negative
+        routinely, so this is the normal case, not the edge one.
+        """
+        mode = self._yscale_combo.currentData() or "Linear"
+        arr = np.asarray(p, dtype=float)
+        if mode == "Linear":
+            return arr
+        with np.errstate(invalid="ignore", divide="ignore"):
+            if mode.startswith("log"):
+                return np.where(arr > 0, np.log10(np.where(arr > 0, arr, 1.0)), np.nan)
+            return np.where(arr >= 0, np.sqrt(np.where(arr >= 0, arr, 0.0)), np.nan)
+
+    def _on_yscale_changed(self, *_a):
+        """Swap the stack spacing over with the scale, and relabel.
+
+        Carrying one spacing across scales is what makes this feel broken:
+        500 is a reasonable linear offset and 500 decades is not, so the
+        stack would fly apart on the first switch. Each scale remembers
+        what it was last set to.
+        """
+        mode = self._yscale_combo.currentData() or "Linear"
+        prev = getattr(self, "_yscale_prev", "Linear")
+        if not hasattr(self, "_spacing_by_scale"):
+            self._spacing_by_scale = {k: v["spacing"] for k, v in self._Y_SCALES.items()}
+        self._spacing_by_scale[prev] = float(self._spacing.value())
+        self._yscale_prev = mode
+        spec = self._Y_SCALES[mode]
+        self._spacing.blockSignals(True)
+        self._spacing.setSuffix(spec["suffix"])
+        self._spacing.setDecimals(0 if mode == "Linear" else 2)
+        self._spacing.setSingleStep(100.0 if mode == "Linear" else 0.5)
+        self._spacing.setValue(self._spacing_by_scale[mode])
+        self._spacing.blockSignals(False)
+        self._plot.setLabel("left", spec["label"])
+        self._restack()
+
+    def _on_logx_toggled(self, checked: bool):
+        """pyqtgraph logs the x data itself, which also gives proper decade
+        ticks — worth having on a publication plot. Y stays manual because
+        of the stack offset (see _restack)."""
+        self._plot.getPlotItem().setLogMode(x=bool(checked), y=False)
+        self._restack()
+
     def _restack(self, _=None):
         """Redraw all curves + inline labels (offsets, spacing, x-unit)."""
         spacing = float(self._spacing.value())
@@ -6647,13 +6739,20 @@ class StackedProfileViewer(QtWidgets.QWidget):
         for i, (curve, r, p) in enumerate(
                 zip(self._curves, self._r_axes, self._profiles)):
             xd = self._x_display(r)
-            yd = p + i * spacing
+            # Transform THEN offset. log10(I + offset) fans the stack closed
+            # towards the top; log10(I) + offset keeps every frame the same
+            # distance apart, which is the whole point of a stack.
+            yd = self._y_display(p) + i * spacing
             curve.setData(xd, yd)
             if i < len(self._labels) and xd.size:
-                self._labels[i].setPos(float(xd[0]), float(p[0] + i * spacing))
-            fin = np.isfinite(xd) & np.isfinite(yd)
+                self._labels[i].setPos(float(xd[0]), float(yd[0]))
+            # Bounds in the coordinates the ViewBox actually uses: with log x
+            # that is log10(x), so setLimits gets log-space numbers and does
+            # not pin the view to the wrong decade.
+            xb = np.log10(np.where(xd > 0, xd, np.nan)) if self._logx_chk.isChecked() else xd
+            fin = np.isfinite(xb) & np.isfinite(yd)
             if fin.any():
-                xmins.append(float(xd[fin].min())); xmaxs.append(float(xd[fin].max()))
+                xmins.append(float(xb[fin].min())); xmaxs.append(float(xb[fin].max()))
                 ymins.append(float(yd[fin].min())); ymaxs.append(float(yd[fin].max()))
         if xmins:
             self._plot.autoRange()
@@ -6673,7 +6772,12 @@ class StackedProfileViewer(QtWidgets.QWidget):
         xpad = 0.15 * (xmax - xmin)
         ypad = 0.15 * (ymax - ymin)
         vb = self._plot.getPlotItem().getViewBox()
-        vb.setLimits(xMin=max(0.0, xmin - xpad), xMax=xmax + xpad,
+        # No max(0.0, ...) on xMin here: in log x the axis is
+        # legitimately negative (Q = 0.01 is -2), and clamping it to 0
+        # would pin the view to the wrong end of the data.
+        x_floor = (xmin - xpad if self._logx_chk.isChecked()
+                   else max(0.0, xmin - xpad))
+        vb.setLimits(xMin=x_floor, xMax=xmax + xpad,
                      yMin=ymin - ypad, yMax=ymax + ypad,
                      maxXRange=(xmax - xmin) + 2 * xpad,
                      maxYRange=(ymax - ymin) + 2 * ypad)
