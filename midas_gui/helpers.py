@@ -2207,7 +2207,9 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
                            tx: float = 0.0, ty: float = 0.0, tz: float = 0.0,
                            lsd_um: Optional[float] = None,
                            pxY_um: Optional[float] = None,
-                           pxZ_um: Optional[float] = None) -> None:
+                           pxZ_um: Optional[float] = None,
+                           color: Optional[str] = None,
+                           clear: bool = True) -> None:
     """If ``show_grid``, draw the Rmin/Rmax boundaries plus the polar
     (R, η) bin grid — arcs at each radial-bin edge plus spokes at each
     η-bin edge, both thinned to at most ``max_rings``/``max_spokes`` — onto
@@ -2239,9 +2241,19 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
     uses for calibration rings.
     """
     import pyqtgraph as pg
-    for it in items:
-        viewer._iv.removeItem(it)
-    items.clear()
+    if clear:
+        for it in items:
+            viewer._iv.removeItem(it)
+        items.clear()
+    # ``color`` keys the whole overlay to one detector. Four panels' caking
+    # regions on one composite canvas are only readable if each is drawn in
+    # the colour that panel already has everywhere else (see
+    # hydra_widgets.panel_color); ``clear=False`` is what lets them stack
+    # into a single `items` list that one later call still tears down.
+    # Default stays the original orange/blue so every existing caller is
+    # pixel-identical.
+    bound_color = color or "orange"
+    grid_color = color or (120, 180, 255)
     if r_max <= 0:
         return
     tilt_aware = (bool(lsd_um) and bool(pxY_um) and bool(pxZ_um)
@@ -2277,9 +2289,9 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
         return
 
     if r_min > 0:
-        _circle(r_min, pg.mkPen("orange", width=1.2, style=QtCore.Qt.DashLine))
-    _circle(r_max, pg.mkPen("orange", width=1.5))
-    grid_pen = pg.mkPen((120, 180, 255), width=0.8)
+        _circle(r_min, pg.mkPen(bound_color, width=1.2, style=QtCore.Qt.DashLine))
+    _circle(r_max, pg.mkPen(bound_color, width=1.5))
+    grid_pen = pg.mkPen(grid_color, width=0.8)
     for r in _thinned_bin_edges(r_min, r_max, r_bin, max_rings):
         if r_min < r < r_max:
             _circle(r, grid_pen)

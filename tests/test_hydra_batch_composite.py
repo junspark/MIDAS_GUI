@@ -139,16 +139,16 @@ def test_the_composite_carries_no_single_panel_overlay(app, fixture_available):
     nothing, so they are cleared — an overlay in a plausible wrong place is
     worse than none. The Rmax presets go dead for the same reason."""
     page = _calibrated_page(app, fixture_available)
-    before = page._r_max.value()
+    before = {n: page._cards[n].caking() for n in (1, 2, 3, 4)}
     page._toolbar.set_current("composite")
     app.processEvents()
 
     assert page._bin_overlay_items == []
-    assert not page._rmax_corner_btn.isEnabled()
-    assert not page._rmax_edge_btn.isEnabled()
-    from midas_gui.helpers import rmax_corner_px
-    page._apply_rmax_preset(rmax_corner_px)
-    assert page._r_max.value() == before, "a composite canvas filled a per-panel Rmax"
+    # Caking lives on the cards now, so there is no shared Rmax for a
+    # composite canvas to fill -- but assert it explicitly, because the
+    # auto-Rmax resolution in the per-panel path would be a plausible place
+    # for a BigDet corner distance to leak into a panel's real setting.
+    assert {n: page._cards[n].caking() for n in (1, 2, 3, 4)} == before
 
 
 def test_switching_to_composite_keeps_the_per_panel_stacks_put(app, fixture_available):

@@ -1168,6 +1168,26 @@ _HYDRA_CURVE_COLORS = {
 _HYDRA_CURVE_KEYS = ("ge1", "ge2", "ge3", "ge4", "composite")
 
 
+def panel_color(panel) -> str:
+    """This panel's colour, as a hex string. Accepts ``"ge3"``, ``3`` or
+    ``"composite"``.
+
+    Public accessor for :data:`_HYDRA_CURVE_COLORS` so that a panel is the
+    same colour everywhere it appears -- its radial curve, its checkbox, and
+    (since caking became per panel) its caking overlay. Four overlays drawn
+    on one composite canvas are only readable if the colour that says "this
+    is ge3" is the colour ge3 already has in the plot beside it; a second
+    palette invented for the overlay would drift from this one the first
+    time either changed.
+
+    Unknown keys fall back to the composite's near-white rather than
+    raising: a missing colour must not be what stops an overlay drawing.
+    """
+    if isinstance(panel, int):
+        panel = f"ge{panel}"
+    return _HYDRA_CURVE_COLORS.get(str(panel), _HYDRA_CURVE_COLORS["composite"])
+
+
 class HydraProfileViewer(QtWidgets.QWidget):
     """Radial-integration plot for Hydra mode: one independently-computed
     curve per panel (ge1-4), each converted from its own native R-pixel

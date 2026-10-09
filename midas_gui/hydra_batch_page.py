@@ -42,7 +42,8 @@ from midas_gui.helpers import (
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer,
                                OriginToolButton)
-from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar
+from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
+                                     panel_color)
 from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
 from midas_gui.workers import BatchRunCoordinator, write_all_profiles
 from midas_gui import hydra
@@ -163,42 +164,17 @@ class HydraBatchPage(QtWidgets.QWidget):
         _ki = self._kernel.findData(DEFAULT_KERNEL)
         if _ki >= 0:
             self._kernel.setCurrentIndex(_ki)
-        self._r_bin = _fspin(0.1, 20.0, 2, 1.0, "px")
-        self._e_bin = _fspin(0.5, 360.0, 1, 5.0, "°")
         self._azim = _NoScrollComboBox()
         self._azim.addItem("Pixel-weighted", True)
         self._azim.addItem("η-bin mean (legacy)", False)
         intf = S.Form()
         intf.row(("Kernel:", self._kernel))
-        intf.row(("R bin:", self._r_bin), ("η bin:", self._e_bin))
         intf.row(("Azim. mean:", self._azim))
         integ.body.addLayout(intf)
-        # Rmin/Rmax — shared across panels like R bin/η bin; Corner/Edge
-        # presets compute from whichever panel is currently selected in the
-        # toolbar (see BatchTab's single-detector counterpart for the 0.0
-        # "auto" sentinel convention).
-        self._r_min = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
-        self._r_max = _fspin(0.0, 1_000_000.0, 2, 0.0, "px")
-        self._r_max.setToolTip(
-            "0 = auto (farthest detector corner from the beam centre).\n"
-            "Use the Corner/Edge buttons to fill in a value, or type your own.")
-        self._rmax_corner_btn = QtWidgets.QPushButton("Corner")
-        self._rmax_corner_btn.setToolTip(
-            "Set Rmax to the farthest detector CORNER from the beam centre "
-            "of the currently-selected panel.")
-        self._rmax_corner_btn.clicked.connect(lambda: self._apply_rmax_preset(rmax_corner_px))
-        self._rmax_edge_btn = QtWidgets.QPushButton("Edge")
-        self._rmax_edge_btn.setToolTip(
-            "Set Rmax to the farthest detector EDGE from the beam centre "
-            "of the currently-selected panel.")
-        self._rmax_edge_btn.clicked.connect(lambda: self._apply_rmax_preset(rmax_edge_px))
-        rmax_row = QtWidgets.QHBoxLayout(); rmax_row.setSpacing(4)
-        rmax_row.addWidget(self._r_max)
-        rmax_row.addWidget(self._rmax_corner_btn); rmax_row.addWidget(self._rmax_edge_btn)
-        rf = S.Form()
-        rf.row(("Rmin:", self._r_min))
-        rf.row(("Rmax:", rmax_row))
-        integ.body.addLayout(rf)
+        # Rmin/Rmax/R bin/eta bin are NOT here: caking is per panel, on each
+        # HydraBatchPanelCard (see its module docstring). What stays shared
+        # is the processing recipe -- kernel, azimuthal weighting, variance,
+        # Q-uniform bins -- none of which mpe_wf models per detector either.
         self._grid_chk = QtWidgets.QCheckBox("Show bin grid")
         self._grid_chk.setToolTip(
             "Overlay the Rmin/Rmax boundary circles and the full (R, η) "
@@ -208,8 +184,6 @@ class HydraBatchPage(QtWidgets.QWidget):
             "legibility with fine bin sizes. Unchecking this hides the "
             "overlay entirely, including Rmin/Rmax.")
         integ.body.addWidget(self._grid_chk)
-        for w in (self._r_min, self._r_max, self._r_bin, self._e_bin):
-            w.valueChanged.connect(self._refresh_active_detector_preview)
         self._grid_chk.toggled.connect(self._refresh_active_detector_preview)
         self._var_check = QtWidgets.QCheckBox("Per-bin variance (σ)")
         self._var_check.setToolTip(
@@ -477,11 +451,6 @@ class HydraBatchPage(QtWidgets.QWidget):
 
     def _on_panel_changed(self, key: str):
         n = self._panel_num(key)
-        # Corner/Edge fill the SHARED Rmax from one panel's beam centre;
-        # there is no such thing on a BigDet canvas, so show them as dead
-        # rather than let them look available and do nothing.
-        for btn in (self._rmax_corner_btn, self._rmax_edge_btn):
-            btn.setEnabled(n is not None)
         if n is None:                      # composite
             # The card stack and the Per-panel results stack have no
             # composite entry, and inventing a blank one would make both
@@ -501,27 +470,6 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._refresh_detector_preview(n)
 
     # ── Detector-view preview (Rmin/Rmax + bin-grid overlay) ─────────
-
-    def _apply_rmax_preset(self, formula) -> None:
-        """Corner/Edge button handler — resolves the currently-selected
-        panel's calibration and fills the shared Rmax field."""
-        n = self._panel_num(self._toolbar.current())
-        card = self._cards.get(n) if n else None
-        if card is None:
-            # Composite selected: Rmin/Rmax are per-panel integration
-            # settings and there is no single beam centre to read.
-            if self._toolbar.current() == "composite":
-                self._log.append(
-                    "[hydra batch] Rmax presets need a panel selected — "
-                    "they fill that panel's calibration into the shared "
-                    "Rmax, and the composite has no single beam centre.")
-            return
-        fields, note = card._calib_fields_in_use()
-        if not fields or fields.get("BC_y") is None or fields.get("NrPixelsY") is None:
-            self._log.append(f"[hydra batch] Can't set Rmax preset: {note}")
-            return
-        value = formula(fields["BC_y"], fields["BC_z"], fields["NrPixelsY"], fields["NrPixelsZ"])
-        self._r_max.setValue(value)
 
     def _refresh_active_detector_preview(self, *_args) -> None:
         key = self._toolbar.current()
@@ -705,17 +653,19 @@ class HydraBatchPage(QtWidgets.QWidget):
                 self._det_view, self._bin_overlay_items,
                 bc_y=0.0, bc_z=0.0, r_min=0.0, r_max=0.0, r_bin=1.0, e_bin=5.0)
             return
-        if self._r_max.value() == 0.0:
-            self._r_max.blockSignals(True)
-            self._r_max.setValue(rmax_corner_px(
-                fields["BC_y"], fields["BC_z"], fields["NrPixelsY"], fields["NrPixelsZ"]))
-            self._r_max.blockSignals(False)
+        cake = card.caking()
+        if cake["R_MAX"] == 0.0:          # 0 = auto, resolved per panel
+            card.set_caking({"R_MAX": rmax_corner_px(
+                fields["BC_y"], fields["BC_z"],
+                fields["NrPixelsY"], fields["NrPixelsZ"])})
+            cake = card.caking()
         draw_polar_bin_overlay(
             self._det_view, self._bin_overlay_items,
             bc_y=fields["BC_y"], bc_z=fields["BC_z"],
-            r_min=self._r_min.value(), r_max=self._r_max.value(),
-            r_bin=self._r_bin.value(), e_bin=self._e_bin.value(),
-            show_grid=self._grid_chk.isChecked(),
+            r_min=cake["R_MIN"], r_max=cake["R_MAX"],
+            r_bin=cake["R_STEP"], e_bin=cake["ETA_STEP"],
+            eta_min=cake["ETA_MIN"], eta_max=cake["ETA_MAX"],
+            show_grid=self._grid_chk.isChecked(), color=panel_color(n),
             tx=fields.get("tx") or 0.0, ty=fields.get("ty") or 0.0,
             tz=fields.get("tz") or 0.0, lsd_um=fields.get("Lsd"),
             pxY_um=fields.get("pxY"), pxZ_um=fields.get("pxZ"))
@@ -735,8 +685,8 @@ class HydraBatchPage(QtWidgets.QWidget):
             calib = ("file", card.file_path())
         mask_id = None if mask is None else (tuple(mask.shape), int(np.count_nonzero(mask)))
         pol, sa = corrections
-        return (calib, kernel, round(self._r_bin.value(), 4), round(self._e_bin.value(), 4),
-                round(self._r_min.value(), 4), round(self._r_max.value(), 4),
+        cake = tuple(round(v, 4) for v in card.caking().values())
+        return (calib, kernel, cake,
                 bool(weighted), pol is not None, sa is not None, mask_id,
                 src_cfg.get("path"), src_cfg.get("type"), src_cfg.get("dataset"))
 
@@ -785,8 +735,7 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _start_panel_worker(self, n: int):
         card = self._cards[n]
         try:
-            spec = card.resolved_spec(self._r_bin.value(), self._e_bin.value(),
-                                      r_min=self._r_min.value(), r_max=self._r_max.value() or None)
+            spec = card.resolved_spec()   # this panel's own caking
         except Exception as e:
             self._skip_panel(n, f"calibration error: {e}")
             return
@@ -1006,8 +955,7 @@ class HydraBatchPage(QtWidgets.QWidget):
 
     def _state_widgets(self) -> dict:
         return {
-            "kernel": self._kernel, "r_bin": self._r_bin, "e_bin": self._e_bin,
-            "r_min": self._r_min, "r_max": self._r_max, "grid_chk": self._grid_chk,
+            "kernel": self._kernel, "grid_chk": self._grid_chk,
             "azim": self._azim, "var_check": self._var_check, "err_model": self._err_model,
             "q_check": self._q_check, "q_min": self._q_min, "q_max": self._q_max,
             "q_bin": self._q_bin, "mon_ed": self._mon_ed, "out_ed": self._out_ed,
@@ -1047,6 +995,20 @@ class HydraBatchPage(QtWidgets.QWidget):
             pair = self._viewer_pairs.get(int(n_key))
             if pair is not None:
                 pair.waterfall.set_display_state(wf_state)
+        # Projects saved before caking became per panel carry ONE shared set
+        # at page level. Give every panel that set rather than dropping it:
+        # it is what those runs actually used, so it restores the project as
+        # it was, and the panels diverge only once somebody edits one.
+        legacy = {k: state.get(k) for k in ("r_min", "r_max", "r_bin", "e_bin")
+                  if state.get(k) is not None}
+        if legacy:
+            shared = {"R_MIN": legacy.get("r_min"), "R_MAX": legacy.get("r_max"),
+                      "R_STEP": legacy.get("r_bin"), "ETA_STEP": legacy.get("e_bin")}
+            for card in self._cards.values():
+                card.set_caking({k: v for k, v in shared.items() if v is not None})
+            self._log.append(
+                "[hydra batch] This project predates per-panel caking — its one "
+                "shared Rmin/Rmax/R bin/η bin was applied to all four panels.")
         for n_key, fields in (state.get("cards") or {}).items():
             card = self._cards.get(int(n_key))
             if card is None:
@@ -1091,7 +1053,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         if pair is None:
             return
         try:
-            spec = self._cards[n].resolved_spec(self._r_bin.value(), self._e_bin.value())
+            spec = self._cards[n].resolved_spec()
             axctx = (float(spec.Lsd), float(spec.pxY), float(spec.Wavelength))
             pair.waterfall.set_axis_context(*axctx)
             pair.stack_view.set_axis_context(*axctx)

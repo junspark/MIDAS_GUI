@@ -149,12 +149,17 @@ def _stub_spec_builders(app, monkeypatch):   # `app` so _load_qt() has run first
     IntegrationWorker rather than exercise a real fit). Stub it with a
     lightweight object carrying just the attributes ``_start_panel_worker``
     reads (``Lsd``, ``pxY``, ``Wavelength``)."""
+    # **kw rather than the four named optionals the stub used to list: the
+    # real builders have always taken eta_min/eta_max too, and the card
+    # started passing them when caking went per panel. A stub that models a
+    # narrower signature than the thing it replaces fails the caller for a
+    # reason that has nothing to do with the caller.
     monkeypatch.setattr(hydra_batch_widgets_mod, "_build_spec",
-                        lambda result, r_bin, e_bin, r_min=None, r_max=None: _fake_spec(
+                        lambda result, r_bin, e_bin, **kw: _fake_spec(
                             getattr(result, "Lsd", 200_000.0), getattr(result, "pxY", 200.0),
                             getattr(result, "wavelength_A", 0.1729)))
     monkeypatch.setattr(hydra_batch_widgets_mod, "spec_from_geometry_file",
-                        lambda path, r_bin, e_bin, r_min=None, r_max=None: _fake_spec())
+                        lambda path, r_bin, e_bin, **kw: _fake_spec())
 
 
 @pytest.fixture(autouse=True)
