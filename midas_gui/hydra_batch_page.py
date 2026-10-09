@@ -523,6 +523,25 @@ class HydraBatchPage(QtWidgets.QWidget):
             self._det_view._iv.addItem(it)
         self._axis_items.extend(items)
 
+    @staticmethod
+    def _composite_axes_bc(img):
+        """``(bc_y, bc_z)`` for the composite canvas, or ``None``.
+
+        The compositor registers every panel's beam centre onto the centre of
+        the BigDet canvas, so on the built (decimated) image that is simply
+        its middle. ``build_lab_frame_axes_items`` wants (y, z) = (column,
+        row), while an array's shape is (rows, cols).
+        """
+        if img is None:
+            return None
+        shape = getattr(img, "shape", None)
+        if not shape or len(shape) < 2:
+            return None
+        n_rows, n_cols = int(shape[0]), int(shape[1])
+        if n_rows <= 0 or n_cols <= 0:
+            return None
+        return n_cols / 2.0, n_rows / 2.0
+
     def _clear_lab_axes(self) -> None:
         for it in self._axis_items:
             self._det_view._iv.removeItem(it)
@@ -577,6 +596,10 @@ class HydraBatchPage(QtWidgets.QWidget):
             self._log.append(f"[hydra batch] ge{n}: no usable values in {path}")
             return
         card.set_caking(values)
+        # After set_caking, never before: the spin boxes' valueChanged marks
+        # the card "edited since", and setting the source clears that.
+        card.set_cake_source(Path(path).name)
+        self._load_sibling_cake_csvs(n, path)
         # OME_* describe the rotation, which this page has no controls for
         # (its loader takes a frame RANGE, not a combine count). Saying so
         # beats dropping them silently -- the file carries them and the user
@@ -587,6 +610,49 @@ class HydraBatchPage(QtWidgets.QWidget):
                 f"— no rotation controls on this page)") if extra else ""
         self._log.append(f"[hydra batch] ge{n}: caking loaded from "
                          f"{Path(path).name}{note}")
+
+    def _load_sibling_cake_csvs(self, n: int, path) -> None:
+        """Load the other panels from the files beside the one just picked.
+
+        mpe_wf names these ``cake_parameters.<beamline>.ge{n}.csv``, so the
+        file the user designated names its siblings too -- picking ge4's is
+        enough to find ge1/ge2/ge3. Asked for at 1-ID-E: "the gui should be
+        able to automatically find these files if user designates one."
+
+        Only panels whose file actually exists and parses are touched; the
+        rest keep whatever they had, and the log says which were found so a
+        half-populated set is never silent.
+        """
+        p = Path(path)
+        token = f"ge{n}"
+        if token not in p.name:
+            self._log.append(
+                f"[hydra batch] ge{n}: '{p.name}' does not contain '{token}', "
+                f"so the other panels' files cannot be derived from it — "
+                f"load them individually.")
+            return
+        found, missing = [], []
+        for m in sorted(self._cards):
+            if m == n:
+                continue
+            cand = p.with_name(p.name.replace(token, f"ge{m}"))
+            vals = cake_params.parse_cake_csv(str(cand)) if cand.is_file() else None
+            if not vals:
+                missing.append(m)
+                continue
+            card = self._cards[m]
+            card.set_caking(vals)
+            card.set_cake_source(cand.name)
+            self.invalidate_composite()
+            found.append(m)
+        if found:
+            self._log.append(
+                f"[hydra batch] also loaded caking for "
+                f"{', '.join(f'ge{m}' for m in found)} from the same folder.")
+        if missing:
+            self._log.append(
+                f"[hydra batch] no usable cake file beside it for "
+                f"{', '.join(f'ge{m}' for m in missing)} — left unchanged.")
 
     def _save_cake_csv(self, n: int) -> None:
         card = self._cards.get(n)
@@ -604,6 +670,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         except Exception as exc:
             self._log.append(f"[hydra batch] ge{n}: could not write {path}: {exc}")
             return
+        card.set_cake_source(Path(path).name, verb="saved to")
         self._log.append(f"[hydra batch] ge{n}: caking saved to {Path(path).name}")
 
     # ── Composite (all panels, each under its own calibration) ──────
@@ -727,9 +794,19 @@ class HydraBatchPage(QtWidgets.QWidget):
         draw_polar_bin_overlay(
             self._det_view, self._bin_overlay_items,
             bc_y=0.0, bc_z=0.0, r_min=0.0, r_max=0.0, r_bin=1.0, e_bin=5.0)
-        # The composite registers all four beam centres onto one canvas
-        # point, so no single panel's orientation is the one to describe.
-        self._clear_lab_axes()
+        # All four beam centres register onto ONE canvas point, and for a
+        # registered composite that point IS the canvas centre -- the same
+        # rule hydra_page._reseed_composite_card_if_needed seeds its
+        # composite card with (BigDetSize/2, in built pixels). So the lab
+        # frame is well defined here; this used to clear the axes on the
+        # grounds that no single panel's orientation applies, which threw
+        # away the one view where all four panels share a frame and the lab
+        # axes mean the most.
+        bc = self._composite_axes_bc(getattr(self._det_view, "_data", None))
+        if bc is None:
+            self._clear_lab_axes()
+        else:
+            self._redraw_lab_axes_if_on(*bc)
 
     def _refresh_detector_preview(self, n: int) -> None:
         """Refresh the (single, page-level) Detector-view tab's frame +

@@ -154,9 +154,20 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
         save_btn.clicked.connect(lambda: self.cakeSaveRequested.emit(self.panel_number))
         csv_row.addWidget(load_btn); csv_row.addWidget(save_btn); csv_row.addStretch(1)
         cake.body.addLayout(csv_row)
+        # Which file these numbers came from. Without it the six spin boxes
+        # look identical whether they were loaded from a workflow CSV, typed
+        # by hand, or left at defaults -- and the run is driven by whatever
+        # is in the boxes, not by the file.
+        self._cake_src = ""
+        self._cake_src_lbl = QtWidgets.QLabel("")
+        self._cake_src_lbl.setWordWrap(True)
+        self._cake_src_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        cake.body.addWidget(self._cake_src_lbl)
+        self.set_cake_source("")
         for w in (self._r_min, self._r_max, self._r_bin,
                   self._eta_min, self._eta_max, self._eta_bin):
             w.valueChanged.connect(lambda *_: self.cakingChanged.emit(self.panel_number))
+            w.valueChanged.connect(self._mark_cake_edited)
         lv.addWidget(cake)
 
         # ── Run progress (this panel only) ──
@@ -186,6 +197,28 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
             return
         self._r_max.setValue(formula(fields["BC_y"], fields["BC_z"],
                                      fields["NrPixelsY"], fields["NrPixelsZ"]))
+
+    def set_cake_source(self, text: str, *, verb: str = "from") -> None:
+        """Record which cake_parameters file these values came from (or were
+        written to). Empty clears it back to "not from a file"."""
+        self._cake_src = text or ""
+        if self._cake_src:
+            self._cake_src_lbl.setText(f"{verb} {self._cake_src}")
+            self._cake_src_lbl.setToolTip(self._cake_src)
+        else:
+            self._cake_src_lbl.setText(
+                "No cake file — these values are this session's.")
+            self._cake_src_lbl.setToolTip("")
+
+    def cake_source(self) -> str:
+        return self._cake_src
+
+    def _mark_cake_edited(self, *_args) -> None:
+        """A hand edit makes the file no longer describe what will run, so
+        say so rather than keep showing its name unqualified."""
+        if self._cake_src and "edited" not in self._cake_src_lbl.text():
+            self._cake_src_lbl.setText(
+                f"{self._cake_src_lbl.text()}  (edited since)")
 
     def caking(self) -> dict:
         """This panel's six caking values, in the CAKE_KEYS vocabulary so a

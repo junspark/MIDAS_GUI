@@ -169,10 +169,15 @@ def test_switching_to_composite_keeps_the_per_panel_stacks_put(app, fixture_avai
 # Batch Integrate all had this overlay; the Hydra batch page had no
 # lab-axes code at all.
 
-def test_lab_axes_follow_the_selected_panel_and_clear_on_composite(app, fixture_available):
+def test_lab_axes_follow_the_selected_panel_and_the_composite(app, fixture_available):
     """One overlay, re-anchored — not one per panel accumulating on the
-    shared viewer. On the composite there is no single beam centre to
-    anchor to: the canvas registers all four onto one point."""
+    shared viewer.
+
+    The composite used to clear them, on the grounds that no single panel's
+    beam centre anchors the canvas. That was wrong in the useful direction:
+    the canvas registers all four onto ONE point, its centre, so the lab
+    frame is defined — and reported missing from the beamline as "Lab frame
+    view not visible in integration tab"."""
     page = _calibrated_page(app, fixture_available)
     assert page._axis_items == []
 
@@ -187,7 +192,9 @@ def test_lab_axes_follow_the_selected_panel_and_clear_on_composite(app, fixture_
 
     page._toolbar.set_current("composite")
     app.processEvents()
-    assert page._axis_items == [], "a compass was drawn on the composite canvas"
+    assert len(page._axis_items) == on_ge1, (
+        "the composite has a well-defined centre and must still show the "
+        "lab frame, without accumulating a second overlay")
 
     page._toolbar.set_current("ge2")
     app.processEvents()
@@ -196,3 +203,34 @@ def test_lab_axes_follow_the_selected_panel_and_clear_on_composite(app, fixture_
     page._lab_axes_chk.setChecked(False)
     app.processEvents()
     assert page._axis_items == []
+
+
+# ── lab-frame axes on the composite ──────────────────────────────────────
+# Reported at 1-ID-E: "Lab frame view not visible in integration tab." The
+# composite branch cleared the axes outright, on the grounds that no single
+# panel's orientation describes the canvas. But the compositor registers all
+# four beam centres onto ONE point -- the canvas centre -- so the lab frame
+# IS defined, and the composite is the view where it matters most. Pure
+# geometry, so no page is built here (see the module docstring: page
+# instances are this file's scarce resource).
+import numpy as _np
+
+from midas_gui.hydra_batch_page import HydraBatchPage as _HBP
+
+
+def test_the_composite_beam_centre_is_the_canvas_centre():
+    bc = _HBP._composite_axes_bc(_np.zeros((3328, 3328), dtype=_np.float32))
+    assert bc == (1664.0, 1664.0)
+
+
+def test_it_is_returned_as_y_then_z_not_rows_then_cols():
+    """build_lab_frame_axes_items takes (y, z) = (column, row); an array's
+    shape is (rows, cols). A square composite hides a swap, so check a
+    non-square canvas."""
+    bc_y, bc_z = _HBP._composite_axes_bc(_np.zeros((200, 400), dtype=_np.float32))
+    assert (bc_y, bc_z) == (200.0, 100.0)
+
+
+@pytest.mark.parametrize("img", [None, _np.zeros((0, 0)), _np.zeros(5)])
+def test_no_centre_without_a_real_2d_frame(img):
+    assert _HBP._composite_axes_bc(img) is None

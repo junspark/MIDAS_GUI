@@ -178,3 +178,46 @@ def test_loading_one_panels_file_does_not_touch_the_others(app, fixture_tmp=None
     a, b = HydraBatchPanelCard(1), HydraBatchPanelCard(2)
     a.set_caking(REAL_CSV)
     assert b.caking()["R_MAX"] == 0.0
+
+
+# ── which file these numbers came from ───────────────────────────────────
+# Reported at 1-ID-E: "There is no way to tell which caking parameter file is
+# being used." Six spin boxes look identical whether they were loaded from a
+# workflow CSV, typed, or left at defaults -- and the run uses the boxes.
+def test_a_card_starts_saying_it_has_no_file(card):
+    assert "No cake file" in card._cake_src_lbl.text()
+    assert card.cake_source() == ""
+
+
+def test_loading_names_the_file(card):
+    card.set_cake_source("cake_parameters.1ide.ge1.csv")
+    assert "cake_parameters.1ide.ge1.csv" in card._cake_src_lbl.text()
+    assert card._cake_src_lbl.text().startswith("from ")
+
+
+def test_saving_says_so_rather_than_claiming_the_values_came_from_there(card):
+    card.set_cake_source("cake_parameters.1ide.ge1.csv", verb="saved to")
+    assert card._cake_src_lbl.text().startswith("saved to ")
+
+
+def test_a_hand_edit_is_flagged_against_the_file(card):
+    """The file no longer describes what will run."""
+    card.set_cake_source("cake_parameters.1ide.ge1.csv")
+    card._r_min.setValue(card._r_min.value() + 10.0)
+    assert "edited since" in card._cake_src_lbl.text()
+
+
+def test_the_flag_does_not_pile_up_on_repeated_edits(card):
+    card.set_cake_source("cake_parameters.1ide.ge1.csv")
+    for d in (1.0, 2.0, 3.0):
+        card._r_min.setValue(card._r_min.value() + d)
+    assert card._cake_src_lbl.text().count("edited since") == 1
+
+
+def test_setting_values_then_the_source_does_not_read_as_edited(card):
+    """set_caking fires valueChanged, so the source must be set after it --
+    otherwise every freshly loaded file immediately claims to be edited."""
+    card.set_caking({"R_MIN": 40.0, "R_MAX": 900.0, "R_STEP": 0.5,
+                     "ETA_MIN": -180.0, "ETA_MAX": 180.0, "ETA_STEP": 5.0})
+    card.set_cake_source("cake_parameters.1ide.ge1.csv")
+    assert "edited since" not in card._cake_src_lbl.text()
