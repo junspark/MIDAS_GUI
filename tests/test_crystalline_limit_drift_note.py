@@ -131,6 +131,11 @@ def test_feeding_the_result_back_does_not_silence_the_warning(tab):
 
     # ...now the feedback lands, exactly as _on_done does it.
     tab._feedback_check.setChecked(True)
+    # Since the upstream merge, _seed_from_result promotes only what the
+    # last run actually refined, read from _last_refine_flags. The
+    # premise of this test is that the feedback DOES land on Lsd, so
+    # the flags have to say so.
+    tab._last_refine_flags = {"BC": True, "Lsd": True, "ty": True, "tz": True}
     tab._seed_from_result(bad)
     assert tab._seed_lsd.value() == pytest.approx(2382.051)   # seed is gone
 
