@@ -38,7 +38,8 @@ from midas_gui.helpers import (
     _fspin, _browse, _NoScrollComboBox, _NoScrollSpinBox,
     widgets_to_dict, apply_dict_to_widgets,
     _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
-    browse_start_dir, warn_if_path_missing, suggest_panel_base_output_dir, check_output_dir_writable)
+    browse_start_dir, warn_if_path_missing, suggest_panel_base_output_dir, check_output_dir_writable,
+    suggest_working_dir, bc_path_parts)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer,
                                OriginToolButton, build_lab_frame_axes_items)
@@ -46,6 +47,7 @@ from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
                                      panel_color)
 from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
 from midas_gui.workers import BatchRunCoordinator, write_all_profiles
+from midas_gui import cake_params
 from midas_gui import hydra
 from midas_gui import project
 from midas_gui import settings
@@ -358,6 +360,8 @@ class HydraBatchPage(QtWidgets.QWidget):
                 lambda *_, n=n: self._on_panel_calibration_changed(n))
             card._json_ed.textChanged.connect(
                 lambda *_, n=n: self._on_panel_calibration_changed(n))
+            card.cakeLoadRequested.connect(self._load_cake_csv)
+            card.cakeSaveRequested.connect(self._save_cake_csv)
         lv.addWidget(self._card_stack)
         lv.addStretch(1)
         split.addWidget(scroll)
@@ -531,6 +535,76 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._refresh_detector_preview(n)
         if self._toolbar.current() == "composite":
             self._refresh_detector_preview(None)
+
+    # ── Per-panel cake_parameters CSV (mpe_wf interchange) ──────────
+    def _cake_csv_path(self, n: int):
+        """``<analysis root>/cake_parameters.<beamline>.ge{n}.csv`` — the
+        exact name ``run_midas_for_cakes_gui.sh`` looks up under
+        ``<expid>_bc/``, so a file written here is the one the workflow
+        reads, and vice versa.
+
+        A *suggestion* for the dialog, nothing more. mpe_wf's own editor
+        writes this path silently, but it runs as the beamline user and we
+        do not; showing the path in a dialog first means nobody creates a
+        directory in a shared tree by accident. Mirrors
+        ``BatchTab._suggest_cake_csv_path``, with ge{n} in place of the
+        positional detector — on Hydra the panel IS the detector.
+        """
+        siblings = self._loader.siblings() or {}
+        rep = next((siblings[k] for k in sorted(siblings) if siblings.get(k)), None)
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        # mpe_wf spells the beamline with neither dashes nor case: 1-ID-E is
+        # "1ide" in every filename it writes.
+        beamline = settings.active_profile().lower().replace("-", "")
+        candidates = [suggest_working_dir(rep, expid_fallback=expid) if rep else None,
+                      browse_start_dir(self._out_ed.text(), fallback="") or None,
+                      Path(rep).parent if rep else None]
+        directory = next((Path(c) for c in candidates if c and Path(c).is_dir()),
+                         Path.home())
+        return directory / f"cake_parameters.{beamline}.ge{n}.csv"
+
+    def _load_cake_csv(self, n: int) -> None:
+        card = self._cards.get(n)
+        if card is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, f"Load ge{n} cake parameters", str(self._cake_csv_path(n)),
+            "CSV (*.csv);;All (*)")
+        if not path:
+            return
+        values = cake_params.parse_cake_csv(path)
+        if not values:
+            self._log.append(f"[hydra batch] ge{n}: no usable values in {path}")
+            return
+        card.set_caking(values)
+        # OME_* describe the rotation, which this page has no controls for
+        # (its loader takes a frame RANGE, not a combine count). Saying so
+        # beats dropping them silently -- the file carries them and the user
+        # may be expecting them to land somewhere.
+        ome = {k: values.get(k) for k in ("OME_SUM", "OME_START", "OME_STEP")}
+        extra = {k: v for k, v in ome.items() if v}
+        note = (f"  (ignored {', '.join(f'{k}={v:g}' for k, v in extra.items())} "
+                f"— no rotation controls on this page)") if extra else ""
+        self._log.append(f"[hydra batch] ge{n}: caking loaded from "
+                         f"{Path(path).name}{note}")
+
+    def _save_cake_csv(self, n: int) -> None:
+        card = self._cards.get(n)
+        if card is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, f"Save ge{n} cake parameters", str(self._cake_csv_path(n)),
+            "CSV (*.csv);;All (*)")
+        if not path:
+            return
+        try:
+            # Only the six: write_cake_csv fills OME_* with 0, which is what
+            # mpe_wf's reader needs (a blank cell is a ValueError there).
+            cake_params.write_cake_csv(path, card.caking())
+        except Exception as exc:
+            self._log.append(f"[hydra batch] ge{n}: could not write {path}: {exc}")
+            return
+        self._log.append(f"[hydra batch] ge{n}: caking saved to {Path(path).name}")
 
     # ── Composite (all panels, each under its own calibration) ──────
 

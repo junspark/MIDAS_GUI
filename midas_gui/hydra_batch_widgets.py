@@ -45,6 +45,12 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
     #: Any of this panel's six caking values changed. The page redraws that
     #: panel's overlay from it, so the picture tracks the numbers.
     cakingChanged = QtCore.pyqtSignal(int)
+    #: Load / Save this panel's mpe_wf cake_parameters CSV. The PAGE does the
+    #: file dialog and the path arithmetic -- the beamline token and the
+    #: analysis root come from the loader and the Exp ID header, neither of
+    #: which a card can see.
+    cakeLoadRequested = QtCore.pyqtSignal(int)
+    cakeSaveRequested = QtCore.pyqtSignal(int)
 
     def __init__(self, panel_number: int, parent=None):
         super().__init__(parent)
@@ -130,6 +136,24 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
         cf.row(("ηmin:", self._eta_min), ("ηmax:", self._eta_max))
         cf.row(("η bin:", self._eta_bin))
         cake.body.addLayout(cf)
+        csv_row = QtWidgets.QHBoxLayout(); csv_row.setSpacing(4)
+        load_btn = QtWidgets.QPushButton("Load cake CSV…")
+        load_btn.setToolTip(
+            f"Read an mpe_wf cake_parameters CSV into ge{n}'s six fields.\n\n"
+            "The file's OME_SUM/OME_START/OME_STEP describe the rotation, "
+            "not the caking, and this page has no rotation controls — they "
+            "are reported rather than silently dropped.")
+        load_btn.clicked.connect(lambda: self.cakeLoadRequested.emit(self.panel_number))
+        save_btn = QtWidgets.QPushButton("Save cake CSV…")
+        save_btn.setToolTip(
+            f"Write ge{n}'s six fields as cake_parameters.<beamline>.ge{n}.csv "
+            "— the exact name run_midas_for_cakes_gui.sh looks up under "
+            "<expid>_bc/, so the workflow and this GUI read the same file.\n\n"
+            "All nine columns are written (OME_* as 0): mpe_wf's reader turns "
+            "a blank cell into a ValueError.")
+        save_btn.clicked.connect(lambda: self.cakeSaveRequested.emit(self.panel_number))
+        csv_row.addWidget(load_btn); csv_row.addWidget(save_btn); csv_row.addStretch(1)
+        cake.body.addLayout(csv_row)
         for w in (self._r_min, self._r_max, self._r_bin,
                   self._eta_min, self._eta_max, self._eta_bin):
             w.valueChanged.connect(lambda *_: self.cakingChanged.emit(self.panel_number))

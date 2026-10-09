@@ -122,3 +122,59 @@ def test_eta_range_now_reaches_the_spec_at_all(card):
     finally:
         mod._build_spec = orig
     assert captured["eta_min"] == -30.0 and captured["eta_max"] == 45.0
+
+
+# ── mpe_wf cake_parameters CSV, one per panel ────────────────────────────
+# Asked for: each panel loads/saves its own, "just like the
+# mpe_wf_saxs_waxs project". Its convention is
+# cake_parameters.<beamline>.<detector>.csv under <expid>_bc/
+# (run_midas_for_cakes_gui.sh:1208), and on Hydra the panel IS the detector.
+
+def test_the_suggested_name_is_the_one_mpe_wf_looks_up(app, monkeypatch):
+    from midas_gui import settings
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    monkeypatch.setattr(settings, "active_profile", lambda: "1-ID-E")
+    page = HydraBatchPage()
+    page.set_expid_provider(lambda: "connolly_oct26")
+    for n in (1, 4):
+        assert page._cake_csv_path(n).name == f"cake_parameters.1ide.ge{n}.csv"
+
+
+def test_a_saved_file_is_byte_compatible_with_mpe_wf(app, tmp_path):
+    """All nine columns, %g formatted. mpe_wf's reader turns a blank cell
+    into a ValueError, so the three OME_* this page cannot supply are
+    written as 0 rather than left empty."""
+    from midas_gui.cake_params import write_cake_csv
+    from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
+    card = HydraBatchPanelCard(2)
+    card.set_caking(REAL_CSV)
+    out = tmp_path / "c.csv"
+    write_cake_csv(str(out), card.caking())
+    header, row = out.read_text().strip().splitlines()
+    assert header == ("R_MIN,R_MAX,R_STEP,ETA_MIN,ETA_MAX,ETA_STEP,"
+                      "OME_SUM,OME_START,OME_STEP")
+    assert row == "20,3236.77,1,-180,180,360,0,0,0"
+
+
+def test_a_real_1ide_file_round_trips_into_a_panel(app, tmp_path):
+    """Verbatim content of cake_parameters.1ide.pixirad.csv as found in a
+    2026-10 experiment — including a LIMITED azimuth, which this page had
+    no widget to represent before."""
+    from midas_gui.cake_params import parse_cake_csv
+    from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
+    src = tmp_path / "cake_parameters.1ide.pixirad.csv"
+    src.write_text("R_MIN,R_MAX,R_STEP,ETA_MIN,ETA_MAX,ETA_STEP,"
+                   "OME_SUM,OME_START,OME_STEP\n"
+                   "20,3236.77,1,-25,100,360,10,0,0\n")
+    card = HydraBatchPanelCard(1)
+    card.set_caking(parse_cake_csv(str(src)))
+    got = card.caking()
+    assert got["ETA_MIN"] == -25.0 and got["ETA_MAX"] == 100.0
+    assert got["R_MIN"] == 20.0 and got["R_MAX"] == 3236.77
+
+
+def test_loading_one_panels_file_does_not_touch_the_others(app, fixture_tmp=None):
+    from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
+    a, b = HydraBatchPanelCard(1), HydraBatchPanelCard(2)
+    a.set_caking(REAL_CSV)
+    assert b.caking()["R_MAX"] == 0.0
