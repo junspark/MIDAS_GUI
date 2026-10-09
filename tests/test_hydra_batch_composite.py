@@ -161,3 +161,38 @@ def test_switching_to_composite_keeps_the_per_panel_stacks_put(app, fixture_avai
     app.processEvents()
     assert page._card_stack.currentWidget() is page._cards[3]
     assert page._viewer_stack.currentWidget() is page._viewer_pairs[3]
+
+
+# ── lab-frame axes ───────────────────────────────────────────────────────
+# Asked for at 1-ID-E: "we also need to be able to show the lab frame on
+# batch integrate panel." The Data Viewer, Calibrate and the single-detector
+# Batch Integrate all had this overlay; the Hydra batch page had no
+# lab-axes code at all.
+
+def test_lab_axes_follow_the_selected_panel_and_clear_on_composite(app, fixture_available):
+    """One overlay, re-anchored — not one per panel accumulating on the
+    shared viewer. On the composite there is no single beam centre to
+    anchor to: the canvas registers all four onto one point."""
+    page = _calibrated_page(app, fixture_available)
+    assert page._axis_items == []
+
+    page._lab_axes_chk.setChecked(True)
+    app.processEvents()
+    on_ge1 = len(page._axis_items)
+    assert on_ge1 > 0, "lab axes did not draw"
+
+    page._toolbar.set_current("ge3")
+    app.processEvents()
+    assert len(page._axis_items) == on_ge1, "axes accumulated instead of re-anchoring"
+
+    page._toolbar.set_current("composite")
+    app.processEvents()
+    assert page._axis_items == [], "a compass was drawn on the composite canvas"
+
+    page._toolbar.set_current("ge2")
+    app.processEvents()
+    assert len(page._axis_items) == on_ge1
+
+    page._lab_axes_chk.setChecked(False)
+    app.processEvents()
+    assert page._axis_items == []

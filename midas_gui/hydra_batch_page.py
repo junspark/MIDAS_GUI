@@ -41,7 +41,7 @@ from midas_gui.helpers import (
     browse_start_dir, warn_if_path_missing, suggest_panel_base_output_dir, check_output_dir_writable)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer,
-                               OriginToolButton)
+                               OriginToolButton, build_lab_frame_axes_items)
 from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
                                      panel_color)
 from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
@@ -120,6 +120,22 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._det_view = ImageViewer()
         self._origin_btn = OriginToolButton(self._det_view)
         self._det_view._toolbar_layout.addWidget(self._origin_btn)
+        self._lab_axes_chk = QtWidgets.QCheckBox("Lab-frame axes")
+        self._lab_axes_chk.setToolTip(
+            "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction "
+            "\u2297 glyph, and an \u03b7 sweep arc, anchored at the selected "
+            "panel's beam centre \u2014 same overlay as the Data Viewer, "
+            "Calibrate and single-detector Batch Integrate.\n\n"
+            "Not drawn on the Composite: the canvas registers every panel's "
+            "beam centre onto one point, so there is no single panel whose "
+            "orientation the compass would be describing.")
+        self._lab_axes_chk.toggled.connect(self._on_lab_axes_toggled)
+        # Flipping the display origin inverts the ViewBox's Y axis; the
+        # compass points at the hutch, not the pixel grid, so it is
+        # re-derived rather than carried along.
+        self._det_view.originChanged.connect(self._on_origin_changed)
+        self._det_view._toolbar_layout.addWidget(self._lab_axes_chk)
+        self._axis_items: list = []
         self._bin_overlay_items: list = []
         # (panel, shape, im_trans) the shared Detector view is framed for —
         # see _refresh_active_detector_preview.
@@ -476,6 +492,38 @@ class HydraBatchPage(QtWidgets.QWidget):
         if key:
             self._refresh_detector_preview(self._panel_num(key))
 
+    # ── Lab-frame axes (same overlay as the Data Viewer / Calibrate /
+    # single-detector Batch Integrate — widgets.build_lab_frame_axes_items) ──
+    def _on_lab_axes_toggled(self, checked: bool) -> None:
+        if checked:
+            self._refresh_active_detector_preview()
+        else:
+            self._clear_lab_axes()
+
+    def _on_origin_changed(self, *_args) -> None:
+        """Display origin flipped — the compass is drawn in screen terms, so
+        it has to be re-derived rather than carried along by the ViewBox's
+        now-inverted Y axis."""
+        if self._lab_axes_chk.isChecked():
+            self._refresh_active_detector_preview()
+
+    def _redraw_lab_axes_if_on(self, bc_y: float, bc_z: float) -> None:
+        if not self._lab_axes_chk.isChecked():
+            return
+        self._clear_lab_axes()
+        img = self._det_view._data
+        if img is None:
+            return
+        items = build_lab_frame_axes_items(self._det_view._iv, img.shape, bc_y, bc_z)
+        for it in items:
+            self._det_view._iv.addItem(it)
+        self._axis_items.extend(items)
+
+    def _clear_lab_axes(self) -> None:
+        for it in self._axis_items:
+            self._det_view._iv.removeItem(it)
+        self._axis_items.clear()
+
     def _on_panel_calibration_changed(self, n: int) -> None:
         """One panel's calibration source changed: its own overlay is stale,
         and so is any cached composite that placed it."""
@@ -605,6 +653,9 @@ class HydraBatchPage(QtWidgets.QWidget):
         draw_polar_bin_overlay(
             self._det_view, self._bin_overlay_items,
             bc_y=0.0, bc_z=0.0, r_min=0.0, r_max=0.0, r_bin=1.0, e_bin=5.0)
+        # The composite registers all four beam centres onto one canvas
+        # point, so no single panel's orientation is the one to describe.
+        self._clear_lab_axes()
 
     def _refresh_detector_preview(self, n: int) -> None:
         """Refresh the (single, page-level) Detector-view tab's frame +
@@ -669,6 +720,7 @@ class HydraBatchPage(QtWidgets.QWidget):
             tx=fields.get("tx") or 0.0, ty=fields.get("ty") or 0.0,
             tz=fields.get("tz") or 0.0, lsd_um=fields.get("Lsd"),
             pxY_um=fields.get("pxY"), pxZ_um=fields.get("pxZ"))
+        self._redraw_lab_axes_if_on(fields["BC_y"], fields["BC_z"])
 
     # ── Run ────────────────────────────────────────────────────────
 
@@ -956,6 +1008,7 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _state_widgets(self) -> dict:
         return {
             "kernel": self._kernel, "grid_chk": self._grid_chk,
+            "lab_axes_chk": self._lab_axes_chk,
             "azim": self._azim, "var_check": self._var_check, "err_model": self._err_model,
             "q_check": self._q_check, "q_min": self._q_min, "q_max": self._q_max,
             "q_bin": self._q_bin, "mon_ed": self._mon_ed, "out_ed": self._out_ed,
