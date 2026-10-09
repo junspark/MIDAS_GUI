@@ -45,6 +45,7 @@ from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
 from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar
 from midas_gui.hydra_batch_widgets import HydraBatchPanelCard
 from midas_gui.workers import BatchRunCoordinator, write_all_profiles
+from midas_gui import hydra
 from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
@@ -80,6 +81,21 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._cards: dict = {}           # panel_num -> HydraBatchPanelCard
         self._viewer_pairs: dict = {}    # panel_num -> _PanelViewerPair
         self._expid_provider = None      # () -> str, forwarded by BatchTab
+        #: Composite view state, mirroring hydra_page's. `_states` is the
+        #: persistent per-panel DetectorState cache build_windmill_composite
+        #: mutates in place; `_composite_img` doubles as the dirty flag --
+        #: None means "rebuild on next display", which is what keeps a
+        #: 44-megapixel remap off every siblings/frame/calibration signal.
+        self._states: dict = {}          # panel number -> hydra.DetectorState
+        self._composite_img = None
+        self._big_det_size = None
+        #: Bumped on every successful build. The display guard keys on this
+        #: rather than on the array's shape or id(): a rebuild from changed
+        #: geometry very often lands on the SAME canvas size, and a freed
+        #: array's replacement can reuse its address -- either way the new
+        #: image would be judged "not fresh" and never reach the viewer.
+        self._composite_build_id = 0
+        self._composite_note = None      # last reason, for log de-duplication
         #: Output path this page last filled in itself; see
         #: _maybe_autofill_output_dir. Set before the UI is built, since
         #: loading data fires siblingsChanged, which auto-fills.
@@ -127,7 +143,9 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._loader = HydraLoaderPanel(mode="stream")
         self._loader.setMinimumWidth(200)
         self._loader.siblingsChanged.connect(self._on_siblings_changed)
-        self._loader.frameChanged.connect(lambda *_: self._refresh_active_detector_preview())
+        self._loader.frameChanged.connect(
+            lambda *_: (self.invalidate_composite(),
+                        self._refresh_active_detector_preview()))
         split.addWidget(self._loader)
 
         # ── MIDDLE: shared "recipe" cards + per-panel card stack ──
@@ -331,7 +349,10 @@ class HydraBatchPage(QtWidgets.QWidget):
         lv.addWidget(run_card)
 
         # Per-panel toggle + card stack (calibration source/values/progress)
-        self._toolbar = HydraDetectorToolbar(include_composite=False)
+        # Composite ON: the toolbar has always supported it (the Data Viewer's
+        # Hydra page uses it); this page opted out. Everything that reads the
+        # toolbar key now goes through _panel_num, which returns None here.
+        self._toolbar = HydraDetectorToolbar(include_composite=True)
         self._toolbar.panelChanged.connect(self._on_panel_changed)
         lv.addWidget(self._toolbar)
         self._card_stack = QtWidgets.QStackedWidget()
@@ -344,9 +365,9 @@ class HydraBatchPage(QtWidgets.QWidget):
             # the composite may not be on screen now, but it must not be
             # redrawn later from the geometry this just replaced.
             card._use_calib_btn.toggled.connect(
-                lambda *_, n=n: self._refresh_detector_preview(n))
+                lambda *_, n=n: self._on_panel_calibration_changed(n))
             card._json_ed.textChanged.connect(
-                lambda *_, n=n: self._refresh_detector_preview(n))
+                lambda *_, n=n: self._on_panel_calibration_changed(n))
         lv.addWidget(self._card_stack)
         lv.addStretch(1)
         split.addWidget(scroll)
@@ -368,10 +389,15 @@ class HydraBatchPage(QtWidgets.QWidget):
             pair = _PanelViewerPair()
             self._viewer_pairs[n] = pair
             self._viewer_stack.addWidget(pair)
-        top_tabs = QtWidgets.QTabWidget()
-        top_tabs.addTab(self._viewer_stack, "Per-panel results")
-        top_tabs.addTab(self._det_view, "Detector view")
-        right.addWidget(top_tabs)
+        self._top_tabs = QtWidgets.QTabWidget()
+        self._top_tabs.addTab(self._viewer_stack, "Per-panel results")
+        self._top_tabs.addTab(self._det_view, "Detector view")
+        # Build the composite on the way IN to the Detector view, and not at
+        # all while Per-panel results is showing: a ~1 s GUI-thread remap for
+        # pixels behind another tab is the cost this gate exists to avoid.
+        self._top_tabs.currentChanged.connect(
+            lambda *_: self._refresh_active_detector_preview())
+        right.addWidget(self._top_tabs)
         self._log = LogPanel()
         self._log.setMaximumHeight(16_777_215)
         right.addWidget(self._log)
@@ -433,8 +459,43 @@ class HydraBatchPage(QtWidgets.QWidget):
             return
         self._set_output_dir_suggested(suggested)
 
+    @staticmethod
+    def _panel_num(key) -> "Optional[int]":
+        """Panel number from a toolbar key, or None for "composite".
+
+        Every consumer here used to do ``int(key[2])``, which reads the digit
+        out of "ge3" -- and raises ValueError on "composite", whose third
+        character is 'm'. One helper rather than four guards, because a
+        missed site is a crash the moment the button is pressed.
+        """
+        if not key or not key.startswith("ge"):
+            return None
+        try:
+            return int(key[2:])
+        except ValueError:
+            return None
+
     def _on_panel_changed(self, key: str):
-        n = int(key[2])
+        n = self._panel_num(key)
+        # Corner/Edge fill the SHARED Rmax from one panel's beam centre;
+        # there is no such thing on a BigDet canvas, so show them as dead
+        # rather than let them look available and do nothing.
+        for btn in (self._rmax_corner_btn, self._rmax_edge_btn):
+            btn.setEnabled(n is not None)
+        if n is None:                      # composite
+            # The card stack and the Per-panel results stack have no
+            # composite entry, and inventing a blank one would make both
+            # read as "this panel has nothing". They hold their last panel;
+            # only the shared detector image follows the selection. Holding
+            # the last panel also leaves its calibration card editable while
+            # the composite is up -- which is the thing that rebuilds it.
+            #
+            # Raise the Detector view: selecting Composite has no other
+            # meaning on this page, and the build is gated on that tab being
+            # visible, so without this the click would appear to do nothing.
+            self._top_tabs.setCurrentWidget(self._det_view)
+            self._refresh_detector_preview(None)
+            return
         self._card_stack.setCurrentWidget(self._cards[n])
         self._viewer_stack.setCurrentWidget(self._viewer_pairs[n])
         self._refresh_detector_preview(n)
@@ -444,10 +505,16 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _apply_rmax_preset(self, formula) -> None:
         """Corner/Edge button handler — resolves the currently-selected
         panel's calibration and fills the shared Rmax field."""
-        n = self._toolbar.current()
-        n = int(n[2]) if n else None
+        n = self._panel_num(self._toolbar.current())
         card = self._cards.get(n) if n else None
         if card is None:
+            # Composite selected: Rmin/Rmax are per-panel integration
+            # settings and there is no single beam centre to read.
+            if self._toolbar.current() == "composite":
+                self._log.append(
+                    "[hydra batch] Rmax presets need a panel selected — "
+                    "they fill that panel's calibration into the shared "
+                    "Rmax, and the composite has no single beam centre.")
             return
         fields, note = card._calib_fields_in_use()
         if not fields or fields.get("BC_y") is None or fields.get("NrPixelsY") is None:
@@ -459,7 +526,137 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _refresh_active_detector_preview(self, *_args) -> None:
         key = self._toolbar.current()
         if key:
-            self._refresh_detector_preview(int(key[2]))
+            self._refresh_detector_preview(self._panel_num(key))
+
+    def _on_panel_calibration_changed(self, n: int) -> None:
+        """One panel's calibration source changed: its own overlay is stale,
+        and so is any cached composite that placed it."""
+        self.invalidate_composite()
+        self._refresh_detector_preview(n)
+        if self._toolbar.current() == "composite":
+            self._refresh_detector_preview(None)
+
+    # ── Composite (all panels, each under its own calibration) ──────
+
+    def invalidate_composite(self) -> None:
+        """Mark the cached composite stale. Cheap: the rebuild itself is
+        deferred to the next display of the composite view, so a siblings /
+        frame / calibration change costs nothing while a single panel is on
+        screen. Same dirty-flag discipline as ``hydra_page``."""
+        self._composite_img = None
+
+    def _build_composite_if_needed(self) -> None:
+        """Build the four-panel canvas, once, using each panel's ACTIVE
+        calibration.
+
+        Seeding ``self._states`` from the cards first is not optional:
+        ``build_windmill_composite`` silently falls back to the bundled
+        *default* 1-ID-E geometry for any panel missing from the dict, which
+        would show a plausible composite built from the wrong numbers (the
+        same trap ``tests/test_hydra_geometry.py`` warns about).
+
+        Decimated to ``hydra.COMPOSITE_DISPLAY_STEP`` — this is a
+        registration preview, not a measurement surface. Failures leave the
+        cache None and the viewer showing whatever it had; the per-panel
+        views remain the authority.
+        """
+        if self._composite_img is not None:
+            return
+        siblings = self._loader.siblings() or {}
+        # Only panels with a REAL calibration take part. Handing a panel to
+        # build_windmill_composite without seeding its state first makes it
+        # fall back to the bundled default 1-ID-E geometry -- which would
+        # place that panel plausibly and wrongly in a view whose entire
+        # purpose is "the four detector calibrations applied appropriately".
+        # Same validity test the per-panel overlay already uses.
+        active, skipped = {}, []
+        for n, path in sorted(siblings.items()):
+            card = self._cards.get(n)
+            fields = None
+            if card is not None:
+                fields, note = card._calib_fields_in_use()
+            if (not fields or fields.get("BC_y") is None
+                    or fields.get("NrPixelsY") is None):
+                skipped.append(f"ge{n}")
+                continue
+            st = self._states.setdefault(n, hydra.DetectorState())
+            # Re-applied on every build rather than tracked for dirtiness:
+            # correctness then does not depend on the invalidation list being
+            # complete, only on WHETHER we rebuild. It is a dict read, and
+            # get_inv_coords still cache-hits on unchanged values.
+            st.load_from_geometry_dict(fields)
+            st.data_file = path
+            active[n] = path
+        if len(active) < 2:
+            self._composite_img = None
+            self._note_composite(
+                f"Composite needs at least 2 calibrated panels — have "
+                f"{len(active)}" + (f", missing {', '.join(skipped)}" if skipped else ""))
+            return
+        # Deliberately NOT applying dark/bright/background: this page's
+        # per-panel preview reads the raw frame off disk, and a composite
+        # that silently disagreed with the panel beside it would be worse
+        # than both being raw. (hydra_page._apply_field_selectors is the
+        # thing not being copied here. Change both paths together or
+        # neither.)
+        try:
+            comp, big = hydra.build_windmill_composite(
+                active, self._loader.frame_index(),
+                self._loader.dataset(), self._states,
+                op="max", step=hydra.COMPOSITE_DISPLAY_STEP)
+        except Exception as exc:
+            self._composite_img = None
+            self._note_composite(f"Composite could not be built: {exc}")
+            return
+        self._composite_img = comp
+        self._big_det_size = big
+        self._composite_build_id += 1
+        self._composite_note = None
+        # Which panels actually made it in is otherwise invisible -- "why is
+        # ge3 missing" with nothing in the log is a support call.
+        self._log.append(
+            f"[hydra batch] Composite: {'+'.join(f'ge{n}' for n in active)}, "
+            f"{comp.shape[1]}x{comp.shape[0]} px "
+            f"(canvas {big}, step {hydra.COMPOSITE_DISPLAY_STEP})"
+            + (f" — skipped {', '.join(skipped)} (no calibration)" if skipped else ""))
+
+    def _note_composite(self, msg: str) -> None:
+        """Log a composite problem once per distinct message — this runs on
+        every refresh, and a line per keystroke would bury the log."""
+        if msg != self._composite_note:
+            self._composite_note = msg
+            self._log.append(f"[hydra batch] {msg}")
+
+    def _show_composite(self) -> None:
+        """Draw the composite, with no polar overlay.
+
+        ``draw_polar_bin_overlay`` places Rmin/Rmax and the bin grid around
+        ONE panel's beam centre in that panel's pixel frame; on the BigDet
+        canvas those coordinates mean nothing, so it is cleared rather than
+        drawn somewhere plausible and wrong.
+
+        ``set_raw_frame`` is passed an EMPTY transform list on purpose:
+        ``DetectorState.get_remapped_frame`` already applied each panel's own
+        ImTransOpt codes before remapping it, so applying a card's codes here
+        would transform twice.
+        """
+        if self._top_tabs.currentWidget() is not self._det_view:
+            return                       # not on screen; do not pay for it
+        self._build_composite_if_needed()
+        img = self._composite_img
+        if img is None:
+            return
+        framed_for = ("composite", tuple(img.shape), self._composite_build_id)
+        fresh = framed_for != self._det_view_framed_for
+        try:
+            self._det_view.set_raw_frame(img, (), autorange=fresh,
+                                         reset_levels=fresh)
+        except Exception:
+            return
+        self._det_view_framed_for = framed_for
+        draw_polar_bin_overlay(
+            self._det_view, self._bin_overlay_items,
+            bc_y=0.0, bc_z=0.0, r_min=0.0, r_max=0.0, r_bin=1.0, e_bin=5.0)
 
     def _refresh_detector_preview(self, n: int) -> None:
         """Refresh the (single, page-level) Detector-view tab's frame +
@@ -470,9 +667,15 @@ class HydraBatchPage(QtWidgets.QWidget):
         loader is stream-mode (see ``hydra_calib_page._panel_raw_image``
         for the identical pattern).
 
-for the identical pattern)."""
+        ``n`` is None for the composite view, which draws all four panels
+        remapped onto one BC/tilt-registered canvas instead — see
+        :meth:`_build_composite_if_needed`.
+        """
         key = self._toolbar.current()
-        if not key or n != int(key[2]):
+        if not key or n != self._panel_num(key):
+            return
+        if n is None:
+            self._show_composite()
             return
         card = self._cards.get(n)
         if card is None:
@@ -864,7 +1067,13 @@ for the identical pattern)."""
         card = self._cards.get(n)
         if card is not None:
             card.set_calibration(result)
-            self._refresh_detector_preview(n)
+            # The Calibrate hand-off is the main route by which REAL geometry
+            # arrives, so it is the invalidation most likely to be missed and
+            # the most damaging to miss: the composite would keep placing this
+            # panel at whatever geometry it was first built with, looking
+            # entirely plausible. Same class as the 1-ID-E incident recorded
+            # in hydra_page._reseed_composite_card_if_needed's comment.
+            self._on_panel_calibration_changed(n)
 
     def populate_panel_plots(self, n: int, meta: dict) -> None:
         """Fill panel ``n``'s own Waterfall/Stacked-profiles views from a

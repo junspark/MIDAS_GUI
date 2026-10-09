@@ -30,6 +30,27 @@ from midas_gui.helpers import (_load_image, _apply_im_trans, geometry_fields_fro
 _GEOMETRY_DIR = Path(__file__).parent / "hydra_default_geometry"
 
 
+#: Decimation factor for a composite built for DISPLAY.
+#:
+#: The windmill canvas for a real four-panel GE array is 6656x6656 -- 44.3
+#: megapixels, several times any screen, rebuilt synchronously on the GUI
+#: thread. Building it every second pixel costs a quarter of the work
+#: (remap 2.09 s -> ~0.5 s, composite max 1.61 s -> ~0.4 s, autolevel
+#: 0.49 s -> ~0.12 s) for an image still larger than the widget showing it.
+#:
+#: Shared by the Data Viewer's Hydra page and Batch Integrate's.
+#:
+#: This is display resolution only, and it is NOT a shortcut taken behind a
+#: measurement's back: the "Composite" radial curve sums the per-panel
+#: profiles rather than integrating this image (see _refresh_composite_curve),
+#: and Calibrate imports per-panel geometries, not this canvas (see
+#: export_for_calibration). What does read it -- the composite card's own
+#: overlays and radial integration -- is kept correct by scaling that card's
+#: pixel size, beam centre and NrPixels to match, in
+#: _reseed_composite_card_if_needed. Set to 1 for a full-resolution canvas.
+COMPOSITE_DISPLAY_STEP = 2
+
+
 def default_param_file(panel: int) -> Path:
     return _GEOMETRY_DIR / f"ps_ge{panel}.txt"
 

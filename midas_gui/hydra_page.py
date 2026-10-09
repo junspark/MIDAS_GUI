@@ -42,23 +42,12 @@ from midas_gui.widgets import (_convert_radial, OriginToolButton,
                                build_lab_frame_axes_items)
 from midas_gui import style as S
 
-#: Decimation factor for the composite built for the Data Viewer.
-#:
-#: The windmill canvas for a real four-panel GE array is 6656x6656 -- 44.3
-#: megapixels, several times any screen, rebuilt synchronously on the GUI
-#: thread. Building it every second pixel costs a quarter of the work
-#: (remap 2.09 s -> ~0.5 s, composite max 1.61 s -> ~0.4 s, autolevel
-#: 0.49 s -> ~0.12 s) for an image still larger than the widget showing it.
-#:
-#: This is display resolution only, and it is NOT a shortcut taken behind a
-#: measurement's back: the "Composite" radial curve sums the per-panel
-#: profiles rather than integrating this image (see _refresh_composite_curve),
-#: and Calibrate imports per-panel geometries, not this canvas (see
-#: export_for_calibration). What does read it -- the composite card's own
-#: overlays and radial integration -- is kept correct by scaling that card's
-#: pixel size, beam centre and NrPixels to match, in
-#: _reseed_composite_card_if_needed. Set to 1 for a full-resolution canvas.
-COMPOSITE_DISPLAY_STEP = 2
+#: Re-exported from :mod:`midas_gui.hydra`, where it now lives so the Batch
+#: Integrate Hydra page can share it without importing this module (page ->
+#: page would be new coupling; both already import hydra). Kept as a
+#: module-level name here because callers import it from this module --
+#: tests/test_hydra_composite_perf.py does.
+COMPOSITE_DISPLAY_STEP = hydra.COMPOSITE_DISPLAY_STEP
 
 
 class _ProfileSinkAdapter:
