@@ -5781,6 +5781,36 @@ class DataLoaderPanel(QtWidgets.QWidget):
         except Exception:
             return 0
 
+    @staticmethod
+    def _first_raw_frame_is_blank(path, dataset) -> bool:
+        """Is sub-frame 0 of this HDF5 entirely zero?
+
+        A Pixirad arms one frame before it starts counting, so frame 0 of
+        every ``.pixi.h5`` is all zeros and averaging it in scales the result
+        by (n-1)/n -- 10% over ten frames, 33% over three. Measured on 1-ID-E
+        air_80p725keV_3s_003512: the reduced output came out exactly 10/9 low.
+
+        Keyed on the frame's own content rather than the detector name, so
+        it is right for any detector that does this and -- more importantly
+        -- does NOT silently drop a good first frame from one that does not.
+        The GE panels in the same experiment record ten real frames; starting
+        them at 1 would throw one away every run.
+
+        Costs one frame's pixel read per source change, unlike
+        :meth:`_single_hdf5_raw_count` next to it, which is header-only.
+        Worth it: the alternative is being wrong by 10% in silence.
+        """
+        try:
+            import h5py
+            import numpy as np
+            with h5py.File(str(path), "r") as f:
+                dset = f[dataset]
+                if getattr(dset, "ndim", 0) != 3 or dset.shape[0] < 2:
+                    return False
+                return not np.any(dset[0])
+        except Exception:
+            return False      # unreadable: say nothing, start at 0 as before
+
     def _autofill_frame_range(self, reset_values: bool = True):
         """Fill start/end with the full valid range for the current source
         and describe what they mean, so the range can't silently select
@@ -5867,7 +5897,12 @@ class DataLoaderPanel(QtWidgets.QWidget):
                     hi = max(n_raw - 1, 0)
                     self._fr_start.setRange(0, hi); self._fr_end.setRange(0, hi)
                     if reset_values:
-                        self._fr_start.setValue(0); self._fr_end.setValue(hi)
+                        # Start at 1 when frame 0 is a blank arming frame --
+                        # see _first_raw_frame_is_blank. The user can still
+                        # type 0 to get it back; this only moves the default.
+                        lo0 = 1 if (hi >= 1 and self._first_raw_frame_is_blank(
+                            cfg["path"], cfg.get("dataset", "frames"))) else 0
+                        self._fr_start.setValue(lo0); self._fr_end.setValue(hi)
                         self._fr_stride.setValue(1)
                     self._fr_start.setEnabled(n_raw > 1)
                     self._fr_end.setEnabled(n_raw > 1)
