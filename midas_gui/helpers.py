@@ -2291,6 +2291,39 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
     if r_min > 0:
         _circle(r_min, pg.mkPen(bound_color, width=1.2, style=QtCore.Qt.DashLine))
     _circle(r_max, pg.mkPen(bound_color, width=1.5))
+    def _spoke_xy(eta):
+        if tilt_aware:
+            tt_lo = math.degrees(math.atan(r_min * pxY_um / lsd_um))
+            tt_hi = math.degrees(math.atan(r_max * pxY_um / lsd_um))
+            return tilted_spoke_xy(tt_lo, tt_hi, float(eta), tx, ty, tz,
+                                   lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
+        # bc + r*(sin η, cos η) — same convention tilted_spoke_xy reduces
+        # to at zero tilt (and pixel_to_REta's eta=atan2(-Yc,Zc)): η=0 is
+        # straight up (+Z), not along +Y. cos/sin here (not sin/cos)
+        # would draw each η spoke 90° off from where it actually is.
+        th_r = math.radians(float(eta))
+        return ([bc_y + r_min * math.sin(th_r), bc_y + r_max * math.sin(th_r)],
+                [bc_z + r_min * math.cos(th_r), bc_z + r_max * math.cos(th_r)])
+
+    def _spoke(eta, pen):
+        Y, Z = _spoke_xy(eta)
+        item = pg.PlotDataItem(Y, Z, pen=pen)
+        viewer._iv.addItem(item); items.append(item)
+
+    # The two ends of the azimuth, told apart by line style. A caked region
+    # is directional -- eta runs from start to end -- and with both edges
+    # drawn identically there is nothing to say which way round it goes, or
+    # which edge you just moved. Same grammar as the radial pair above:
+    # the LOWER bound dashes, the UPPER is solid. Drawn in the boundary
+    # colour at boundary width so they read as limits, not as grid lines.
+    #
+    # Only when the sweep is actually limited: at a full turn the two
+    # coincide and a "start" marker would be an arbitrary ray across the
+    # image.
+    if 0.0 < (float(eta_max) - float(eta_min)) < 360.0 - 1e-9:
+        _spoke(eta_min, pg.mkPen(bound_color, width=1.2, style=QtCore.Qt.DashLine))
+        _spoke(eta_max, pg.mkPen(bound_color, width=1.5))
+
     grid_pen = pg.mkPen(grid_color, width=0.8)
     for r in _thinned_bin_edges(r_min, r_max, r_bin, max_rings):
         if r_min < r < r_max:
@@ -2299,21 +2332,7 @@ def draw_polar_bin_overlay(viewer, items: list, *, bc_y: float, bc_z: float,
     if eta_max - eta_min >= 360.0 - 1e-6:
         eta_edges = eta_edges[eta_edges < eta_max - 1e-9]   # drop the wraparound duplicate
     for eta in eta_edges:
-        if tilt_aware:
-            tt_lo = math.degrees(math.atan(r_min * pxY_um / lsd_um))
-            tt_hi = math.degrees(math.atan(r_max * pxY_um / lsd_um))
-            Y, Z = tilted_spoke_xy(tt_lo, tt_hi, float(eta), tx, ty, tz,
-                                    lsd_um, bc_y, bc_z, pxY_um, pxZ_um)
-        else:
-            # bc + r*(sin η, cos η) — same convention tilted_spoke_xy reduces
-            # to at zero tilt (and pixel_to_REta's eta=atan2(-Yc,Zc)): η=0 is
-            # straight up (+Z), not along +Y. cos/sin here (not sin/cos)
-            # would draw each η spoke 90° off from where it actually is.
-            th_r = math.radians(float(eta))
-            Y = [bc_y + r_min * math.sin(th_r), bc_y + r_max * math.sin(th_r)]
-            Z = [bc_z + r_min * math.cos(th_r), bc_z + r_max * math.cos(th_r)]
-        item = pg.PlotDataItem(Y, Z, pen=grid_pen)
-        viewer._iv.addItem(item); items.append(item)
+        _spoke(eta, grid_pen)
 
 
 def _drop_missing_residual_map(spec):
