@@ -430,15 +430,47 @@ def _hash_paths_in(obj):
     return obj
 
 
+def _jsonable(v):
+    """Sets to sorted lists, recursively; everything else untouched.
+
+    JSON has no set, and neither do HDF5 attributes, so a set-valued result
+    field breaks every consumer of this dict at once. ``fit_at_limit`` is
+    one (``workers.py`` builds it with ``set(fit["at_limit"])``), and it
+    made session autosave fail silently every few minutes -- 1724 logged
+    "Object of type set is not JSON serializable" tracebacks from a single
+    run of experiments, each one a crash-recovery draft that was never
+    written.
+
+    Fixed at the serialization boundary rather than at that one field: the
+    result object comes from the backend and grows attributes between
+    releases, so the next set-valued one would reintroduce exactly this.
+    Sorted, not arbitrary order, so a saved project does not churn between
+    runs that fitted the same thing.
+    """
+    if isinstance(v, (set, frozenset)):
+        return sorted(v, key=str)
+    if isinstance(v, dict):
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    return v
+
+
 def sanitize_result_dict(result) -> Optional[dict]:
     """Full result fields, including the underscore-prefixed extras the
     GUI bolts on (_calibrant_name, _panel_unpacked, ...) — unlike the
     existing GUI-state sidecar JSON, nothing is dropped here except
     torch-tensor fields (duck-typed via a '.numpy' attribute), which are
-    large and already referenced separately (residual_corr_bin_path)."""
+    large and already referenced separately (residual_corr_bin_path).
+
+    Sets are converted to sorted lists on the way out (see
+    :func:`_jsonable`) — they are the one common Python type with no JSON
+    or HDF5 representation, and a single one anywhere in the result takes
+    the whole autosave down."""
     if result is None:
         return None
-    return {k: v for k, v in vars(result).items() if not hasattr(v, "numpy")}
+    return {k: _jsonable(v) for k, v in vars(result).items()
+            if not hasattr(v, "numpy")}
 
 
 def _write_array(group, name, arr):
