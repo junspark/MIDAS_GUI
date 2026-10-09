@@ -522,6 +522,94 @@ def suggest_integration_output_dir(data_path, *, expid_fallback: str = "") -> Op
             else parts.root / parts.froot)
 
 
+def _folder_output_dir(files, expid_fallback: str = ""):
+    """The one output dir a SOURCE FOLDER's files imply.
+
+    ``suggest_integration_output_dir`` reads the froot off each file's own
+    NAME, so one folder yields several: a load step's darks are
+    ``..._dark_before``/``..._dark_after`` and derive directories of their
+    own. Picking a folder by hand puts all of them in one place, so grouping
+    must too. Cannot be answered by passing the folder itself -- the
+    positional parse assumes the last component is a file, and a directory
+    path comes back scrambled (``s1c_bc/Faber_A_restart4_load_step/
+    connolly_oct26``).
+
+    Chosen by agreement: the directory most of the folder's files imply,
+    breaking a tie on the shortest path. Scan frames outnumber the two
+    darks, and a dark's froot is the scan's froot plus a suffix, so both
+    rules point the same way -- and a 1-scan-plus-2-darks folder, where the
+    count is a three-way tie, still lands on the scan.
+    """
+    counts = {}
+    for f in files:
+        d = suggest_integration_output_dir(f, expid_fallback=expid_fallback)
+        if d is not None:
+            counts[str(d)] = counts.get(str(d), 0) + 1
+    if not counts:
+        return None
+    return Path(min(counts, key=lambda k: (-counts[k], len(k), k)))
+
+
+def group_paths_by_output_dir(paths, *, out_dir=None, expid_fallback: str = "") -> list:
+    """Split a file selection into ``[(out_dir, [paths]), ...]`` -- one entry
+    per SOURCE FOLDER, each with the output directory that folder implies.
+
+    A recursive "Full folder" pick spans many source folders, and the
+    ``<expid>_bc/<froot>/<detector>`` convention derives the output dir from
+    each file's own path, so the selection maps to many dirs rather than
+    one. Applying it once writes every subfolder's output into whichever
+    folder the first file implied -- reported from 1-ID-E as every load step
+    landing in one directory.
+
+    Grouping is by containing folder, not by derived directory, so one run
+    covers exactly what picking that folder by hand covers (its darks
+    included -- see :func:`_folder_output_dir`).
+
+    ``out_dir`` is the Output field as it stands:
+
+    * unset, or equal to a directory one of the groups already derives (i.e.
+      the value the field auto-filled to from one file), it is a stale
+      single-folder guess and each group uses its own derived directory.
+    * anything else is a deliberate choice of root, and the groups are placed
+      under it at the same relative positions they have to each other, so a
+      custom root fans out rather than collapsing.
+
+    A selection inside ONE folder returns a single entry -- every
+    non-recursive pick -- which is the caller's existing one-run path.
+    """
+    paths = [str(x) for x in paths or []]
+    if not paths:
+        return []
+
+    by_folder = {}
+    for f in paths:
+        by_folder.setdefault(str(Path(f).parent), []).append(f)
+    if len(by_folder) == 1:
+        only = next(iter(by_folder.values()))
+        return [(_folder_output_dir(only, expid_fallback)
+                 or (Path(out_dir) if out_dir else None), only)]
+
+    resolved = []          # (derived_dir_or_None, files)
+    for folder in sorted(by_folder):
+        files = by_folder[folder]
+        resolved.append((_folder_output_dir(files, expid_fallback), files))
+
+    keys = [str(d) for d, _ in resolved if d is not None]
+    custom = bool(out_dir) and str(out_dir) not in keys
+    if custom and keys:
+        import os
+        common = Path(os.path.commonpath(keys)) if len(keys) > 1 else Path(keys[0]).parent
+        rebase = lambda d: Path(out_dir) / Path(str(d)).relative_to(common)
+    else:
+        rebase = lambda d: Path(str(d))
+
+    groups = [((rebase(d) if d is not None
+                else (Path(out_dir) if out_dir else None)), files)
+              for d, files in resolved]
+    groups.sort(key=lambda g: str(g[0]))
+    return groups
+
+
 #: Batch Correction's per-op subfolder under the integration output dir —
 #: ``dark_subtracted_mean``, ``dark_subtracted_max``, … Named for what the
 #: files in it are, the same way Batch Integrate's output is split into
@@ -2407,6 +2495,43 @@ def _spec_from_json(path: str, r_bin: float, eta_bin: float):
 _PARAMSTEST_DISTORTION = {v1: v2 for v2, v1 in _V2_TO_V1.items()}
 
 
+def _crystallography(cal) -> dict:
+    """``SpaceGroup``/``LatticeConstant`` kwargs for a calibrant, or ``{}``.
+
+    A d-spacing calibrant (AgBH, ``Custom d-spacings…``) is not a crystal and
+    has no cell to report. This used to be ``_SG.get(cal, 225)`` /
+    ``_LC.get(cal, _LC["CeO2"])``, which filled both fields with *ceria's*
+    values — so calibrating on silver behenate wrote ``SpaceGroup 225`` and
+    ``LatticeConstant 5.4116 …`` into paramstest.txt, and the Results panel
+    (which reads that same file back) displayed a ceria structure for a run
+    that never saw any ceria. Returning ``{}`` leaves both at
+    ``CalibrationParams``' own unset defaults instead of asserting a structure
+    that does not exist; see ``_record_dspacing_calibrant`` for what is
+    reported in their place.
+    """
+    from midas_gui.constants import _SG, _LC
+    lattice = _LC.get(cal)
+    if lattice is None:
+        return {}
+    return dict(SpaceGroup=_SG.get(cal, 225), LatticeConstant=lattice)
+
+
+def _record_dspacing_calibrant(p, cal, result) -> None:
+    """Name the calibrant and report the d-spacings the fit used, for a
+    calibrant with no crystal structure. No-op for a crystalline one, whose
+    SpaceGroup/LatticeConstant already say what it was."""
+    from midas_gui.constants import _LC
+    if _LC.get(cal) is not None:
+        return
+    p.extra["Calibrant"] = cal
+    # Prefer the rings actually picked over the material's full table: a
+    # 10-entry AgBH list fitted from 3 rings should report the 3.
+    d_used = (getattr(result, "_d_used", None)
+              or getattr(result, "_d_list", None) or [])
+    if len(d_used):
+        p.extra["DSpacings"] = " ".join(f"{float(d):.6f}" for d in d_used)
+
+
 def write_standalone_paramstest(result, path, *, extra=None):
     """Write a v1 ``paramstest.txt`` from an AutoCalibrationResult (no geometry
     dependency on a live pipeline). Single implementation shared by the Calibrate
@@ -2422,8 +2547,9 @@ def write_standalone_paramstest(result, path, *, extra=None):
     p = CalibrationParams(
         NrPixelsY=NY, NrPixelsZ=NZ, pxY=pxY, pxZ=pxZ, Lsd=result.Lsd,
         BC_y=result.BC_y, BC_z=result.BC_z, tx=result.tx, ty=result.ty, tz=result.tz,
-        Wavelength=result.wavelength_A, SpaceGroup=_SG.get(cal, 225),
-        LatticeConstant=_LC.get(cal, _LC["CeO2"]), RhoD=RhoD, MaxRingRad=RhoD * 0.97)
+        Wavelength=result.wavelength_A, **_crystallography(cal),
+        RhoD=RhoD, MaxRingRad=RhoD * 0.97)
+    _record_dspacing_calibrant(p, cal, result)
     for v2n, v1n in _V2_TO_V1.items():
         val = (result.distortion or {}).get(v2n)
         if val is not None:

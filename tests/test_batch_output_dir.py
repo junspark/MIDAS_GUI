@@ -73,10 +73,47 @@ def test_a_glob_with_no_stem_left_after_trimming(tab):
 
 
 def test_paths_list_is_used_when_there_is_no_single_path(tab):
+    """Several files in ONE folder still derive that folder's dir."""
     tab._loader.source_cfg = lambda: {
-        "paths": ["/net/d/export/e/ge2/s1/s1_000001.tif", "/net/d/other.tif"]}
+        "paths": ["/net/d/export/e/ge2/s1/s1_000001.tif",
+                  "/net/d/export/e/ge2/s1/s1_000002.tif"]}
     tab._expid_provider = None
     assert tab._suggest_output_dir() == Path("/net/d/export/e_bc/s1/ge2")
+
+
+def test_a_selection_spanning_folders_suggests_the_root_they_share(tab):
+    """Changed deliberately. This used to return the FIRST path's dir, which
+    is the behaviour that sent 23 load steps' output into load_step_0 at
+    1-ID-E: the run fans out to one dir per source folder, so naming one of
+    them in the Output field is a lie. The shared root is the honest answer,
+    and ``group_paths_by_output_dir`` rebases onto it to reproduce exactly
+    the same per-folder directories."""
+    tab._loader.source_cfg = lambda: {
+        "paths": ["/net/d/export/e/ge2/s1/s1_000001.tif",
+                  "/net/d/export/e/ge2/s2/s2_000001.tif"]}
+    tab._expid_provider = None
+    out = tab._suggest_output_dir()
+    assert out == Path("/net/d/export/e_bc")
+    # and it is the root the per-folder dirs actually sit under
+    for d in tab._output_group_dirs():
+        assert str(d).startswith(str(out) + "/")
+
+
+def test_the_fan_out_hint_appears_only_for_a_multi_folder_selection(tab):
+    tab._expid_provider = None
+    tab._loader.source_cfg = lambda: {
+        "paths": ["/net/d/export/e/ge2/s1/s1_000001.tif",
+                  "/net/d/export/e/ge2/s1/s1_000002.tif"]}
+    tab._update_output_multi_hint()
+    assert not tab._out_multi_lbl.isVisible()
+
+    tab._loader.source_cfg = lambda: {
+        "paths": ["/net/d/export/e/ge2/s1/s1_000001.tif",
+                  "/net/d/export/e/ge2/s2/s2_000001.tif"]}
+    tab._update_output_multi_hint()
+    assert tab._out_multi_lbl.isVisibleTo(tab)
+    assert "2 source folders" in tab._out_multi_lbl.text()
+    assert "does NOT" in tab._out_multi_lbl.text()
 
 
 # ── Too shallow to read expid/detector positionally ──────────────────────────

@@ -42,6 +42,8 @@ _SESSION_PREFIX = "midasgui_batch_"
 #: [batch], correct_cli tags them [correct]. One regex serves both so a
 #: Batch Correction job gets a progress bar too.
 _PROGRESS_RE = re.compile(r"\[(?:batch|correct)\] PROGRESS (\d+)/(\d+)")
+#: Emitted by JobQueuePanel.launch between chained per-folder runs.
+_STEP_RE = re.compile(r"\[launcher\] step (\d+)/(\d+)")
 _DONE_RE = re.compile(r"\[launcher\] DONE exit=(\d+)")
 
 _LOG_RULES = [
@@ -69,6 +71,12 @@ class Job:
     meta_path: str
     name: str
     total_frames: int = 1
+    #: Chained per-folder runs (see JobQueuePanel.launch). step/n_steps come
+    #: from the launcher's markers; step_total is the CURRENT step's frame
+    #: count, which is not the job's total once there is more than one step.
+    step: int = 0
+    n_steps: int = 1
+    step_total: int = 1
     out_dir: str = ""                # where the job writes results — see
                                       # batch_cli._write_results_sidecar and
                                       # JobQueuePanel's on_job_done callback
@@ -179,14 +187,22 @@ class JobQueuePanel(QtWidgets.QWidget):
     # ── Launch ───────────────────────────────────────────────────────
 
     def launch(self, argv: list, *, name: str, total_frames: int,
-              out_dir: str = "") -> Optional[Job]:
+              out_dir: str = "", extra_argvs: Optional[list] = None) -> Optional[Job]:
         """Launch ``argv`` (e.g. ``[sys.executable, "-m", "midas_gui.batch_cli", ...]``)
         in a fresh detached ``screen`` session. Returns the new ``Job``, or
         ``None`` if ``screen`` isn't available or a same-named session is
         already running (both cases show a message box). ``out_dir`` is the
         job's own ``--out-dir`` — recorded so ``on_job_done`` (and a later
         "Load results" click) knows where to find whatever results sidecar
-        the job leaves behind."""
+        the job leaves behind.
+
+        ``extra_argvs`` are further command lines run SEQUENTIALLY in the same
+        session, after ``argv``. That is how a Batch Integrate selection
+        spanning several source folders runs as one job: the CLI takes a
+        single ``--out-dir``, so each folder needs its own invocation, and
+        one session keeps it one entry in this panel and one log rather than
+        N sessions competing for the same disk. A failing folder does not
+        stop the rest; the reported exit code is non-zero if any failed."""
         if not screen_available():
             QtWidgets.QMessageBox.warning(
                 self, "screen not found",
@@ -221,11 +237,36 @@ class JobQueuePanel(QtWidgets.QWidget):
         # GUI itself happened to have, so pin it explicitly here rather
         # than relying on that.
         repo_root = Path(__file__).resolve().parent.parent
-        inner = " ".join(shlex.quote(str(c)) for c in argv)
-        wrapped = (f'cd {shlex.quote(str(repo_root))} && {inner}; '
-                   f'rc=$?; echo "[launcher] DONE exit=$rc"; sleep 3')
+        argvs = [argv] + list(extra_argvs or [])
+        # `|| rc=$?` rather than `&&`: one folder failing must not silently
+        # cancel the folders after it, but the job must still report failure.
+        steps = []
+        for _i, _a in enumerate(argvs, 1):
+            _line = " ".join(shlex.quote(str(c)) for c in _a)
+            if len(argvs) > 1:
+                steps.append(f'echo "[launcher] step {_i}/{len(argvs)}"')
+            steps.append("{ " + _line + " ; } || rc=$?")
+        inner = "; ".join(steps)
+        wrapped = (f'cd {shlex.quote(str(repo_root))} && rc=0; {inner}; '
+                   f'echo "[launcher] DONE exit=$rc"; sleep 3')
+        # Hand the script to bash as a FILE, not as a -c string. Linux caps a
+        # single argv element at MAX_ARG_STRLEN (128 KiB), and the command is
+        # one element: an 877-file selection is ~80 KB of paths and fit, but
+        # the same selection split across 83 folders repeats the shared flags
+        # 83 times, blew past the cap, and execve failed -- surfacing only as
+        # `screen -dmS` exited -2. A file has no such limit, and leaves the
+        # exact commands on disk next to the log for inspection.
+        script_path = JOBS_DIR / f"{session}.sh"
+        try:
+            script_path.write_text("#!/bin/bash\n" + wrapped + "\n")
+            script_path.chmod(0o755)
+        except OSError as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Cannot write job script",
+                f"Could not write the job script:\n{e}")
+            return None
         screen_cmd = ["screen", "-dmS", session, "-L", "-Logfile", logfile,
-                      "bash", "-c", wrapped]
+                      "bash", str(script_path)]
         rc = QtCore.QProcess.execute("screen", screen_cmd[1:])
         if rc != 0:
             QtWidgets.QMessageBox.warning(
@@ -473,17 +514,45 @@ class JobQueuePanel(QtWidgets.QWidget):
         if not data:
             return
         text = data.decode("utf-8", errors="replace")
+        for m in _STEP_RE.finditer(text):
+            job.step, job.n_steps = int(m.group(1)), int(m.group(2))
         last_done = last_total = None
         for m in _PROGRESS_RE.finditer(text):
             last_done, last_total = int(m.group(1)), int(m.group(2))
         if last_done is not None:
             job.seen_frames = last_done
-            if last_total and last_total != job.total_frames:
-                job.total_frames = last_total
-                if job.progress is not None:
-                    job.progress.setRange(0, max(1, job.total_frames))
-            if job.progress is not None:
-                job.progress.setValue(job.seen_frames)
+            if last_total:
+                job.step_total = last_total
+                # Only a single-step job's per-run total IS the job's total.
+                if job.n_steps <= 1:
+                    job.total_frames = last_total
+        if last_done is not None or job.n_steps > 1:
+            self._apply_progress(job)
+
+    @staticmethod
+    def _apply_progress(job: Job) -> None:
+        """Render progress for the whole job, not one step of it.
+
+        A chained multi-folder job reports ``PROGRESS k/15`` per folder, so a
+        bar driven straight off those counts fills up and resets once per
+        folder -- reading "15 / 15 frames, Running" at folder 3 of 84, which
+        looks finished and says nothing about the 81 still to come. With more
+        than one step the bar spans the chain and names the folder instead.
+        """
+        bar = job.progress
+        if bar is None:
+            return
+        if job.n_steps > 1:
+            frac = (job.seen_frames / job.step_total) if job.step_total else 0.0
+            done = max(0, job.step - 1) + min(1.0, max(0.0, frac))
+            bar.setRange(0, job.n_steps * 100)
+            bar.setValue(int(round(done * 100)))
+            bar.setFormat(f"folder {job.step}/{job.n_steps} \u2014 "
+                          f"{job.seen_frames}/{job.step_total} frames (%p%)")
+        else:
+            bar.setRange(0, max(1, job.total_frames))
+            bar.setValue(job.seen_frames)
+            bar.setFormat("%v / %m frames")
 
     def _finalize_job(self, job: Job) -> None:
         was_cancelling = job.status == "Cancelling"

@@ -30,7 +30,7 @@ from midas_gui.helpers import (_fspin, _browse, _build_spec, spec_from_geometry_
                                rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
                                _NoScrollSpinBox, _NoScrollComboBox,
                                widgets_to_dict, apply_dict_to_widgets,
-                               check_output_dir_writable,
+                               check_output_dir_writable, group_paths_by_output_dir,
                                suggest_integration_output_dir,
                                suggest_working_dir, bc_path_parts,
                                browse_start_dir, warn_if_path_missing,
@@ -390,6 +390,11 @@ class BatchTab(QtWidgets.QWidget):
         super().__init__(parent)
         self._worker = None
         self._orphans: list = []       # aborted workers kept alive until they wind down
+        # A recursive pick spans several source folders, each implying its
+        # own output dir; they run as a queue of separate batches. Empty for
+        # every single-folder run, which is what keeps that path unchanged.
+        self._pending_groups: list = []
+        self._group_tally = None
         self._drift_worker = None
         self._drift_traj = None
         self._calib_result = None
@@ -1731,6 +1736,15 @@ class BatchTab(QtWidgets.QWidget):
         self._suggest_out_btn.clicked.connect(self._apply_suggested_output_dir)
         orow.addWidget(self._suggest_out_btn)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
+        # A multi-folder selection does not write here; it writes to one
+        # directory per source folder. Leaving a single load step's path in
+        # the box said the opposite, which is how the flattening went
+        # unnoticed in the first place.
+        self._out_multi_lbl = QtWidgets.QLabel("")
+        self._out_multi_lbl.setWordWrap(True)
+        self._out_multi_lbl.setStyleSheet("color:#e0a030;font-size:10px")
+        self._out_multi_lbl.setVisible(False)
+        out.body.addWidget(self._out_multi_lbl)
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)
         # How many output frames share one .zarr.zip. A rotation's worth of
@@ -1991,14 +2005,53 @@ class BatchTab(QtWidgets.QWidget):
         data that's actually loaded. Returns None when no source is loaded.
         """
         src_cfg = self._loader.source_cfg()
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        # Spanning folders, there is no single answer -- suggest the root they
+        # share. group_paths_by_output_dir rebases onto it and reproduces the
+        # per-folder dirs exactly, so the field stays both honest and usable.
+        dirs = self._output_group_dirs()
+        if len(dirs) > 1:
+            import os
+            return Path(os.path.commonpath([str(d) for d in dirs]))
         rep = src_cfg.get("path")
         if not rep:
             paths = src_cfg.get("paths") or []
             rep = paths[0] if paths else None
         if not rep:
             return None
-        expid = self._expid_provider().strip() if self._expid_provider else ""
         return suggest_integration_output_dir(rep, expid_fallback=expid)
+
+    def _output_group_dirs(self) -> list:
+        """The output directories the current selection implies -- one per
+        source folder, empty when nothing is loaded. More than one means a
+        run will fan out rather than write to the Output field itself."""
+        try:
+            src_cfg = self._loader.source_cfg()
+        except Exception:
+            return []
+        paths = src_cfg.get("paths") or []
+        if len(paths) < 2:
+            return []
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        groups = group_paths_by_output_dir(paths, out_dir=None, expid_fallback=expid)
+        return [d for d, _f in groups if d is not None]
+
+    def _update_output_multi_hint(self) -> None:
+        """Say, next to the Output field, when the run will fan out."""
+        lbl = getattr(self, "_out_multi_lbl", None)
+        if lbl is None:
+            return
+        dirs = self._output_group_dirs()
+        if len(dirs) > 1:
+            lbl.setText(
+                f"Selection spans {len(dirs)} source folders — output does NOT "
+                f"go to this folder. Each source folder gets its own "
+                f"&lt;froot&gt;/&lt;detector&gt; directory under it, e.g. "
+                f"{Path(dirs[0]).parent.name}/{Path(dirs[0]).name}. "
+                f"A background job runs them in order within one session.")
+            lbl.setVisible(True)
+        else:
+            lbl.setVisible(False)
 
     def _set_output_dir_suggested(self, suggested) -> None:
         """Write a path WE derived into the Output field, and remember it.
@@ -2053,8 +2106,10 @@ class BatchTab(QtWidgets.QWidget):
             return                      # the user's own choice -- never touch
         suggested = self._suggest_output_dir()
         if suggested is None or str(suggested) == current:
+            self._update_output_multi_hint()
             return
         self._set_output_dir_suggested(suggested)
+        self._update_output_multi_hint()
 
     def _confirm_detector_size(self, spec) -> bool:
         """Catch a calibration whose detector size does not match the data
@@ -2129,6 +2184,30 @@ class BatchTab(QtWidgets.QWidget):
             variance_cfg = None
 
         out_dir = self._out_ed.text().strip() or None
+        # The <expid>_bc/<froot>/<detector> convention reads froot off each
+        # file's OWN path, so a selection spanning folders implies several
+        # output dirs. Applying it once sent every load step's output to the
+        # first file's folder; run one batch per folder instead, which is the
+        # layout picking each folder by hand already produces. A selection
+        # implying one dir yields one group and the original code path.
+        if not self._pending_groups:
+            groups = group_paths_by_output_dir(
+                src_cfg.get("paths") or [], out_dir=out_dir)
+            if len(groups) > 1:
+                self._pending_groups = list(groups)
+                self._group_tally = {"total": len(groups), "done": 0, "frames": 0}
+                self._log.append(
+                    f"[batch] Selection spans {len(groups)} source folders — "
+                    f"running one batch per folder, each to its own output dir.")
+        if self._pending_groups:
+            gdir, gpaths = self._pending_groups.pop(0)
+            src_cfg = dict(src_cfg)
+            src_cfg["paths"] = list(gpaths)
+            if gdir:
+                out_dir = str(gdir)
+            done = self._group_tally["total"] - len(self._pending_groups)
+            self._log.append(f"[batch] folder {done}/{self._group_tally['total']}: "
+                             f"{len(gpaths)} file(s) → {out_dir}")
         if out_dir:
             reason = check_output_dir_writable(out_dir)
             if reason:
@@ -2307,6 +2386,21 @@ class BatchTab(QtWidgets.QWidget):
         if reason:
             QtWidgets.QMessageBox.critical(self, "Output folder not writable", reason)
             return
+        # A selection spanning source folders maps to one output dir per
+        # folder (see _run / group_paths_by_output_dir). batch_cli takes a
+        # single --out-dir, so each folder needs its own invocation; they are
+        # chained into ONE screen session rather than launched as N competing
+        # jobs. out_dir itself stays the root for the job's shared sidecar
+        # files (calibration snapshot, mask, dark/bright) and its queue entry.
+        groups = group_paths_by_output_dir(
+            src_cfg.get("paths") or [], out_dir=out_dir)
+        if len(groups) > 1:
+            targets = list(groups)
+        else:
+            # One folder, or a glob/single-file source with no path list:
+            # exactly the single-run command this has always produced.
+            targets = [(Path(out_dir), src_cfg.get("paths") or [])]
+
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
 
@@ -2354,19 +2448,25 @@ class BatchTab(QtWidgets.QWidget):
         if self._r_max.value():
             argv += ["--r-max", str(self._r_max.value())]
 
-        if src_cfg["type"] == "tiff_glob":
-            argv += ["--source-type", "tiff_glob", "--source-path", src_cfg["path"]]
-        elif src_cfg["type"] == "hdf5":
-            argv += ["--source-type", "hdf5", "--source-path", src_cfg["path"],
-                     "--dataset", src_cfg.get("dataset", "frames")]
-        elif src_cfg["type"] == "hdf5_stack_glob":
-            argv += ["--source-type", "hdf5_stack_glob", "--source-paths", *src_cfg["paths"],
-                     "--dataset", src_cfg.get("dataset", "exchange/data")]
-        else:
-            argv += ["--source-type", "tiff_list", "--source-paths", *src_cfg["paths"]]
+        # The source files and the output dir are the ONLY per-folder parts;
+        # everything else below is shared, so these are appended last, once
+        # per target. A glob/single-file source has no per-folder split and
+        # ignores gpaths entirely.
+        def _target_args(gpaths, gdir):
+            a = []
+            if src_cfg["type"] == "tiff_glob":
+                a += ["--source-type", "tiff_glob", "--source-path", src_cfg["path"]]
+            elif src_cfg["type"] == "hdf5":
+                a += ["--source-type", "hdf5", "--source-path", src_cfg["path"],
+                      "--dataset", src_cfg.get("dataset", "frames")]
+            elif src_cfg["type"] == "hdf5_stack_glob":
+                a += ["--source-type", "hdf5_stack_glob", "--source-paths", *gpaths,
+                      "--dataset", src_cfg.get("dataset", "exchange/data")]
+            else:
+                a += ["--source-type", "tiff_list", "--source-paths", *gpaths]
+            return a + ["--out-dir", str(gdir)]
 
-        argv += ["--out-dir", str(out_path), "--fmts", ",".join(fmts),
-                 "--kernel", self._kernel.currentData()]
+        argv += ["--fmts", ",".join(fmts), "--kernel", self._kernel.currentData()]
         # Output rebin (Bin type = Q or 2theta). The underlying integration
         # grid is still R-uniform in every case -- these only resample the
         # finished profile, exactly as the in-process run does.
@@ -2454,11 +2554,20 @@ class BatchTab(QtWidgets.QWidget):
         except Exception:
             total = self._loader.n_frames() or 1
 
-        job = self._job_queue.launch(argv, name=out_path.name or "batch", total_frames=total,
-                                     out_dir=str(out_path))
+        argvs = [argv + _target_args(gp, gd) for gd, gp in targets]
+        job = self._job_queue.launch(
+            argvs[0], name=out_path.name or "batch", total_frames=total,
+            out_dir=str(targets[0][0]), extra_argvs=argvs[1:])
         if job is not None:
             self._log.append(f"[batch] Launched background job: {job.session} "
                              f"(see the Logs tab)")
+            if len(targets) > 1:
+                self._log.append(
+                    f"[batch] Selection spans {len(targets)} source folders — "
+                    f"the job runs one integration per folder, in order, "
+                    f"each to its own output dir:")
+                for gd, gp in targets:
+                    self._log.append(f"[batch]     {len(gp):>4} file(s) → {gd}")
             self._view_tabs.setCurrentWidget(self._logs_tab)
 
     def _abort(self):
@@ -2466,6 +2575,9 @@ class BatchTab(QtWidgets.QWidget):
         with a summary); if it does not stop quickly, detach + terminate it and free
         the slot so a new run can start immediately (the orphaned thread winds down
         on its own). Frames already integrated were written to disk as the run went."""
+        # Abort means the sweep, not just the folder in flight -- otherwise
+        # the next group would start the moment this one stopped.
+        self._pending_groups = []
         w = self._worker
         if not (w and w.isRunning()):
             return
@@ -2573,18 +2685,48 @@ class BatchTab(QtWidgets.QWidget):
             self._log.append(f"[batch] Could not archive the job log: {exc}")
 
     def _on_done(self, data):
+        tally = self._group_tally
+        if tally is not None:
+            tally["done"] += 1
+            tally["frames"] += int(data.get("n") or 0)
+            if self._pending_groups and not data.get("aborted", False):
+                self._log.append(
+                    f"[batch] folder {tally['done']}/{tally['total']} done — "
+                    f"{data.get('n')} frames")
+                self._update_cake_stack(data)
+                self._log_to_project(data)
+                # Through the event loop, not directly: this is the finishing
+                # worker's own signal, and _run() reassigns self._worker.
+                QtCore.QTimer.singleShot(0, self._run)
+                return
+            # Last folder, or an abort that ends the sweep: fall through and
+            # report the whole sweep rather than just this folder.
+            self._pending_groups = []
+            self._group_tally = None
+            data = dict(data)
+            data["n"] = tally["frames"]
+            data["_n_folders"] = tally["total"]
         self._reset_run_buttons(); self._prog.setVisible(False)
         self._close_screen_log()
         n = data["n"]; out = data.get("out_paths", [])
         aborted = data.get("aborted", False)
         verb = "aborted after" if aborted else "Done —"
         msg = f"{verb} {n} frames integrated"
+        # The sweep's shape belongs in the summary whether or not the run
+        # handed back any paths -- it is the thing that distinguishes this
+        # from a single-folder run.
+        if data.get("_n_folders"):
+            msg += f" across {data['_n_folders']} folders"
         if out:
             # Output is now split into per-format subfolders (csv/xye/.../h5/zarr)
             # under the chosen Output dir — report that dir, not one file's
             # own parent, so the message doesn't just name whichever format
             # happened to run last.
-            msg += f"\nSaved to: {self._out_ed.text().strip() or Path(out[0]).parent}"
+            if data.get("_n_folders"):
+                msg += ("\nSaved to one output dir per source folder "
+                        "(see the log for each).")
+            else:
+                msg += f"\nSaved to: {self._out_ed.text().strip() or Path(out[0]).parent}"
         if (self._last_run_inputs.get("multi_azimuth")
                 and "h5" in (self._last_run_inputs.get("fmt") or [])):
             msg += ("\nNote: HDF5 wasn't written — it isn't supported in "

@@ -3388,6 +3388,11 @@ class FieldSelector(QtWidgets.QGroupBox):
                 return
             self._set_explicit_paths(None)
             self._path_ed.setText(paths[0])
+        elif mode == "folder" and dlg.recursive():
+            paths = dlg.paths()
+            if not paths:
+                return
+            self._set_explicit_paths(paths)
         elif mode == "folder":
             self._set_explicit_paths(None)
             self._path_ed.setText(dlg.folder())
@@ -4456,9 +4461,17 @@ class DataLoaderPanel(QtWidgets.QWidget):
                 "integrated frame (mpe_wf's OME_SUM): sub-frames WITHIN one "
                 "HDF5 file for an HDF5 source, or consecutive FILES for a "
                 "TIFF/.ge* folder pick (each such file already holds exactly "
-                "one raw frame). 0 = combine everything selected into one "
-                "frame; 1 = no combining (the default, one frame per raw "
-                "sub-frame/file, same as before this setting existed).\n"
+                "one raw frame). 1 = no combining (the default, one frame "
+                "per raw sub-frame/file, same as before this setting "
+                "existed).\n"
+                "\n"
+                "0 = combine the whole unit, which differs by source because "
+                "the unit does: for an HDF5 source it is EVERY SUB-FRAME IN "
+                "EACH FILE, giving one output frame per file whatever its "
+                "frame count (chunking never crosses a file boundary) \u2014 "
+                "mpe_wf's --avg-full-stack. For a TIFF/.ge* pick there is "
+                "nothing smaller than a file to group, so 0 combines EVERY "
+                "SELECTED FILE into a single output frame.\n"
                 "\n"
                 "This spin box IS the cake parameters' OME_SUM — the 'Cake "
                 "parameters…' dialog edits this widget rather than a copy, "
@@ -4608,6 +4621,12 @@ class DataLoaderPanel(QtWidgets.QWidget):
             self._set_explicit_paths(None)
             self._set_stem_filter(None, None)
             self._path_ed.setText(paths[0])
+        elif mode == "folder" and dlg.recursive():
+            paths = dlg.paths()
+            if not paths:
+                return
+            self._set_stem_filter(None, None)
+            self._set_explicit_paths(paths)
         elif mode == "folder":
             self._set_explicit_paths(None)
             self._set_stem_filter(None, None)

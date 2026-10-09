@@ -448,6 +448,43 @@ def build_integration_context(spec, kernel: str, mask, corrections, weighted: bo
             "corr_on": corr_on}
 
 
+class _GsasHeader:
+    """Header stand-in for ``midas_integrate_v2``'s ``ProfileMetadata``.
+
+    The backend writers only ever call ``to_header_lines()`` on whatever is
+    passed as ``metadata=``, and ``ProfileMetadata``'s own rendering is a JSON
+    blob — which GSAS-II cannot read. Its SAXS reader
+    (``G2sad_xye.txt_XRayReaderClass``) recovers the wavelength by scanning for
+    a line containing ``=`` whose key half contains ``wave``, then doing
+    ``float(line.split("=")[1])``; failing that it silently keeps its default
+    of 1.5428 A (Cu Ka). So a ``.dat`` written with no such line loads into
+    GSAS-II as a lab-source pattern regardless of the energy it was taken at,
+    and every Q-dependent quantity downstream of it is wrong.
+
+    That parse dictates the format: exactly one ``=`` on the line, and a bare
+    number after it with no units appended.
+    """
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    def to_header_lines(self, prefix: str = "# "):
+        return [prefix + line for line in self._lines]
+
+
+def _dat_header(wl):
+    """Header lines for a ``.dat``, or ``None`` when there is nothing to say."""
+    try:
+        wl_f = float(wl)
+    except (TypeError, ValueError):
+        return None
+    # A zero/garbage wavelength written out would read back as a real one; let
+    # GSAS-II fall back to its own default instead of asserting a wrong number.
+    if not np.isfinite(wl_f) or wl_f <= 0.0:
+        return None
+    return _GsasHeader([f"wavelength = {wl_f:.8g}"])
+
+
 def write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
                   cake_2d=None, eta_axis=None):
     """Write one integrated profile in the requested 1-D/2-D format."""
@@ -461,7 +498,8 @@ def write_profile(base, fmt, r_px, prof, sigma, lsd, px, wl,
     elif fmt == "fxye":
         m.write_fxye(str(base) + ".fxye", r_axis=two_theta_cd, intensity=prof, sigma=sig)
     elif fmt == "dat":
-        m.write_dat(str(base) + ".dat", q_axis_invA=q, intensity=prof, sigma=sig)
+        m.write_dat(str(base) + ".dat", q_axis_invA=q, intensity=prof,
+                    sigma=sig, metadata=_dat_header(wl))
     elif fmt == "2d_csv":
         if cake_2d is None:
             # Was a silent no-op, and cost a real run its 2D CSVs: the caller
@@ -1678,6 +1716,10 @@ class ManualDspacingCalibWorker(QtCore.QThread):
                 NrPixelsY=self._NY, NrPixelsZ=self._NZ,
                 wavelength_A=fit["wavelength_A"], post_residual_strain_uE=None,
                 _calibrant_name=self._material_name, _d_list=list(self._d_list),
+                # The d-spacings the fit actually consumed -- the picked rings,
+                # not the material's whole table. Reported in paramstest.txt for
+                # a calibrant that has no crystal structure to report instead.
+                _d_used=sorted({float(pk[2]) for pk in self._picks}, reverse=True),
             )
             result.fit_sigma = dict(fit["sigma"])
             result.fit_at_limit = set(fit["at_limit"])

@@ -939,16 +939,28 @@ _NON_H5_NAME_FILTERS = ["*.tif", "*.tiff", "*.ge*", "*.cbf", "*.edf"]
 _ALL_NAME_FILTERS = _NON_H5_NAME_FILTERS + _H5_NAME_FILTERS
 
 
-def _count_frame_files(folder: str) -> int:
-    """How many frame files (TIFF-family or HDF5, see ``_ALL_NAME_FILTERS``)
-    sit directly in ``folder`` — used for the Full-folder/Filestem preview."""
+def _find_frame_files(folder: str, recursive: bool = False) -> list:
+    """Frame files (TIFF-family or HDF5, see ``_ALL_NAME_FILTERS``) in
+    ``folder`` — directly in it, or anywhere beneath it when ``recursive``.
+
+    A beamline folder is often nothing but per-load-step subfolders, with no
+    frame directly in it at all; recursing is how "Full folder" reaches those.
+    The result is a sorted, de-duplicated list, so a file matching two
+    patterns is not processed twice.
+    """
     p = Path(folder)
     if not p.is_dir():
-        return 0
-    n = 0
+        return []
+    glob = p.rglob if recursive else p.glob
+    out = set()
     for pat in _ALL_NAME_FILTERS:
-        n += sum(1 for _ in p.glob(pat))
-    return n
+        out.update(str(m) for m in glob(pat) if m.is_file())
+    return sorted(out)
+
+
+def _count_frame_files(folder: str, recursive: bool = False) -> int:
+    """How many frame files ``_find_frame_files`` would return."""
+    return len(_find_frame_files(folder, recursive))
 
 
 def _froot_of(path) -> str:
@@ -1015,11 +1027,15 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         self.setWindowTitle(title)
         self.resize(760, 520)
         modes = tuple(modes)
+        self._modes = modes
         self._mode = modes[0]
         self._current_dir = ""
         self._folder = ""
         self._stem = ""
         self._paths: list = []
+        self._recursive_result = False
+        self._sweep_key = None          # memo for the recursive sweep only
+        self._sweep: list = []
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -1070,6 +1086,22 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         sr.addWidget(self._stem_ed, 1)
         self._stem_row.setVisible(False)
         layout.addWidget(self._stem_row)
+
+        # Recursion turns a folder pick into an explicit file list, so it is
+        # only offered where the caller can actually consume one -- i.e. where
+        # "files" is among the modes on offer. The Hydra panel cards take a
+        # single path or a stem and pass modes without "files", so they never
+        # see this box.
+        self._recursive_chk = QtWidgets.QCheckBox("Include subfolders")
+        self._recursive_chk.setToolTip(
+            "Find frame files anywhere beneath this folder, not just directly "
+            "in it.\n\nThe result is a fixed list of the files present when "
+            "you press OK, so a folder still being written to by a running "
+            "scan is not picked up live.")
+        self._recursive_chk.toggled.connect(
+            lambda *_: (self._update_info(), self._update_ok_enabled()))
+        self._recursive_chk.setVisible(False)
+        layout.addWidget(self._recursive_chk)
 
         self._info = QtWidgets.QLabel("")
         self._info.setStyleSheet("color:#9a9a9a;font-size:10px")
@@ -1132,6 +1164,8 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             self._tree.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self._model.setNameFilterDisables(False)
         self._stem_row.setVisible(self._mode == "stem")
+        self._recursive_chk.setVisible(
+            self._mode == "folder" and "files" in self._modes)
         self._tree.clearSelection()
         self._update_info()
         self._update_ok_enabled()
@@ -1168,6 +1202,31 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         self._update_info()
         self._update_ok_enabled()
 
+    def _recursive(self) -> bool:
+        """Is the recursive sweep active right now? Checked against the mode
+        and the offered modes rather than widget visibility, which is False
+        until the dialog is actually shown (and in offscreen tests)."""
+        return (self._mode == "folder" and "files" in self._modes
+                and self._recursive_chk.isChecked())
+
+    def _frame_files(self) -> list:
+        """Frame files for the current folder under the current recursion
+        setting. The recursive sweep walks a whole tree over NFS, so it is
+        memoised per (folder, recursive); the plain glob is cheap and stays
+        live so a folder being written to still reports a growing count."""
+        if not self._recursive():
+            return _find_frame_files(self._current_dir, False)
+        key = (self._current_dir, True)
+        if self._sweep_key != key:
+            self._sweep_key, self._sweep = key, _find_frame_files(*key)
+        return self._sweep
+
+    def _n_subfolders(self) -> int:
+        try:
+            return sum(1 for c in Path(self._current_dir).iterdir() if c.is_dir())
+        except OSError:
+            return 0
+
     def _update_info(self):
         if self._mode == "file":
             files = self._selected_files()
@@ -1181,8 +1240,22 @@ class BrowseFilesDialog(QtWidgets.QDialog):
                 "treated as one detector-frame source, not unpacked into "
                 "all its own internal frames.)")
         elif self._mode == "folder":
-            n = _count_frame_files(self._current_dir)
-            self._info.setText(f"{n} frame file(s) found in this folder.")
+            n = len(self._frame_files())
+            if self._recursive():
+                self._info.setText(
+                    f"{n} frame file(s) found in this folder and everything "
+                    f"beneath it. They are taken as one fixed list, read when "
+                    f"you press OK — a folder still filling up is not followed.")
+            else:
+                msg = f"{n} frame file(s) found in this folder."
+                # A beamline folder is often only per-load-step subfolders, so
+                # "0 found" here is the normal case rather than a mistake; say
+                # where the frames actually are instead of leaving a dead end.
+                n_sub = self._n_subfolders()
+                if not n and n_sub and "files" in self._modes:
+                    msg += (f" It holds {n_sub} subfolder(s) — tick "
+                            f"\u201cInclude subfolders\u201d to search those too.")
+                self._info.setText(msg)
         elif self._mode == "stem":
             n = len(self._stem_matches())
             self._info.setText(
@@ -1196,6 +1269,11 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             ok = len(self._selected_files()) >= 1
         elif self._mode == "folder":
             ok = bool(self._current_dir) and Path(self._current_dir).is_dir()
+            # A plain folder pick may legitimately be empty -- it can be watched
+            # as a run fills it. A recursive pick freezes the list at OK, so an
+            # empty one can only ever process nothing.
+            if ok and self._recursive():
+                ok = bool(self._frame_files())
         else:  # stem
             ok = len(self._stem_matches()) >= 1
         self._ok_btn.setEnabled(ok)
@@ -1205,6 +1283,9 @@ class BrowseFilesDialog(QtWidgets.QDialog):
             self._paths = self._selected_files()
         elif self._mode == "folder":
             self._folder = self._current_dir
+            self._recursive_result = self._recursive()
+            if self._recursive_result:
+                self._paths = self._frame_files()
         elif self._mode == "stem":
             self._paths = self._stem_matches()
             self._stem = self._stem_ed.text().strip()
@@ -1222,6 +1303,16 @@ class BrowseFilesDialog(QtWidgets.QDialog):
     def folder(self) -> str:
         """The chosen directory, for "folder" mode."""
         return self._folder
+
+    def recursive(self) -> bool:
+        """True when "Full folder" was confirmed with "Include subfolders".
+
+        ``mode()`` is still ``"folder"`` -- the user did pick a folder -- but
+        the caller must consume ``paths()`` rather than ``folder()``, because a
+        single-directory glob cannot express a tree. The list is frozen at the
+        moment OK was pressed.
+        """
+        return self._recursive_result
 
     def stem(self) -> tuple:
         """(folder, stem) for "stem" mode — Hydra callers re-run sibling
