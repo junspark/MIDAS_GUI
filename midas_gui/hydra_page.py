@@ -90,7 +90,9 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._raw_frames: dict = {}              # panel number -> last-loaded frame (post ImTrans)
         self._composite_img: Optional[np.ndarray] = None
         self._big_det_size: Optional[int] = None
-        self._composite_seeded_size: Optional[int] = None
+        #: (canvas size, mean Lsd, px, per-panel Lsd) the composite card was
+        #: last seeded for -- see _reseed_composite_card_if_needed.
+        self._composite_seeded_key: Optional[tuple] = None
         self._disp_key = None                    # (shape, active key) — fresh-display detection
         self._active_card: Optional[DetectorGeometryCard] = None
         self._syncing_shared = False             # re-entrancy guard for _sync_shared_fields
@@ -477,10 +479,30 @@ class HydraViewerPage(QtWidgets.QWidget):
         this only fires once per distinct canvas size."""
         step = max(1, int(COMPOSITE_DISPLAY_STEP))
         n_out = (int(big_det_size) + step - 1) // step
-        if self._composite_seeded_size == n_out or not active_panels:
+        if not active_panels:
             return
-        self._composite_seeded_size = n_out
         states = [self._states[n] for n in active_panels]
+        # Keyed on the panels' actual geometry, not just the canvas size --
+        # the same rule hydra._big_det_size_cache already uses, and for the
+        # same reason it names: "loading a different calibration file for
+        # one panel".
+        #
+        # Canvas size alone was wrong, and silently. Loading four panel
+        # calibrations changes every panel's Lsd but usually not the canvas
+        # extent, so the composite kept whatever it was seeded with partway
+        # through that load. Reported from 1-ID-E WAXS: the composite card
+        # read Lsd 3071.610 mm, which is exactly the mean of ge1's real
+        # 2392.223 and three bundled ~3298 defaults -- it had been seeded
+        # after ge1 landed and never revisited. Every simulated ring then
+        # sat at the wrong radius and the integrated 2-theta axis was scaled
+        # by 28%, with nothing on screen saying so.
+        seed_key = (n_out, round(sum(s.lsd for s in states) / len(states), 3),
+                    round(states[0].px, 4),
+                    tuple(sorted((n, round(self._states[n].lsd, 3))
+                                 for n in active_panels)))
+        if self._composite_seeded_key == seed_key:
+            return
+        self._composite_seeded_key = seed_key
         lsd = sum(s.lsd for s in states) / len(states)
         px = states[0].px * step          # a built pixel spans `step` detector pixels
         wl = 0.172973
@@ -509,7 +531,7 @@ class HydraViewerPage(QtWidgets.QWidget):
             self._sync_shared_fields(source_key)
         self._toolbar.set_available(siblings.keys())
         self._composite_img = None
-        self._composite_seeded_size = None
+        self._composite_seeded_key = None
         self._refresh_display()
         self._refresh_profile_curves()
 
