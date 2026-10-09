@@ -546,6 +546,37 @@ CORRECTION_SUFFIX = "_cor"
 CORRECTION_EXT = ".h5"
 
 
+def suggest_panel_base_output_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:
+    """``<outroot>/<expid>_bc/<froot>`` — the SHARED base for a Hydra run.
+
+    Deliberately :func:`suggest_integration_output_dir` minus its
+    ``<detector>`` tail. The Hydra page's Output field is one directory for
+    all four panels and each panel appends its own ``ge{n}/`` (see
+    ``HydraBatchPage._run_panel``), so including the detector segment here
+    would produce ``…/<froot>/ge1/ge1``.
+
+    The representative path is any one panel's file: every panel of a Hydra
+    set shares a froot and an outroot, and differs only in the detector.
+
+    The detector tag is also stripped off the END of the froot when it is
+    there. ``bc_path_parts`` reads the froot off the file name, which at
+    1-ID carries it -- ``test_chamber_003516.ge1`` -- and a *shared* base
+    called ``…/test_chamber_003516.ge1/`` holding ge2, ge3 and ge4 names the
+    whole set after one panel. Single-detector output keeps the tag, which
+    is right there: it has exactly one detector and the tag says which.
+    """
+    parts = bc_path_parts(data_path, expid_fallback=expid_fallback)
+    if parts is None:
+        return None
+    froot = parts.froot
+    if parts.detector and froot.lower().endswith("." + parts.detector.lower()):
+        froot = froot[: -(len(parts.detector) + 1)]
+    if parts.positional:
+        return parts.root / froot
+    return (parts.root if parts.root.name == froot
+            else parts.root / froot)
+
+
 def suggest_correction_output_dir(data_path, *, expid_fallback: str = "") -> Optional[Path]:
     """``<outroot>/<expid>_bc/<froot>/<detector>`` — the PARENT Batch
     Correction writes its per-op folders into, giving e.g.

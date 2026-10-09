@@ -38,7 +38,7 @@ from midas_gui.helpers import (
     _fspin, _browse, _NoScrollComboBox, _NoScrollSpinBox,
     widgets_to_dict, apply_dict_to_widgets,
     _load_image, rmax_corner_px, rmax_edge_px, draw_polar_bin_overlay,
-    browse_start_dir, warn_if_path_missing)
+    browse_start_dir, warn_if_path_missing, suggest_panel_base_output_dir, check_output_dir_writable)
 from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer,
                                OriginToolButton)
@@ -79,6 +79,11 @@ class HydraBatchPage(QtWidgets.QWidget):
         super().__init__(parent)
         self._cards: dict = {}           # panel_num -> HydraBatchPanelCard
         self._viewer_pairs: dict = {}    # panel_num -> _PanelViewerPair
+        self._expid_provider = None      # () -> str, forwarded by BatchTab
+        #: Output path this page last filled in itself; see
+        #: _maybe_autofill_output_dir. Set before the UI is built, since
+        #: loading data fires siblingsChanged, which auto-fills.
+        self._autofilled_out = None
         self._workers: dict = {}         # panel_num -> BatchRunCoordinator (running)
         self._orphans: list = []         # aborted workers kept alive until they wind down
         self._pending_panels: list = []  # sequential-mode queue
@@ -239,6 +244,19 @@ class HydraBatchPage(QtWidgets.QWidget):
         bou.clicked.connect(lambda: self._out_ed.setText(
             QtWidgets.QFileDialog.getExistingDirectory(
                 self, "Output directory", browse_start_dir(self._out_ed.text())) or "")); orow.addWidget(bou)
+        self._suggest_out_btn = QtWidgets.QPushButton("Suggest")
+        self._suggest_out_btn.setToolTip(
+            "Fill in <outroot>/<expid>_bc/<froot>/, the SHARED base each "
+            "panel writes its own ge{n}/ subfolder into — so it is Batch "
+            "Integrate's convention without the <detector> segment, which "
+            "the per-panel subfolder supplies.\n\n"
+            "Read positionally off whichever panel's source is loaded; every "
+            "panel of a set shares a froot and an outroot and differs only "
+            "in the detector, so any one of them gives the same answer. The "
+            "detector tag is stripped off the froot too, so a shared base is "
+            "not named after panel 1.")
+        self._suggest_out_btn.clicked.connect(self._apply_suggested_output_dir)
+        orow.addWidget(self._suggest_out_btn)
         out.body.addLayout(S.Form().row(("Folder:", orow)))
         self._fmt = OutputFormatSelector()
         out.body.addWidget(self._fmt)
@@ -321,6 +339,10 @@ class HydraBatchPage(QtWidgets.QWidget):
             card = HydraBatchPanelCard(n)
             self._cards[n] = card
             self._card_stack.addWidget(card)
+            # A panel's calibration feeds BOTH its own overlay and the
+            # composite's placement of that panel, so invalidate either way:
+            # the composite may not be on screen now, but it must not be
+            # redrawn later from the geometry this just replaced.
             card._use_calib_btn.toggled.connect(
                 lambda *_, n=n: self._refresh_detector_preview(n))
             card._json_ed.textChanged.connect(
@@ -363,7 +385,53 @@ class HydraBatchPage(QtWidgets.QWidget):
 
     def _on_siblings_changed(self, siblings: dict):
         self._toolbar.set_available(siblings.keys())
+        self.invalidate_composite()      # different panels / different files
+        self._maybe_autofill_output_dir()
         self._refresh_active_detector_preview()
+
+    # ── Output folder (same contract as BatchTab's — see
+    # BatchTab._maybe_autofill_output_dir for why the test is provenance
+    # rather than emptiness) ──────────────────────────────────────────
+    def set_expid_provider(self, provider) -> None:
+        """Header Exp ID, read live for the output suggestion. Forwarded by
+        BatchTab, which is what app.py wires — this page is built lazily, so
+        it cannot be in that loop itself."""
+        self._expid_provider = provider
+
+    def _suggest_output_dir(self):
+        """``<outroot>/<expid>_bc/<froot>`` — the shared base, no detector
+        segment: each panel appends its own ``ge{n}/`` in ``_run_panel``."""
+        siblings = self._loader.siblings() or {}
+        rep = next((siblings[n] for n in sorted(siblings) if siblings.get(n)), None)
+        if not rep:
+            return None
+        expid = self._expid_provider().strip() if self._expid_provider else ""
+        return suggest_panel_base_output_dir(rep, expid_fallback=expid)
+
+    def _set_output_dir_suggested(self, suggested) -> None:
+        self._out_ed.setText(str(suggested))
+        self._autofilled_out = str(suggested)
+        reason = check_output_dir_writable(suggested)
+        if reason:
+            self._log.append(f"[hydra] Warning: {reason}")
+
+    def _apply_suggested_output_dir(self):
+        """The Suggest button: overwrite whatever is there, on request."""
+        suggested = self._suggest_output_dir()
+        if suggested is None:
+            self._log.append("[hydra] No panel data loaded yet — nothing to suggest.")
+            return
+        self._set_output_dir_suggested(suggested)
+
+    def _maybe_autofill_output_dir(self):
+        """Replace a path we filled in; never one the user chose."""
+        current = self._out_ed.text().strip()
+        if current and current != (getattr(self, "_autofilled_out", None) or ""):
+            return
+        suggested = self._suggest_output_dir()
+        if suggested is None or str(suggested) == current:
+            return
+        self._set_output_dir_suggested(suggested)
 
     def _on_panel_changed(self, key: str):
         n = int(key[2])
@@ -400,7 +468,9 @@ class HydraBatchPage(QtWidgets.QWidget):
         shared viewer for a panel that isn't the active one would show the
         wrong geometry. Reads the frame straight off disk since the Hydra
         loader is stream-mode (see ``hydra_calib_page._panel_raw_image``
-        for the identical pattern)."""
+        for the identical pattern).
+
+for the identical pattern)."""
         key = self._toolbar.current()
         if not key or n != int(key[2]):
             return

@@ -1056,6 +1056,13 @@ class BatchTab(QtWidgets.QWidget):
     def _ensure_hydra_page(self) -> HydraBatchPage:
         if self._hydra_page is None:
             self._hydra_page = HydraBatchPage()
+            # app.py wires the Exp ID provider onto this tab at startup, but
+            # the Hydra page is built lazily and so cannot be in that loop.
+            # Forward it here, or its output suggestion falls back to reading
+            # the expid positionally off the path -- right in the common
+            # layout, wrong wherever that layout is not 4 deep.
+            if self._expid_provider is not None:
+                self._hydra_page.set_expid_provider(self._expid_provider)
             self._mode_stack.addWidget(self._hydra_page)
             if self._project_ctx is not None:
                 self._hydra_page.set_project_context(self._project_ctx)
