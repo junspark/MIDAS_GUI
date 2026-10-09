@@ -9,10 +9,18 @@ archive open. This is the export, not new acquisition.
 **Why this module exists rather than living in one of the two tabs.** The two
 batch paths reach the same numbers by different routes:
 
-* Batch Integrate already has them resolved per frame, via
-  ``workers._HDF5StackGlobSource.metadata_for_index`` — see :func:`rows_from_metas`.
-* Batch Correction never calls that. It has the aligned instrument tree from
-  ``h5_metadata.align``, keyed by raw HDF5 path — see :func:`rows_from_aligned`.
+Both tabs now build their rows with :func:`rows_from_tree`, so the two
+sidecars differ only in the ``_bi``/``_bc`` tail of the filename. Batch
+Integrate reaches it through ``workers._HDF5StackGlobSource.monitor_inputs``,
+which hands over the same ``(path, ranges, n_light, n_dark)`` that Batch
+Correction's ``_collect_monitor_rows`` already assembled.
+
+It was not always so, and the divergence was expensive: Batch Integrate used
+to build rows from ``metadata_for_index`` dicts, which resolve ion chambers
+through :data:`ION_CHAMBER_H5_PATHS` — ``US_IC``/``D2PD`` for hutch E. A
+1-ID file carries neither, so the ``_bi.csv`` had NO ion-chamber columns at
+all while the ``_bc.csv`` beside it carried 29 channels and 23 gains. Two
+builders that merely agree is how that happens; there is one now.
 
 What they genuinely share is the *per-hutch monitor mapping*, which used to be
 private to ``_HDF5StackGlobSource``. It lives here now and ``workers`` imports
@@ -374,28 +382,6 @@ def _gap_index(tree: dict) -> Optional[int]:
 
 # ── adapters: two paths, same rows ───────────────────────────────────────────
 
-def rows_from_metas(metas) -> list:
-    """Rows from Batch Integrate's per-frame ``metadata_for_index`` dicts.
-
-    Keys arrive already resolved (``ion_chamber_i0``/``ion_chamber_i``/
-    ``current``/``temperature``/``pressure``/``motor:<leaf>/<channel>``), so
-    this is a rename into the CSV's own column names and nothing more.
-    """
-    rows = []
-    for n, meta in enumerate(metas):
-        meta = meta or {}
-        row = {"frame": n, "source_file": "",
-               "I0": meta.get("ion_chamber_i0"),
-               "I": meta.get("ion_chamber_i")}
-        for key, _header in _ENV_COLUMNS:
-            row[key] = meta.get(key)
-        for key, value in meta.items():
-            if key.startswith(MOTOR_PREFIX):
-                row[key] = value
-        rows.append(row)
-    return rows
-
-
 def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
                    n_light: int, n_dark: int = 0, source: str = "",
                    subtracted_dark: str = "") -> tuple:
@@ -542,8 +528,9 @@ def rows_from_tree(tree: dict, hutch: Optional[str], *, frame_ranges,
 #:   ``frame_start``, ``frame_end``. One CSV can hold rows from several
 #:   source files, so the file name plus the raw sub-frame range IS the
 #:   identity; a bare ordinal would not be unique across files.
-#: * :func:`rows_from_metas` (Batch Integrate) → ``frame``, ``source_file``.
-#:   It has one row per output frame and no raw range to report.
+#: Both producers now go through :func:`rows_from_tree`, so both identify a
+#: row the same way; ``frame`` survives only for a caller that still builds
+#: rows by hand.
 _INDEX_COLUMNS = (("kind", "kind"), ("frame", "frame"),
                   ("source_file", "source_file"),
                   ("frame_start", "frame_start"), ("frame_end", "frame_end"),

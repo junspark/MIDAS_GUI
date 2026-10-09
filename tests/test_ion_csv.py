@@ -279,15 +279,26 @@ def test_the_dark_rows_range_is_its_own_block():
         == ("dark", 0, 1)
 
 
-def test_batch_integrates_csv_has_no_kind_column(tmp_path):
-    """`kind` distinguishes a dark row from chunk rows, and the Batch
-    Integrate path (rows_from_metas) has no dark row. A column of blanks
-    there would read as a missing value rather than an absent concept."""
-    rows = IC.rows_from_metas([{"ion_chamber_i0": 5.0}, {"ion_chamber_i0": 6.0}])
-    out = IC.write_ion_csv(tmp_path / "bi.csv", rows)
-    header = open(out).readline().strip()
-    assert not header.startswith("kind")
-    assert header.startswith("frame,source_file")
+def test_both_tabs_sidecars_are_the_same_file_but_for_the_name(tmp_path):
+    """Asked for: "batch integrate should output identical metadata csv file
+    as when background correction runs. The only difference is the file name
+    extension (like bi or bc)."
+
+    This replaces a test that pinned the OPPOSITE -- that Batch Integrate's
+    CSV had no `kind` column, because that path built rows from
+    metadata_for_index dicts and had no dark row. That divergence is the
+    bug: the same builder now serves both, so the only way they can differ
+    is the filename.
+    """
+    tree = _three_groups()
+    args = dict(frame_ranges=[(0, 1), (2, 3)], n_light=4,
+                source="scan_000012.vrx.h5")
+    bc, _ = IC.rows_from_tree(tree, "E", **args)
+    bi, _ = IC.rows_from_tree(tree, "E", **args)      # Batch Integrate's route
+    a = IC.write_ion_csv(tmp_path / ("x" + IC.SUFFIX_BATCH_CORRECTION), bc)
+    b = IC.write_ion_csv(tmp_path / ("x" + IC.SUFFIX_BATCH_INTEGRATE), bi)
+    assert open(a).read() == open(b).read()
+    assert str(a).endswith("_bc.csv") and str(b).endswith("_bi.csv")
 
 
 # ── which dark was actually subtracted ───────────────────────────────────

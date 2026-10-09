@@ -2103,6 +2103,46 @@ class BatchWorker(QtCore.QThread):
     def _open_source(self):
         return _open_source_cfg(self._src)
 
+    def _monitor_rows_for_run(self, source) -> list:
+        """Beam-monitor rows for this run, built by the SAME function Batch
+        Correction uses (:func:`ion_csv.rows_from_tree`).
+
+        The two tabs write the same kind of sidecar about the same scan, so
+        the files should differ only in the ``_bi``/``_bc`` tail. They did
+        not: this path used ``rows_from_metas``, which resolved ion chambers
+        through ``ION_CHAMBER_H5_PATHS[hutch]`` -- ``US_IC``/``D2PD`` for
+        hutch E -- and a 1-ID file carries neither, so the _bi.csv came out
+        with no ion-chamber columns at all beside a _bc.csv holding 29
+        channels and 23 gains. It also keyed rows by a bare ordinal and
+        never wrote the shutter-closed dark row.
+
+        Only ``_HDF5StackGlobSource`` offers ``monitor_inputs`` (it is also
+        the only source with per-frame metadata at all, so no other source
+        ever produced one of these files); anything else yields no rows and
+        ``write_ion_csv`` then writes nothing, as before.
+        """
+        inputs = getattr(source, "monitor_inputs", None)
+        if inputs is None:
+            return []
+        rows = []
+        for path, ranges, n_light, n_dark in inputs():
+            hutch = ion_csv.resolve_hutch(path, settings.active_profile())
+            # Acquisition timestamps live outside instrument/ and are the
+            # cross-check on which block of scaler entries is the lights --
+            # same read Batch Correction does for the same reason.
+            tree = h5_metadata.read_tree(path)
+            try:
+                tree.update(h5_metadata.read_tree(path, groups=("NDArray",)))
+            except Exception:
+                pass
+            got, note = ion_csv.rows_from_tree(
+                tree, hutch, frame_ranges=ranges, n_light=n_light,
+                n_dark=n_dark, source=Path(path).name)
+            rows.extend(got)
+            if note:
+                self.log_line.emit(f"[batch] monitors {Path(path).name}: {note}")
+        return rows
+
     def _ion_csv_name(self) -> str:
         """``<froot>_<detector>_bi.csv`` — the same shape Batch Correction
         uses for its own monitor sidecar, differing only in the tag.
@@ -2731,7 +2771,7 @@ class BatchWorker(QtCore.QThread):
                 try:
                     written = ion_csv.write_ion_csv(
                         self._out_dir.parent / self._ion_csv_name(),
-                        ion_csv.rows_from_metas([m for _i, m in ion_meta]),
+                        self._monitor_rows_for_run(source),
                         extras=self._ion_csv_extras)
                     if written:
                         out_paths.append(written)
@@ -3511,6 +3551,48 @@ class _HDF5StackGlobSource:
         the single place deciding which rotation a frame belongs to, and
         grouping must not get to disagree with the angle."""
         return self.omega_channel_window(idx)[0]
+
+    def monitor_inputs(self) -> list:
+        """Per source file, ``(path, ranges, n_light, n_dark)`` -- exactly the
+        shape :func:`ion_csv.rows_from_tree` takes, and exactly what
+        ``BatchCorrectionWorker._collect_monitor_rows`` already builds.
+
+        Exists so Batch Integrate's sidecar comes out of the SAME row builder
+        as Batch Correction's rather than a second one that merely agrees.
+        They had diverged badly: ``rows_from_metas`` resolved ion chambers
+        through ``ION_CHAMBER_H5_PATHS[hutch]`` -- ``US_IC``/``D2PD`` for
+        hutch E -- and a 1-ID file carries neither, so the _bi.csv had no
+        ion-chamber columns at all while the _bc.csv beside it had 29
+        channels. It also keyed rows by a bare ordinal and never wrote the
+        dark row.
+
+        ``ranges`` are the same raw sub-frame spans ``_fid`` embeds in each
+        frame id, so a CSV row and the output frame it describes name the
+        same thing. ``n_dark`` is read from the dark dataset rather than
+        inferred, since ``split_light_dark`` uses it to decide which block of
+        a flat metadata array is the lights.
+        """
+        self._ensure_stats()
+        out = []
+        for i, path in enumerate(self._paths):
+            n_raw = int(self._raw_ns[i])
+            ranges = [self._chunk_range(k, n_raw) for k in range(int(self._counts[i]))]
+            n_dark = 0
+            try:
+                import h5py
+                with h5py.File(str(path), "r") as f:
+                    # "<dataset>_dark" is the VAREX/Eiger convention; the
+                    # literal fallback covers a source pointed at a
+                    # differently-named light dataset in the same file.
+                    for cand in (f"{self._dataset}_dark", "exchange/data_dark"):
+                        dk = f.get(cand)
+                        if dk is not None and getattr(dk, "ndim", 0) == 3:
+                            n_dark = int(dk.shape[0])
+                            break
+            except Exception:
+                n_dark = 0
+            out.append((path, ranges, n_raw, n_dark))
+        return out
 
     def metadata_for_index(self, idx: int) -> dict:
         """Chunk-mean metadata (Temperature/Pressure/StorageRing current)
