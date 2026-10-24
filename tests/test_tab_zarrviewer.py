@@ -320,3 +320,53 @@ def test_a_contiguous_caking_still_takes_the_single_quadmesh_path():
                     norm=mcolors.Normalize(0, 1))
     assert len(ax.collections) == 1, "contiguous rows were drawn one by one"
     plt.close(fig)
+
+
+def test_pack_eta_closes_the_gaps_but_labels_the_real_angles():
+    """Requested after the band fix: four 10-deg rows spread over 300 deg
+    leaves the data too thin to read.
+
+    Packing is only safe if the axis stops claiming to be linear in eta,
+    so the rows carry their own angles as ticks and the label says the
+    gaps were removed. A packed axis still labelled plain "Eta (deg)"
+    would be the same lie as the stretched bands, in the other direction.
+    """
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from midas_gui.tab_zarrviewer import _draw_eta_bands
+
+    eta = np.array([-180.0, -90.0, 0.0, 90.0])
+    x = np.linspace(2.0, 10.0, 48)
+    z = np.zeros((4, 48))
+    fig = plt.figure(); ax = fig.add_subplot(111)
+    _im, label = _draw_eta_bands(ax, x, eta, z, 10.0, cmap="viridis",
+                                 norm=mcolors.Normalize(0, 1), pack=True)
+    lo, hi = ax.get_ylim()
+    assert hi - lo < 6, "rows were not packed"
+    assert [t.get_text() for t in ax.get_yticklabels()] == \
+        ["-180", "-90", "0", "90"]
+    assert label and "packed" in label
+    plt.close(fig)
+
+
+def test_pack_eta_does_nothing_to_a_contiguous_caking():
+    """There are no gaps to close, so packing must not silently relabel a
+    perfectly good linear axis."""
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from midas_gui.tab_zarrviewer import _draw_eta_bands
+
+    eta = np.arange(-175.0, 176.0, 10.0)
+    x = np.linspace(2.0, 10.0, 32)
+    fig = plt.figure(); ax = fig.add_subplot(111)
+    _im, label = _draw_eta_bands(ax, x, eta, np.zeros((eta.size, 32)), 10.0,
+                                 cmap="viridis",
+                                 norm=mcolors.Normalize(0, 1), pack=True)
+    assert label is None, "a contiguous caking was relabelled as packed"
+    plt.close(fig)

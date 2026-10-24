@@ -103,7 +103,8 @@ def _build_tree(node, parent_item: QtWidgets.QTreeWidgetItem):
 # Matplotlib canvas widget
 # ─────────────────────────────────────────────────────────────────────────
 
-def _draw_eta_bands(ax, x_coords, y_coords, z, eta_width, *, cmap, norm):
+def _draw_eta_bands(ax, x_coords, y_coords, z, eta_width, *, cmap, norm,
+                    pack=False):
     """Draw the cake with each eta row at its TRUE height.
 
     ``pcolormesh`` treats its coordinates as cell CENTRES and infers the
@@ -129,19 +130,37 @@ def _draw_eta_bands(ax, x_coords, y_coords, z, eta_width, *, cmap, norm):
     else:
         sparse = False
 
+    def _edges(c):
+        """Cell edges from centres. Flat shading needs n+1 on BOTH axes;
+        giving y as edges and x as centres is a TypeError, and it is the
+        one mistake this function invites twice."""
+        c = _np.asarray(c, dtype=float)
+        if c.size < 2:
+            return _np.array([c[0] - 0.5, c[0] + 0.5])
+        mid = 0.5 * (c[1:] + c[:-1])
+        return _np.concatenate(([c[0] - (mid[0] - c[0])], mid,
+                                [c[-1] + (c[-1] - mid[-1])]))
+
+    if sparse and pack:
+        # Rows adjacent, one per caked wedge. The y-axis is no longer
+        # linear in eta, so it is ticked with the real angles and SAYS so
+        # -- a packed axis that still claimed to be degrees would be the
+        # same lie as the stretched bands, just in the other direction.
+        im = ax.pcolormesh(_edges(x_coords), _np.arange(y.size + 1) - 0.5,
+                           z, cmap=cmap, norm=norm, shading="flat")
+        ax.set_yticks(_np.arange(y.size))
+        ax.set_yticklabels([f"{v:g}" for v in y])
+        # The caller styles the axes afterwards and would overwrite a
+        # label set here, so hand it back instead of setting it.
+        return im, "Eta (deg) — rows packed, gaps removed"
+
     if not sparse:
         return ax.pcolormesh(x_coords, y, z, cmap=cmap, norm=norm,
-                             shading="auto")
+                             shading="auto"), None
 
     # Explicit EDGES on both axes: giving y as two edges selects flat
     # shading, which then requires x as edges too (n+1), not centres.
-    xc = _np.asarray(x_coords, dtype=float)
-    if xc.size > 1:
-        mid = 0.5 * (xc[1:] + xc[:-1])
-        xe = _np.concatenate(([xc[0] - (mid[0] - xc[0])], mid,
-                              [xc[-1] + (xc[-1] - mid[-1])]))
-    else:
-        xe = _np.array([xc[0] - 0.5, xc[0] + 0.5])
+    xe = _edges(x_coords)
 
     half = float(eta_width) / 2.0
     im = None
@@ -150,7 +169,7 @@ def _draw_eta_bands(ax, x_coords, y_coords, z, eta_width, *, cmap, norm):
                            z[i:i + 1, :], cmap=cmap, norm=norm,
                            shading="flat")
     ax.set_ylim(float(y.min()) - half * 3, float(y.max()) + half * 3)
-    return im
+    return im, None
 
 
 def _unwrap_eta(y):
@@ -373,7 +392,8 @@ class PlotCanvas(QtWidgets.QWidget):
                 clim_lo: float = None, clim_hi: float = None,
                 xlabel: str = "column", ylabel: str = "row",
                 x_coords: np.ndarray = None, y_coords: np.ndarray = None,
-                xlim=None, eta_width: float = None):
+                xlim=None, eta_width: float = None,
+                pack_eta: bool = False):
         """Plot 2-D array.  If x_coords/y_coords are given, use pcolormesh with
         physical axis values; otherwise fall back to imshow with bin indices."""
         self.fig.clear()
@@ -396,9 +416,11 @@ class PlotCanvas(QtWidgets.QWidget):
             y_coords, unwrapped = _unwrap_eta(y_coords)
             if unwrapped:
                 ylabel = f"{ylabel} (unwrapped)"
-            self._im = _draw_eta_bands(
+            self._im, _relabel = _draw_eta_bands(
                 ax, x_coords, y_coords, d.T, eta_width,
-                cmap=cmap, norm=norm)
+                cmap=cmap, norm=norm, pack=pack_eta)
+            if _relabel:
+                ylabel = _relabel
         else:
             self._im = ax.imshow(
                 d.T, aspect="auto", origin="lower", cmap=cmap, norm=norm,
@@ -559,6 +581,20 @@ class ZarrViewerTab(QtWidgets.QWidget):
         self._rmap_cb.addItems(["REtaMap"])   # may gain "REtaMap_corrected" on load
         self._rmap_cb.currentTextChanged.connect(self._refresh_plot)
         ctrl_layout.addWidget(self._rmap_cb)
+
+        self._pack_eta = QtWidgets.QCheckBox("Pack eta")
+        self._pack_eta.setToolTip(
+            "Draw the eta rows adjacent to each other instead of at their "
+            "true angular positions.\n\n"
+            "A sparse caking -- four panels 10° wide but 90° apart -- leaves "
+            "most of the plot empty, and the rows are too thin to read. This "
+            "closes the gaps so the data fills the axis.\n\n"
+            "The y-axis is then NOT linear in eta: each row is one caked "
+            "wedge, labelled with its own angle, and the spacing between "
+            "labels means nothing. The axis says so while this is on.\n\n"
+            "No effect on a contiguous caking, where there are no gaps.")
+        self._pack_eta.stateChanged.connect(self._refresh_plot)
+        ctrl_layout.addWidget(self._pack_eta)
 
         btn_replot = QtWidgets.QPushButton("Apply")
         btn_replot.clicked.connect(self._refresh_plot)
@@ -1135,6 +1171,7 @@ class ZarrViewerTab(QtWidgets.QWidget):
                 xlabel=xlabel, ylabel="Eta (deg)" if y_coords is not None else "Eta bin",
                 x_coords=x_coords_arg, y_coords=y_coords, xlim=xlim,
                 eta_width=self._eta_bin_width(),
+                pack_eta=self._pack_eta.isChecked(),
             )
             self._last_plot_signature = plot_signature
             self._last_plot_x = plot_x
@@ -1185,6 +1222,7 @@ class ZarrViewerTab(QtWidgets.QWidget):
                 ylabel="Eta (deg)" if y_coords is not None else "Eta bin",
                 x_coords=x_coords_arg, y_coords=y_coords, xlim=xlim,
                 eta_width=self._eta_bin_width(),
+                pack_eta=self._pack_eta.isChecked(),
             )
             self._last_plot_signature = plot_signature
             self._last_plot_x = plot_x
