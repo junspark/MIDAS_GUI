@@ -50,7 +50,7 @@ from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
 from midas_gui.hydra_batch_widgets import (HydraBatchPanelCard,
                                            HydraCakingSummary)
 from midas_gui.job_queue import JobQueuePanel
-from midas_gui.dark_policy import DarkTiffCache
+from midas_gui.dark_policy import DarkArgBuilder
 from midas_gui import hydra_zarr_combine
 from midas_gui.workers import BatchRunCoordinator, write_all_profiles, REBIN_UNITS
 from midas_gui import cake_params
@@ -1912,7 +1912,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         # also means an unresolvable dark is reported at SUBMIT time
         # instead of hours later in a screenlog. See .context/ROADMAP.md,
         # "Background jobs and the dark".
-        dark_cache = DarkTiffCache(root)
+        dark_cache = DarkArgBuilder(root)
 
         units, argvs = [], []
         for out_dir, panel_paths in scans:
@@ -2095,16 +2095,16 @@ class HydraBatchPage(QtWidgets.QWidget):
             subject, body = dark_skip_report(skipped, context="Hydra batch job")
             if send_mail(subject, body, addr):
                 self._log.append(f"[hydra] Skip report sent to {addr}.")
-        first = "\n".join(f"  {Path(p).name}: {w}" for p, w in skipped[:6])
-        more = (f"\n  ... and {len(skipped) - 6} more."
-                if len(skipped) > 6 else "")
+        from midas_gui.mail import summarise_skips
+        lines, why, n_scans = summarise_skips(skipped)
         btn = QtWidgets.QMessageBox.warning(
-            self, "Some steps have no valid dark",
-            f"{len(skipped)} step(s) will NOT be integrated because no valid "
-            f"dark could be resolved for them:\n\n{first}{more}\n\n"
+            self, "Some scans have no valid dark",
+            f"{n_scans} scan(s) will NOT be integrated:\n\n{lines}\n\n"
+            f"{why}.\n\n"
             f"They are skipped rather than corrected with another scan's "
-            f"dark, which would look plausible and be wrong.\n\n"
-            f"Submit the job for the remaining steps?",
+            f"dark, which would look plausible and be wrong. The full "
+            f"reason for each file is in the Log.\n\n"
+            f"Submit the job for the remaining scans?",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
             QtWidgets.QMessageBox.Yes)
         return btn == QtWidgets.QMessageBox.Yes

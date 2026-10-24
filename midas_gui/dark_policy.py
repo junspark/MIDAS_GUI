@@ -312,43 +312,40 @@ def panel_dark_path(anchor, n) -> tuple:
     return cand, f"{panel_token(n)} dark derived from the anchor: {cand}"
 
 
-class DarkTiffCache:
-    """Resolve a dark per job step and write one TIFF per DISTINCT dark.
+class DarkArgBuilder:
+    """``--dark`` arguments for background-job steps, with no copying.
 
-    A background job hands its dark across the process boundary as a
-    pre-averaged TIFF. Resolving per step means many steps, but not many
-    DARKS: a 190-scan four-panel run has at most a handful of distinct
-    darks between them, and writing one 16 MB file per (scan, panel)
-    would put ~12 GB of near-identical copies on a beamline share.
+    Was ``DarkTiffCache``, which wrote each resolved dark out as a
+    pre-averaged TIFF. That cost 17 MB per step written during curation
+    -- 816 MB and a visibly blocked GUI before a 48-step job launched --
+    to duplicate a file already sitting on disk. The job can read the
+    original: ``batch_cli --dark <source.h5> --dark-dataset <path>``.
 
-    Lives here, rather than inline in each tab, because both the Hydra
-    and single-detector job builders need exactly this and a second copy
-    is how two code paths start answering the dark question differently
-    -- the bug this whole module exists to prevent.
+    A TIFF is still written for the one case with no source file behind
+    it: an explicitly chosen Dark field, which reaches us as an array.
+    That is one file per panel, not one per step.
     """
 
     def __init__(self, out_dir, prefix: str = "_bg_job_dark"):
         self._dir = out_dir
         self._prefix = prefix
-        self._by_dark: dict = {}
+        self._explicit: dict = {}
         self.skipped: list = []
 
     def written(self) -> int:
-        """How many TIFFs were actually written — the dedupe, measurable."""
-        return len(self._by_dark)
+        """TIFFs actually written — zero whenever every dark resolved to
+        a real file, which is the normal autodetect case."""
+        return len(self._explicit)
 
-    def arg_for(self, probe, request, *, fallback=None, tag: str = ""):
-        """``["--dark", path]`` for one step.
+    def arg_for(self, probe, request, *, tag: str = ""):
+        """``["--dark", path, "--dark-dataset", ds]`` for one step.
 
-        Returns ``[]`` when the step legitimately has no dark (explicit
-        mode with nothing chosen), and ``None`` when it could not be
-        resolved — the caller must then drop that step and report it,
-        never fall back to another scan's dark.
+        ``[]`` when the step legitimately has no dark; ``None`` when it
+        could not be resolved, in which case the caller must DROP the
+        step -- never substitute another scan's dark.
         """
-        import numpy as _np
-        import tifffile as _tiff
-        from midas_gui.frame_correct import acquisition_exposure
         import dataclasses
+        from midas_gui.frame_correct import acquisition_exposure
         req = dataclasses.replace(request, exposure=acquisition_exposure(probe))
         choice = resolve(probe, req)
         if choice.skipped:
@@ -356,15 +353,26 @@ class DarkTiffCache:
             return None
         if choice.array is None:
             return []
-        # Keyed on the resolved SOURCE, not on `why`: why is prose and
-        # embeds a per-step distance, so it identifies nothing. Keying on
-        # it wrote one TIFF per step rather than one per dark.
-        key = (tag, choice.source or choice.why)
-        path = self._by_dark.get(key)
+        src = choice.source
+        # Only in AUTO mode. An explicitly chosen Dark field may carry a
+        # frame-range the user set on it, and the array we were handed
+        # already honours that -- re-reading the whole stack from the
+        # path would quietly ignore it.
+        if wants_auto(req) and src and os.path.isfile(src):
+            return ["--dark", str(src), "--dark-dataset", req.dataset]
+        # No file behind it: the loader's own Dark field. One TIFF per
+        # tag, written once.
+        path = self._explicit.get(tag)
         if path is None:
-            name = f"{self._prefix}{('_' + tag) if tag else ''}" \
-                   f"_{len(self._by_dark):03d}.tif"
+            import numpy as _np
+            import tifffile as _tiff
+            name = f"{self._prefix}{('_' + tag) if tag else ''}.tif"
             path = self._dir / name
-            _tiff.imwrite(str(path), _np.asarray(choice.array, dtype=_np.float32))
-            self._by_dark[key] = path
+            _tiff.imwrite(str(path),
+                          _np.asarray(choice.array, dtype=_np.float32))
+            self._explicit[tag] = path
         return ["--dark", str(path)]
+
+
+#: Old name, kept so nothing breaks mid-edit.
+DarkTiffCache = DarkArgBuilder

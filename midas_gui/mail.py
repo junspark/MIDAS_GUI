@@ -66,3 +66,52 @@ def dark_skip_report(skipped, *, context: str = "") -> tuple:
     if n > 50:
         body.append(f"  ... and {n - 50} more.")
     return subject, body
+
+
+def summarise_skips(skipped, *, limit: int = 8) -> str:
+    """A few lines a human can act on, for a dialog.
+
+    NOT the full reasons. Each reason names every candidate it rejected
+    and why, which is right for a log and unreadable in a message box --
+    four panels of one scan produced a wall of repeated text that the
+    user could not read at all. The detail stays in the Log; this says
+    WHAT was skipped and the one thing they share.
+    """
+    import collections
+    import os as _os
+    if not skipped:
+        return ""
+    names = []
+    for path, _why in skipped:
+        b = _os.path.basename(str(path))
+        # strip the panel/extension tail so four panels read as one scan
+        names.append(b.split(".")[0])
+    counts = collections.Counter(names)
+    lines = [f"  {n}" + (f"  ({c} panels)" if c > 1 else "")
+             for n, c in list(counts.items())[:limit]]
+    if len(counts) > limit:
+        lines.append(f"  ... and {len(counts) - limit} more scans.")
+
+    # The shared reason, as a CATEGORY. The raw text names every
+    # rejected candidate with its exposure, which is the log's job; what
+    # a dialog needs is the one sentence that tells you what to do.
+    def _category(why):
+        w = str(why).lower()
+        if "exposure" in w:
+            return ("no dark was found at these scans' exposure — the "
+                    "darks that exist were taken at a different one")
+        if "no dark-like file" in w:
+            return "no dark-like file was found anywhere under the "\
+                   "selected folder"
+        if "diffraction" in w:
+            return ("the only candidates carry diffraction, so they are "
+                    "not darks")
+        if "carries no ge" in w or "not found" in w:
+            return "the matching per-panel dark file does not exist"
+        return "no valid dark could be resolved"
+
+    common = collections.Counter(_category(w) for _p, w in skipped)
+    why = common.most_common(1)[0][0] if common else ""
+    if len(common) > 1:
+        why += f"  (+{len(common) - 1} other reason(s) — see the Log)"
+    return "\n".join(lines), why, len(counts)

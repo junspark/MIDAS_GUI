@@ -2580,8 +2580,8 @@ class BatchTab(QtWidgets.QWidget):
         # folder, so resolving here keeps ONE implementation and surfaces
         # an unresolvable dark now instead of in a screenlog hours later.
         # See .context/ROADMAP.md, "Background jobs and the dark".
-        from midas_gui.dark_policy import DarkTiffCache
-        dark_cache, argvs = DarkTiffCache(out_path), []
+        from midas_gui.dark_policy import DarkArgBuilder
+        dark_cache, argvs = DarkArgBuilder(out_path), []
         for gd, gp in targets:
             if not gp:
                 # An empty group carries no file to resolve a dark
@@ -2747,15 +2747,16 @@ class BatchTab(QtWidgets.QWidget):
         change is against.
         """
         self._report_dark_skips(skipped)
-        first = "\n".join(f"  {Path(p).name}: {w}" for p, w in skipped[:6])
-        more = f"\n  ... and {len(skipped) - 6} more." if len(skipped) > 6 else ""
+        from midas_gui.mail import summarise_skips
+        lines, why, n_scans = summarise_skips(skipped)
         btn = QtWidgets.QMessageBox.warning(
-            self, "Some folders have no valid dark",
-            f"{len(skipped)} source folder(s) will NOT be integrated because "
-            f"no valid dark could be resolved:\n\n{first}{more}\n\n"
+            self, "Some scans have no valid dark",
+            f"{n_scans} scan(s) will NOT be integrated:\n\n{lines}\n\n"
+            f"{why}.\n\n"
             f"They are skipped rather than corrected with another scan's "
-            f"dark, which would look plausible and be wrong.\n\n"
-            f"Submit the job for the remaining folders?",
+            f"dark, which would look plausible and be wrong. The full "
+            f"reason for each file is in the Log.\n\n"
+            f"Submit the job for the remaining scans?",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
             QtWidgets.QMessageBox.Yes)
         return btn == QtWidgets.QMessageBox.Yes

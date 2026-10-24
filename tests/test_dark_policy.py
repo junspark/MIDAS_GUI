@@ -355,7 +355,7 @@ def test_a_root_with_no_panel_token_scopes_to_nothing_rather_than_sharing():
     assert substitute_panel("/data/white_oct26", 2) is None
 
 
-# ── the background-job TIFF cache ───────────────────────────────────────
+# ── background-job --dark arguments ────────────────────────────────────
 
 def _scan(root, sub, name, *, exp, dark=None, data=None, shape=(16, 16)):
     import h5py
@@ -379,85 +379,81 @@ def _scan(root, sub, name, *, exp, dark=None, data=None, shape=(16, 16)):
     return p
 
 
-def test_many_steps_sharing_one_dark_write_one_tiff(tmp_path):
-    """The trap. A background job resolves a dark per step, but the steps
-    share darks: writing one 16 MB TIFF per (scan, panel) would put ~12 GB
-    of near-identical copies on a beamline share for a 190-scan run.
+def test_autodetect_passes_the_source_path_and_copies_nothing(tmp_path):
+    """The fix for what a real run exposed.
+
+    The first version wrote each resolved dark out as a pre-averaged
+    TIFF: 17 MB per (scan, panel), 816 MB and a visibly blocked GUI
+    before a 48-step job had launched -- to duplicate a file already on
+    disk. The job reads the original instead.
     """
-    pytest.importorskip("tifffile")
     tree = tmp_path / "tree"
-    _scan(tree, "Darks", "Darks_000100.ge1.h5", exp=10.0, dark=1778.0)
+    dark = _scan(tree, "Darks", "Darks_000100.ge1.h5", exp=10.0, dark=1778.0)
     scans = [_scan(tree, f"s{i}", f"s{i}_0001{i:02d}.ge1.h5", exp=10.0,
                    data=2100.0) for i in range(8)]
-    out = tmp_path / "out"
-    out.mkdir()
-    cache = D.DarkTiffCache(out)
+    out = tmp_path / "out"; out.mkdir()
+    b = D.DarkArgBuilder(out)
     req = D.DarkRequest(origin="folder_recursive", search_root=str(tree))
-    args = [cache.arg_for(s, req) for s in scans]
+    args = [b.arg_for(s, req) for s in scans]
 
-    assert all(a and a[0] == "--dark" for a in args), args
-    assert len({a[1] for a in args}) == 1, "the same dark was written twice"
-    assert cache.written() == 1
-    assert len(list(out.glob("*.tif"))) == 1
+    assert all(a[:2] == ["--dark", str(dark)] for a in args), args
+    assert all("--dark-dataset" in a for a in args)
+    assert b.written() == 0, "a TIFF was written for a dark already on disk"
+    assert list(out.glob("*.tif")) == []
 
 
-def test_steps_with_different_darks_each_get_their_own(tmp_path):
-    """Dedupe must not over-merge: two scans whose nearest preceding dark
-    differs must not share a TIFF."""
-    pytest.importorskip("tifffile")
+def test_each_scan_gets_the_dark_that_resolved_for_it(tmp_path):
+    """Passing paths must not blur which dark belongs to which scan."""
     tree = tmp_path / "tree"
-    _scan(tree, "d1", "d1_Darks_000100.ge1.h5", exp=10.0, dark=11.0)
-    _scan(tree, "d2", "d2_Darks_000200.ge1.h5", exp=10.0, dark=22.0)
+    d1 = _scan(tree, "d1", "d1_Darks_000100.ge1.h5", exp=10.0, dark=11.0)
+    d2 = _scan(tree, "d2", "d2_Darks_000200.ge1.h5", exp=10.0, dark=22.0)
     early = _scan(tree, "a", "a_000150.ge1.h5", exp=10.0, data=2100.0)
     late = _scan(tree, "b", "b_000250.ge1.h5", exp=10.0, data=2100.0)
     out = tmp_path / "out"; out.mkdir()
-    cache = D.DarkTiffCache(out)
+    b = D.DarkArgBuilder(out)
     req = D.DarkRequest(origin="folder_recursive", search_root=str(tree))
-    a, b = cache.arg_for(early, req), cache.arg_for(late, req)
-    assert a[1] != b[1], "two different darks collapsed into one file"
-    assert cache.written() == 2
+    assert b.arg_for(early, req)[1] == str(d1)
+    assert b.arg_for(late, req)[1] == str(d2)
+
+
+def test_an_explicit_dark_field_is_still_written_once_per_panel(tmp_path):
+    """The one case with no source file behind it: the loader hands us an
+    array, which may already honour a frame range the user set on it, so
+    re-reading the path would quietly ignore that. One TIFF per panel,
+    not per step."""
+    pytest.importorskip("tifffile")
+    scan = _scan(tmp_path / "t", "s", "s_000150.ge1.h5", exp=10.0, data=2100.0)
+    out = tmp_path / "out"; out.mkdir()
+    b = D.DarkArgBuilder(out)
+    req = D.DarkRequest(origin="files", array=np.full((16, 16), 7.0, np.float32))
+    a1 = b.arg_for(scan, req, tag="ge1")
+    a2 = b.arg_for(scan, req, tag="ge1")
+    a3 = b.arg_for(scan, req, tag="ge2")
+    assert a1 == a2 and a1[1] != a3[1]
+    assert b.written() == 2
+    assert "--dark-dataset" not in a1, "an explicit array has no dataset"
 
 
 def test_a_step_with_no_resolvable_dark_returns_none_and_is_recorded(tmp_path):
     """None, not an empty list: the caller must DROP the step. Returning
     [] would silently integrate it with no dark at all, and returning
     some other scan's dark is the error the policy exists to prevent."""
-    pytest.importorskip("tifffile")
     tree = tmp_path / "tree"
     _scan(tree, "Darks", "Darks_000100.ge1.h5", exp=0.1, dark=1778.0)
     scan = _scan(tree, "s", "s_000150.ge1.h5", exp=10.0, data=2100.0)
     out = tmp_path / "out"; out.mkdir()
-    cache = D.DarkTiffCache(out)
+    b = D.DarkArgBuilder(out)
     req = D.DarkRequest(origin="folder_recursive", search_root=str(tree))
-    assert cache.arg_for(scan, req) is None
-    assert len(cache.skipped) == 1
-    assert "exposure" in cache.skipped[0][1]
-    assert cache.written() == 0
+    assert b.arg_for(scan, req) is None
+    assert len(b.skipped) == 1 and "exposure" in b.skipped[0][1]
+    assert b.written() == 0
 
 
 def test_explicit_mode_with_no_dark_set_is_an_empty_arg_not_a_skip(tmp_path):
     """Running without a dark is legitimate when the user chose none; it
     must not be confused with failing to find one."""
-    pytest.importorskip("tifffile")
     scan = _scan(tmp_path / "t", "s", "s_000150.ge1.h5", exp=10.0, data=2100.0)
     out = tmp_path / "out"; out.mkdir()
-    cache = D.DarkTiffCache(out)
-    assert cache.arg_for(scan, D.DarkRequest(origin="files")) == []
-    assert cache.skipped == []
-
-
-def test_panels_do_not_share_a_tiff_even_for_an_identical_dark(tmp_path):
-    """``tag`` keys the cache per panel. Two panels' darks can be
-    numerically identical by chance; sharing the file would make a later
-    reader believe ge2 was corrected with ge1's dark."""
-    pytest.importorskip("tifffile")
-    tree = tmp_path / "tree"
-    _scan(tree, "Darks", "Darks_000100.ge1.h5", exp=10.0, dark=1778.0)
-    scan = _scan(tree, "s", "s_000150.ge1.h5", exp=10.0, data=2100.0)
-    out = tmp_path / "out"; out.mkdir()
-    cache = D.DarkTiffCache(out)
-    req = D.DarkRequest(origin="folder_recursive", search_root=str(tree))
-    a = cache.arg_for(scan, req, tag="ge1")
-    b = cache.arg_for(scan, req, tag="ge2")
-    assert a[1] != b[1]
-    assert cache.written() == 2
+    b = D.DarkArgBuilder(out)
+    assert b.arg_for(scan, D.DarkRequest(origin="files")) == []
+    assert b.skipped == []

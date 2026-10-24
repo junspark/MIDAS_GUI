@@ -157,6 +157,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--mask", default=None, help="Mask image (tif/h5); nonzero = masked")
     p.add_argument("--dark", default=None, help="Dark field image (tif/h5)")
+    p.add_argument("--dark-dataset", default=None,
+                   help="Dataset to average inside --dark when it is an "
+                        "HDF5 file (e.g. exchange/data_dark). Without it a "
+                        "a .h5 dark is read the same way an image is.")
     p.add_argument("--bright", default=None, help="Bright field image (tif/h5)")
     p.add_argument("--background", default=None, help="Background image (tif/h5)")
     p.add_argument("--bright-mode", default="divide", choices=["divide", "subtract"])
@@ -234,10 +238,20 @@ def _omega_cfg(args) -> dict:
             "collapse": bool(args.ome_collapse)}
 
 
-def _load_field(path):
+def _load_field(path, dataset=None):
+    """Load a correction field, averaging an HDF5 stack if ``dataset`` says
+    where it lives.
+
+    ``dataset`` exists so the GUI can hand over the dark's ORIGINAL FILE
+    rather than a pre-averaged TIFF copy. Copying was costing 17 MB per
+    (scan, panel) written at curation time -- 816 MB and a blocked GUI
+    before a 48-step job even launched -- for a file already on disk.
+    """
     if not path:
         return None
-    from midas_gui.helpers import _load_image
+    from midas_gui.helpers import _load_image, average_field, is_h5
+    if dataset and is_h5(path):
+        return average_field("hdf5", str(path), dataset)
     return _load_image(path)
 
 
@@ -308,7 +322,7 @@ def main(argv=None) -> int:
     mask = _load_field(args.mask)
     if mask is not None:
         mask = (mask != 0)
-    dark = _load_field(args.dark)
+    dark = _load_field(args.dark, args.dark_dataset)
     bright = _load_field(args.bright)
     background = _load_field(args.background)
     fmts = [f.strip() for f in args.fmts.split(",") if f.strip()]
