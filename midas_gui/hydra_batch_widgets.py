@@ -75,6 +75,12 @@ class HydraCakingSummary(QtWidgets.QWidget):
     #: The PAGE applies it to that panel's card -- the same division of
     #: labour as cakeLoadRequested, and what keeps the card authoritative.
     cakingEdited = QtCore.pyqtSignal(int, str, float)
+    #: Load / Save cake_parameters for ALL panels from the composite view.
+    #: The PAGE does the dialog and the path arithmetic, as it does for the
+    #: per-panel cards -- the beamline token and the analysis root come from
+    #: the loader and the Exp ID header, neither of which this widget sees.
+    cakeLoadAllRequested = QtCore.pyqtSignal()
+    cakeSaveAllRequested = QtCore.pyqtSignal()
 
     #: Columns, in cake_parameters CSV order.
     COLS = (("R_MIN", "Rmin"), ("R_MAX", "Rmax"), ("R_STEP", "R bin"),
@@ -123,6 +129,32 @@ class HydraCakingSummary(QtWidgets.QWidget):
         self._table.setSizePolicy(QtWidgets.QSizePolicy.Preferred,
                                   QtWidgets.QSizePolicy.Fixed)
         card.body.addWidget(self._table)
+        # Load/Save here as well as on the per-panel tabs. Loading one
+        # panel's CSV already populates its siblings, so the composite --
+        # where all four are visible at once -- is where a user most
+        # expects to do it, and having to open a panel tab first was
+        # reported as a missing button rather than a missing tab.
+        csv_row = QtWidgets.QHBoxLayout(); csv_row.setSpacing(4)
+        load_all = QtWidgets.QPushButton("Load cake CSV…")
+        load_all.setToolTip(
+            "Read an mpe_wf cake_parameters CSV into ALL FOUR panels.\n\n"
+            "Pick any one panel's file — cake_parameters.<beamline>.ge1.csv "
+            "and so on — and the other three are read from the files beside "
+            "it. Only panels whose file exists and parses are changed; the "
+            "Log says which were found, so a half-populated set is never "
+            "silent.\n\n"
+            "The panel is taken from the filename, so a file with no ge1-ge4 "
+            "token in its name cannot populate the others.")
+        load_all.clicked.connect(self.cakeLoadAllRequested.emit)
+        save_all = QtWidgets.QPushButton("Save cake CSVs…")
+        save_all.setToolTip(
+            "Write all four panels as cake_parameters.<beamline>.ge{n}.csv "
+            "— the names run_midas_for_cakes_gui.sh looks up under "
+            "<expid>_bc/, so the workflow and this GUI read the same files.")
+        save_all.clicked.connect(self.cakeSaveAllRequested.emit)
+        csv_row.addWidget(load_all); csv_row.addWidget(save_all)
+        csv_row.addStretch(1)
+        card.body.addLayout(csv_row)
         self._cake_extras = QtWidgets.QVBoxLayout()
         self._cake_extras.setContentsMargins(0, 0, 0, 0)
         card.body.addLayout(self._cake_extras)

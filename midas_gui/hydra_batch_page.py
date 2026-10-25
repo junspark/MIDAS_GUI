@@ -46,7 +46,7 @@ from midas_gui.widgets import (LogPanel, CorrectionFlagsWidget, WaterfallViewer,
                                StackedProfileViewer, OutputFormatSelector, ImageViewer,
                                OriginToolButton, build_lab_frame_axes_items)
 from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
-                                     panel_color)
+                                     panel_color, in_scroll_area)
 from midas_gui.hydra_batch_widgets import (HydraBatchPanelCard,
                                            HydraCakingSummary)
 from midas_gui.job_queue import JobQueuePanel
@@ -213,12 +213,11 @@ class HydraBatchPage(QtWidgets.QWidget):
         # ── LEFT: the Hydra data loader (streaming: frame range/stride +
         #    per-panel dark/bright/background/mask) ──
         self._loader = HydraLoaderPanel(mode="stream")
-        self._loader.setMinimumWidth(200)
         self._loader.siblingsChanged.connect(self._on_siblings_changed)
         self._loader.frameChanged.connect(
             lambda *_: (self.invalidate_composite(),
                         self._refresh_active_detector_preview()))
-        split.addWidget(self._loader)
+        split.addWidget(in_scroll_area(self._loader))
 
         # ── MIDDLE: shared "recipe" cards + per-panel card stack ──
         scroll = QtWidgets.QScrollArea()
@@ -660,6 +659,8 @@ class HydraBatchPage(QtWidgets.QWidget):
         # view that is about all four had no card of its own and simply
         # held whichever panel was last open.
         self._cake_summary = HydraCakingSummary()
+        self._cake_summary.cakeLoadAllRequested.connect(self._load_cake_csv_any)
+        self._cake_summary.cakeSaveAllRequested.connect(self._save_all_cake_csvs)
         self._load4_btn = QtWidgets.QPushButton("Load 4 panel calibrations…")
         self._load4_btn.setToolTip(
             "Pick ONE panel's calibration file. The other three are found "
@@ -1120,13 +1121,56 @@ class HydraBatchPage(QtWidgets.QWidget):
                          Path.home())
         return directory / f"cake_parameters.{beamline}.ge{n}.csv"
 
-    def _load_cake_csv(self, n: int) -> None:
+    def _load_cake_csv_any(self) -> None:
+        """Load cake parameters for every panel, from the composite view.
+
+        The panel is taken from the CHOSEN FILENAME rather than assumed to
+        be ge1: the user picks whichever file they have, and
+        ``_load_sibling_cake_csvs`` reads the rest from beside it. Assuming
+        ge1 would write ge4's numbers into ge1's fields for anyone who
+        picked ge4, which is both wrong and invisible.
+        """
+        start = str(self._cake_csv_path(min(self._cards) if self._cards else 1))
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load cake parameters (all panels)", start,
+            "CSV (*.csv);;All (*)")
+        if not path:
+            return
+        n = hydra.panel_for_file(path)
+        if n is None or n not in self._cards:
+            self._log.append(
+                f"[hydra batch] '{Path(path).name}' carries no ge1-ge4 token, "
+                f"so which panel it describes cannot be determined. Load it "
+                f"from that panel's own tab instead.")
+            QtWidgets.QMessageBox.warning(
+                self, "Which panel is this?",
+                f"{Path(path).name} has no ge1–ge4 in its name, so it cannot "
+                f"be matched to a panel or used to find the other three.\n\n"
+                f"Load it from the individual panel's tab instead.")
+            return
+        self._load_cake_csv(n, path=path)
+
+    def _save_all_cake_csvs(self) -> None:
+        """Write every panel's cake_parameters CSV in one go."""
+        done = []
+        for n in sorted(self._cards):
+            try:
+                self._save_cake_csv(n, ask=False)
+                done.append(f"ge{n}")
+            except Exception as exc:                      # pragma: no cover
+                self._log.append(f"[hydra batch] ge{n}: save failed — {exc}")
+        if done:
+            self._log.append(
+                f"[hydra batch] cake parameters written for {', '.join(done)}")
+
+    def _load_cake_csv(self, n: int, path: str = None) -> None:
         card = self._cards.get(n)
         if card is None:
             return
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, f"Load ge{n} cake parameters", str(self._cake_csv_path(n)),
-            "CSV (*.csv);;All (*)")
+        if not path:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, f"Load ge{n} cake parameters",
+                str(self._cake_csv_path(n)), "CSV (*.csv);;All (*)")
         if not path:
             return
         values = cake_params.parse_cake_csv(path)
@@ -1213,13 +1257,23 @@ class HydraBatchPage(QtWidgets.QWidget):
                 f"[hydra batch] no usable cake file beside it for "
                 f"{', '.join(f'ge{m}' for m in missing)} — left unchanged.")
 
-    def _save_cake_csv(self, n: int) -> None:
+    def _save_cake_csv(self, n: int, ask: bool = True) -> None:
+        """Write one panel's cake_parameters CSV.
+
+        ``ask=False`` writes straight to the conventional path, for the
+        composite "Save cake CSVs…" which covers all four — four
+        consecutive file dialogs for a set of names the convention
+        already fixes would be worse than no button.
+        """
         card = self._cards.get(n)
         if card is None:
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, f"Save ge{n} cake parameters", str(self._cake_csv_path(n)),
-            "CSV (*.csv);;All (*)")
+        if ask:
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, f"Save ge{n} cake parameters",
+                str(self._cake_csv_path(n)), "CSV (*.csv);;All (*)")
+        else:
+            path = str(self._cake_csv_path(n))
         if not path:
             return
         try:
