@@ -578,6 +578,30 @@ class HydraFieldSelector(QtWidgets.QGroupBox):
             self._update_frame_limit()
 
 
+def in_scroll_area(widget, *, minimum_width: int = 220):
+    """Wrap a side panel so a narrow splitter SCROLLS it, not clips it.
+
+    The three Hydra pages each put this loader straight into a splitter
+    under ``setMinimumWidth(200)``. An explicitly set minimum overrides
+    ``minimumSizeHint`` -- which is 542 px here -- so that line told Qt
+    the panel could be squeezed to 200 and Qt obliged by clipping its
+    children. Reported from the beamline: at a narrow width the combine
+    row's "op:" dropdown simply was not there, and "Add folder" read as
+    "dd folder".
+
+    Scrolling rather than a bigger minimum, because the minimum is what
+    makes the whole window unusable on a small screen: the panel keeps
+    its real width and the viewport scrolls to reach it.
+    """
+    area = QtWidgets.QScrollArea()
+    area.setWidgetResizable(True)
+    area.setWidget(widget)
+    area.setMinimumWidth(minimum_width)
+    area.setFrameShape(QtWidgets.QFrame.NoFrame)
+    area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+    return area
+
+
 class HydraLoaderPanel(QtWidgets.QWidget):
     """Left-hand loader for the Hydra page. One path field — point it at any
     single GE panel's file — auto-discovers the other panels via

@@ -281,3 +281,75 @@ def test_hydra_batch_run_orchestration_and_viewer_switching(app, fixture_availab
     page._toolbar.set_current("ge3")
     assert page._card_stack.currentWidget() is page._cards[3]
     assert page._viewer_stack.currentWidget() is page._viewer_pairs[3]
+
+
+# ── loading cake parameters from the composite view ─────────────────────
+
+def test_the_composite_view_offers_load_and_save(app):
+    """Asked for directly: the buttons existed only on the per-panel tabs,
+    so populating all four meant opening a panel tab first. The composite
+    is where all four are visible, and where one naturally does it."""
+    from PyQt5 import QtWidgets
+    from midas_gui.hydra_batch_widgets import HydraCakingSummary
+    w = HydraCakingSummary()
+    labels = [b.text() for b in w.findChildren(QtWidgets.QPushButton)]
+    assert any("Load cake CSV" in t for t in labels), labels
+    assert any("Save cake CSV" in t for t in labels), labels
+
+
+def test_those_buttons_reach_the_page(app):
+    """The widget cannot do the work — the beamline token and the analysis
+    root come from the loader and the Exp ID header, which it cannot see —
+    so it must signal rather than act."""
+    from PyQt5 import QtWidgets
+    from midas_gui.hydra_batch_widgets import HydraCakingSummary
+    w = HydraCakingSummary()
+    seen = []
+    w.cakeLoadAllRequested.connect(lambda: seen.append("load"))
+    w.cakeSaveAllRequested.connect(lambda: seen.append("save"))
+    for b in w.findChildren(QtWidgets.QPushButton):
+        b.click()
+    assert sorted(seen) == ["load", "save"]
+
+
+def test_the_panel_comes_from_the_filename_not_from_a_default():
+    """A composite load has no panel of its own, so it reads one out of
+    the chosen file. Defaulting to ge1 would write ge4's numbers into
+    ge1's fields for anyone who picked ge4 — wrong, and invisible."""
+    from midas_gui import hydra
+    assert hydra.panel_for_file("cake_parameters.1ide.ge1.csv") == 1
+    assert hydra.panel_for_file("cake_parameters.1ide.ge4.csv") == 4
+    assert hydra.panel_for_file("cake_params.csv") is None
+
+
+def test_a_narrow_window_scrolls_the_loader_instead_of_clipping_it(app):
+    """Reported from the beamline: at a narrow width the combine row's
+    "op:" dropdown was simply absent, and "Add folder" read "dd folder".
+
+    The cause was setMinimumWidth(200) on a panel whose minimumSizeHint
+    is 542. An explicitly set minimum OVERRIDES the hint, so that line
+    told Qt the panel could be squeezed to 200, and Qt obliged by
+    clipping the children -- there is no scrollbar on a plain widget, so
+    the controls were unreachable rather than merely small.
+    """
+    from PyQt5 import QtWidgets
+    from midas_gui.hydra_batch_page import HydraBatchPage
+    page = HydraBatchPage()
+    loader = page._loader
+
+    assert loader.minimumWidth() == 0, \
+        "an explicit minimum would again let Qt squeeze past the hint"
+    assert loader.minimumSizeHint().width() > 400
+
+    area = loader.parentWidget()
+    while area is not None and not isinstance(area, QtWidgets.QScrollArea):
+        area = area.parentWidget()
+    assert area is not None, "the loader is not scrollable"
+    assert area.minimumWidth() < loader.minimumSizeHint().width(), \
+        "the scroll area must be allowed narrower than its contents"
+
+    page.resize(700, 800)
+    page.show()
+    QtWidgets.QApplication.processEvents()
+    assert page._loader._combine_op.width() > 0, "the op combo collapsed"
+    page.hide()

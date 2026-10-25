@@ -45,7 +45,8 @@ from midas_gui.helpers import (
     default_radial_threshold_points, median_intensity_near_bc)
 from midas_gui.widgets import (PickableImageViewer, LogPanel, CakeViewer, _convert_radial,
                                OriginToolButton, RadialThresholdEditor)
-from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
+from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
+                                      HydraProfileViewer, in_scroll_area)
 from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
 from midas_gui.workers import CalibrationWorker, IntegrationWorker
 from midas_gui.dialogs import (DistortionRefineDialog, _SaveParamstestDialog,
@@ -235,11 +236,10 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._from_view_btn.clicked.connect(self.pullFromViewer.emit)
         ll.addWidget(self._from_view_btn)
         self._loader = HydraLoaderPanel()
-        self._loader.setMinimumWidth(200)
         self._loader.siblingsChanged.connect(self._on_siblings_changed)
         self._loader.frameChanged.connect(self._on_frame_changed)
         self._loader.fieldsChanged.connect(self._on_fields_changed)
-        ll.addWidget(self._loader, 1)
+        ll.addWidget(in_scroll_area(self._loader), 1)
         split.addWidget(left)
 
         # ── MIDDLE: shared "recipe" cards + per-panel card stack ──

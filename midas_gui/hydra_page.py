@@ -35,7 +35,8 @@ from midas_gui import hydra
 from midas_gui.helpers import (_load_image, _apply_im_trans, _fspin, apply_field_corrections,
                          geometry_fields_from_file, widgets_to_dict, apply_dict_to_widgets)
 from midas_gui.hydra_geometry_card import DetectorGeometryCard
-from midas_gui.hydra_widgets import HydraLoaderPanel, HydraDetectorToolbar, HydraProfileViewer
+from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
+                                      HydraProfileViewer, in_scroll_area)
 from midas_gui.roi_tools import ROIImageViewer, ROIRibbon
 from midas_gui.helpers import browse_start_dir
 from midas_gui.widgets import (_convert_radial, OriginToolButton,
@@ -99,12 +100,11 @@ class HydraViewerPage(QtWidgets.QWidget):
 
         # ── LEFT: Hydra data loader ──
         self._loader = HydraLoaderPanel()
-        self._loader.setMinimumWidth(200)
         self._loader.siblingsChanged.connect(self._on_siblings_changed)
         self._loader.frameChanged.connect(self._on_frame_changed)
         self._loader.fieldsChanged.connect(self._on_fields_changed)
         self._loader.projectionChanged.connect(self._on_fields_changed)
-        split.addWidget(self._loader)
+        split.addWidget(in_scroll_area(self._loader))
 
         # ── MIDDLE: Projection card (top) + one geometry card per panel +
         #    one for the composite (below, same as the single-detector tab's
