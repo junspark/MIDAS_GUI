@@ -457,3 +457,87 @@ def test_explicit_mode_with_no_dark_set_is_an_empty_arg_not_a_skip(tmp_path):
     b = D.DarkArgBuilder(out)
     assert b.arg_for(scan, D.DarkRequest(origin="files")) == []
     assert b.skipped == []
+
+
+# ── the worker's source probe ───────────────────────────────────────────
+
+@pytest.mark.parametrize("cfg,want_kind", [
+    ({"paths": ["/a/b.h5", "/a/c.h5"]}, "first"),
+    ({"path": "__REAL__"}, "real"),
+    ({"path": "/nope/missing.h5"}, None),
+    ({}, None),
+    (None, None),
+])
+def test_the_source_probe_handles_every_cfg_shape(tmp_path, cfg, want_kind):
+    """Regression: this raised NameError on the "path" branch.
+
+    `os` has no module-level import in workers.py -- the one other use
+    imports it locally -- so `os.path.isfile` here was a crash the moment
+    a source cfg carried `path` rather than `paths`, i.e. a single file
+    or a glob. Every existing test used `paths`, so the whole branch was
+    uncovered and the failure reached a live run.
+    """
+    from midas_gui.workers import BatchWorker
+
+    real = tmp_path / "scan.h5"
+    real.write_bytes(b"x")
+    if cfg and cfg.get("path") == "__REAL__":
+        cfg = {"path": str(real)}
+
+    class _Probe:
+        _src = cfg
+        _first_source_path = BatchWorker._first_source_path
+
+    got = _Probe()._first_source_path()
+    if want_kind == "first":
+        assert got == "/a/b.h5"
+    elif want_kind == "real":
+        assert got == str(real)
+    else:
+        assert got is None
+
+
+def test_a_single_file_source_still_gets_its_dark(tmp_path):
+    """The bug a live run caught: a background job silently integrated
+    with NO dark at all.
+
+    source_cfg() returns "path" for a single HDF5 file, not "paths", so
+    _run_as_job builds targets = [(out_dir, [])] -- one target with an
+    EMPTY file list. The empty-group guard added to stop an IndexError
+    then passed that case straight through without a dark, and nothing
+    said so: the profile simply kept its ~2000-count pedestal.
+
+    The probe falls back to the cfg's own path.
+    """
+    import numpy as _np
+    data = _scan(tmp_path / "t", "s", "s_000192.vrx.h5", exp=1.0, data=2100.0)
+    src_cfg = {"type": "hdf5", "path": str(data), "dataset": "exchange/data"}
+    targets = [(tmp_path / "out", [])]          # what _run_as_job builds
+    (tmp_path / "out").mkdir()
+
+    req = D.DarkRequest(origin="file", path=str(data),
+                        dataset="exchange/data_dark",
+                        array=_np.full((16, 16), 2000.0, _np.float32))
+    b = D.DarkArgBuilder(tmp_path / "out")
+    args = []
+    for _gd, gp in targets:
+        probe = gp[0] if gp else (src_cfg.get("path") or "")
+        args.append(b.arg_for(probe, req))
+
+    assert args[0] and args[0][0] == "--dark", \
+        "a single-file source was integrated with no dark"
+    assert b.written() == 1
+
+
+def test_an_explicit_dark_survives_a_probe_that_does_not_exist(tmp_path):
+    """Explicit mode already holds the array, so it must not depend on
+    the probe being readable — a glob source may have no single file to
+    point at."""
+    import numpy as _np
+    req = D.DarkRequest(origin="folder", path=None,
+                        dataset="exchange/data_dark",
+                        array=_np.full((8, 8), 7.0, _np.float32))
+    b = D.DarkArgBuilder(tmp_path)
+    got = b.arg_for("/no/such/file.h5", req)
+    assert got and got[0] == "--dark", got
+    assert b.skipped == []

@@ -2583,14 +2583,15 @@ class BatchTab(QtWidgets.QWidget):
         from midas_gui.dark_policy import DarkArgBuilder
         dark_cache, argvs = DarkArgBuilder(out_path), []
         for gd, gp in targets:
-            if not gp:
-                # An empty group carries no file to resolve a dark
-                # against. It was harmless before this loop existed and
-                # must stay harmless: pass it through untouched rather
-                # than indexing gp[0].
-                argvs.append(argv + _target_args(gp, gd))
-                continue
-            darg = dark_cache.arg_for(gp[0], self._loader.dark_request())
+            # A single HDF5 file comes through source_cfg() as "path",
+            # not "paths", so its group carries NO file list -- and an
+            # earlier version of this loop passed that case through
+            # without a dark at all, silently. The probe falls back to
+            # the cfg's own path; explicit mode does not really need one
+            # (the array is already in hand), but resolution wants
+            # something to read an exposure from.
+            probe = gp[0] if gp else (src_cfg.get("path") or "")
+            darg = dark_cache.arg_for(probe, self._loader.dark_request())
             if darg is None:
                 continue          # no valid dark — this folder is skipped
             argvs.append(argv + darg + _target_args(gp, gd))

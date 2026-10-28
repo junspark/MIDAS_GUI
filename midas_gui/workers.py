@@ -2434,8 +2434,15 @@ class BatchWorker(QtCore.QThread):
         if paths:
             return paths[0]
         one = cfg.get("path")
-        if one and os.path.isfile(str(one)):
-            return one
+        # Path, not os.path: this module has no module-level `import os`
+        # (the one other use imports it locally), and reaching for it here
+        # was a NameError that only fired on the "path" branch -- a single
+        # file or a glob -- which no test covered.
+        try:
+            if one and Path(str(one)).is_file():
+                return one
+        except OSError:
+            pass
         return None
 
     def _iter_frames(self, source):
