@@ -1443,22 +1443,30 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ── clean shutdown ─────────────────────────────────────────────
     def _stop_all_workers(self):
-        """Interruption-request + bounded-wait every background QThread on every
-        tab (and any parked orphans), so nothing is left running at teardown — a
-        live QThread at interpreter exit is a common hard-crash cause."""
-        tab_attrs = ("_view_tab", "_mask_tab", "_cal_tab", "_refine_tab",
-                     "_batch_tab", "_corr_tab", "_pdf_tab", "_tex_tab",
-                     "_pump_tab", "_export_tab")
-        threads = []
-        for a in tab_attrs:
-            tab = getattr(self, a, None)
-            if tab is None:
-                continue
-            for val in list(vars(tab).values()):
-                if isinstance(val, QtCore.QThread):
-                    threads.append(val)
-                elif isinstance(val, list):
-                    threads.extend(x for x in val if isinstance(x, QtCore.QThread))
+        """Interruption-request + bounded-wait every background QThread
+        anywhere under this window, so nothing is left running at
+        teardown -- a live QThread at interpreter exit is a common
+        hard-crash cause, and the symptom is
+        "QThread: Destroyed while thread is still running".
+
+        Walks the object graph rather than a hardcoded tab list. The list
+        version missed three different ways a worker can hide, all of
+        which were real:
+
+          * tabs nobody added to it -- _bcorr_tab, _queue_tab, _dexp_tab
+            and _zarr_tab were never in it;
+          * a worker one level further down -- the Hydra pages live at
+            _batch_tab._hydra_page, so none of their threads were ever
+            reached;
+          * a worker in a dict -- it traversed lists only, and
+            HydraLoaderPanel keeps its ProjectionWorkers in
+            ``_proj_workers``, keyed by panel.
+
+        A list has to be updated by whoever adds the next tab, and the
+        failure is silent until someone closes the GUI mid-run. Walking
+        costs milliseconds and cannot go stale.
+        """
+        threads = self._live_threads()
         for th in threads:                       # ask everyone to stop first
             try:
                 if th.isRunning():
@@ -1471,16 +1479,71 @@ class MainWindow(QtWidgets.QMainWindow):
                     th.wait(2000)
             except Exception:
                 pass
-        for a in tab_attrs:                      # then any tab-level explicit shutdown
-            tab = getattr(self, a, None)
-            if tab is None:
-                continue
+        for tab in self._all_tabs():             # then explicit shutdowns
             fn = getattr(tab, "shutdown", None)
             if callable(fn):
                 try:
                     fn()
                 except Exception:
                     pass
+
+    def _all_tabs(self):
+        """Every tab-like attribute of this window, however named."""
+        out = []
+        for name, val in list(vars(self).items()):
+            if name.endswith("_tab") and isinstance(val, QtCore.QObject):
+                out.append(val)
+        return out
+
+    def _live_threads(self, max_depth: int = 8):
+        """Every QThread reachable from this window.
+
+        Bounded by ``max_depth`` and by an identity set, and it only
+        recurses into QObjects, lists, tuples and dicts -- enough to find
+        a worker parked anywhere a tab actually puts one, without walking
+        into numpy arrays or the whole interpreter.
+
+        BREADTH-first, which is load-bearing rather than a style choice.
+        Depth-first plus an identity set loses objects: one reached first
+        by a LONG path is marked seen and its children pushed past
+        max_depth, so a later short path to it is then refused. That is
+        not hypothetical -- it is how the first version of this walk
+        failed to find a running worker five hops away with the limit set
+        to six. Breadth-first reaches everything at its minimum depth, so
+        the limit means what it says.
+        """
+        from collections import deque
+        seen, found = set(), []
+        stack = deque([(self, 0)])
+        while stack:
+            obj, depth = stack.popleft()
+            if obj is None or depth > max_depth:
+                continue
+            try:
+                key = id(obj)
+            except Exception:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                if isinstance(obj, QtCore.QThread):
+                    found.append(obj)
+                    continue
+                if isinstance(obj, (list, tuple, set, frozenset)):
+                    stack.extend((x, depth + 1) for x in obj)
+                    continue
+                if isinstance(obj, dict):
+                    stack.extend((x, depth + 1) for x in obj.values())
+                    continue
+                if isinstance(obj, QtCore.QObject):
+                    stack.extend((v, depth + 1)
+                                 for v in list(vars(obj).values()))
+            except (RuntimeError, ReferenceError, TypeError):
+                # A deleted C++ object raises on attribute access. It is
+                # by definition not a thread we need to stop.
+                continue
+        return found
 
     def closeEvent(self, event):
         if getattr(self, "_workspace_dirty", False) and not self._confirm_ok_to_switch_project():
